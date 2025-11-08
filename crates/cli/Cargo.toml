@@ -1,0 +1,64 @@
+[package]
+name = "guisu-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "CLI for guisu dotfile manager"
+
+[[bin]]
+name = "guisu"
+path = "src/main.rs"
+
+[lib]
+name = "guisu"
+
+[dependencies]
+guisu-config = { path = "../config" }
+guisu-core = { path = "../core" }
+guisu-crypto = { path = "../crypto" }
+guisu-engine = { path = "../engine" }
+guisu-template = { path = "../template" }
+
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+comfy-table = "7.2"
+console = "0.16"
+crossterm.workspace = true
+dialoguer = "0.12"
+dirs.workspace = true
+git2.workspace = true
+indexmap.workspace = true
+indicatif.workspace = true
+libc.workspace = true
+lscolors = "0.21"
+miette.workspace = true
+once_cell.workspace = true
+os_info.workspace = true
+rayon.workspace = true
+nu-ansi-term = "0.50"
+owo-colors = "4.2"
+ratatui.workspace = true
+rustix = { version = "1.0", features = ["process", "system"] }
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+similar.workspace = true
+subtle.workspace = true
+tempfile.workspace = true
+terminal_size.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+walkdir.workspace = true
+xdg = "3.0"
+
+[build-dependencies]
+anyhow.workspace = true
+vergen.workspace = true
+vergen-git2.workspace = true

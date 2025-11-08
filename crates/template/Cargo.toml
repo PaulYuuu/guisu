@@ -1,0 +1,42 @@
+[package]
+name = "guisu-template"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Template engine integration for guisu"
+
+[lib]
+name = "guisu_template"
+
+[dependencies]
+guisu-config = { path = "../config" }
+guisu-core = { path = "../core" }
+guisu-crypto = { path = "../crypto" }
+guisu-vault = { path = "../vault" }
+
+chrono.workspace = true
+dirs.workspace = true
+hostname = "0.4"
+indexmap.workspace = true
+minijinja.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+shell-words = "1.1"
+thiserror.workspace = true
+toml.workspace = true
+which.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.0", features = ["process", "system"] }
+uzers = "0.12"
+
+[features]
+default = ["bw", "bws", "rbw"]
+bw = ["guisu-vault/bw"]
+bws = ["guisu-vault/bws"]
+rbw = ["guisu-vault/rbw"]

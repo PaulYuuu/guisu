@@ -1,0 +1,37 @@
+# Rust Analyzer configuration for guisu project
+
+[check]
+command = "clippy"
+allTargets = true
+
+[cargo]
+features = "all"
+buildScripts.enable = true
+
+[procMacro]
+enable = true
+
+[diagnostics]
+enable = true
+disabled = []
+
+[completion]
+autoimport.enable = true
+
+[assist]
+importGranularity = "module"
+
+[inlayHints]
+enable = true
+chainingHints.enable = true
+parameterHints.enable = true
+typeHints.enable = true
+
+[lens]
+enable = true
+implementations.enable = true
+references.enable = true
+run.enable = true
+
+[hover]
+actions.enable = true

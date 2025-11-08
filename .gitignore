@@ -1,0 +1,36 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# IDE and editor files
+.vscode/
+.idea/
+.zed/
+*.swp
+*.swo
+*~
+
+# Local development
+.env
+.env.local
+*.local
+
+# Claude Code
+.claude
+CLAUDE.md
+.mcp.json
+
+# Documentation build artifacts
+/docs/_build/
+/docs/.doctrees/
+
+# Coverage reports
+*.gcda
+*.gcno
+*.gcov
+coverage/
+lcov.info
+
+# Logs
+*.log

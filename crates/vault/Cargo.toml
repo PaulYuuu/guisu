@@ -1,0 +1,30 @@
+[package]
+name = "guisu-vault"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license-file.workspace = true
+
+[lib]
+name = "guisu_vault"
+
+[dependencies]
+guisu-core = { path = "../core" }
+
+indexmap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process"], optional = true }
+tracing.workspace = true
+
+[features]
+default = ["bw", "bws", "rbw"]
+# CLI-based providers (no additional dependencies)
+bw = []  # Bitwarden CLI (bw.rs)
+bws = [] # Bitwarden Secrets Manager (bws.rs)
+rbw = [] # Unofficial Bitwarden CLI (rbw.rs)
+# Future: Native SDK support
+bw-sdk = ["tokio"]
+# Future: 1Password support
+op = [] # 1Password CLI

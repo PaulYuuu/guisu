@@ -1,0 +1,25 @@
+[package]
+name = "guisu-crypto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Encryption support for guisu using age"
+
+[lib]
+name = "guisu_crypto"
+
+[dependencies]
+guisu-core = { path = "../core" }
+
+age.workspace = true
+base64.workspace = true
+chrono.workspace = true
+once_cell.workspace = true
+regex.workspace = true
+secrecy.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

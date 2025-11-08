@@ -1,0 +1,12 @@
+[default.extend-words]
+# Legitimate library and company names
+ratatui = "ratatui"
+Hashi = "Hashi"
+HashiCorp = "HashiCorp"
+
+[default]
+# Ignore Unicode escape sequences
+extend-ignore-re = ['\\u\{[0-9a-fA-F]+\}']
+
+[files]
+extend-exclude = ["*.lock", "target/"]
