@@ -86,10 +86,11 @@ pub struct Hook {
     #[serde(default)]
     pub mode: HookMode,
 
-    /// Timeout in seconds (default: 300 seconds = 5 minutes)
+    /// Timeout in seconds (default: 0 = no timeout)
     ///
-    /// Prevents hooks from hanging indefinitely. Set to 0 for no timeout.
-    #[serde(default = "default_timeout")]
+    /// Set to 0 or omit for no timeout. Otherwise, the hook will be terminated
+    /// if it runs longer than the specified number of seconds.
+    #[serde(default)]
     pub timeout: u64,
 }
 
@@ -111,7 +112,6 @@ impl Hook {
     ///
     /// Checks for:
     /// - Either cmd or script (but not both)
-    /// - Valid timeout value
     /// - Valid platform names
     /// - Valid environment variable names
     /// - Non-empty name
@@ -138,15 +138,6 @@ impl Hook {
                 )));
             }
             _ => {}
-        }
-
-        // Validate timeout (max 24 hours = 86400 seconds)
-        const MAX_TIMEOUT_SECS: u64 = 86400;
-        if self.timeout > MAX_TIMEOUT_SECS {
-            return Err(crate::Error::HookConfig(format!(
-                "Hook '{}' has invalid timeout: {} seconds (max: {} seconds / 24 hours)",
-                self.name, self.timeout, MAX_TIMEOUT_SECS
-            )));
         }
 
         // Validate platform names (supported platforms)
@@ -266,11 +257,6 @@ pub enum HookMode {
 /// Default order value
 fn default_order() -> i32 {
     100
-}
-
-/// Default timeout value in seconds (5 minutes)
-fn default_timeout() -> u64 {
-    300
 }
 
 /// Default failfast value (true = stop on error)
@@ -463,7 +449,7 @@ impl HookLoader {
                         env: Default::default(),
                         failfast: true,
                         mode: HookMode::default(),
-                        timeout: default_timeout(),
+                        timeout: 0, // No timeout by default
                     };
                     return Ok(vec![hook]);
                 }
