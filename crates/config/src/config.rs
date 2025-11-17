@@ -820,31 +820,6 @@ impl Config {
 
         (self.ignore.global.clone(), platform_patterns.clone())
     }
-
-    /// Convert to ConfigInfo for template context
-    ///
-    /// This creates a simplified view of the configuration that is safe to expose
-    /// to templates. Sensitive information like identity file paths are not included.
-    pub fn to_config_info(&self) -> crate::config_info::ConfigInfo {
-        crate::config_info::ConfigInfo::new(
-            crate::config_info::AgeConfigInfo {
-                derive: self.age.derive,
-            },
-            crate::config_info::BitwardenConfigInfo {
-                provider: self.bitwarden.provider.clone(),
-            },
-            crate::config_info::UiConfigInfo {
-                icons: match self.ui.icons {
-                    IconMode::Auto => "auto".to_string(),
-                    IconMode::Always => "always".to_string(),
-                    IconMode::Never => "never".to_string(),
-                },
-                diff_format: self.ui.diff_format.clone(),
-                context_lines: self.ui.context_lines,
-                preview_lines: self.ui.preview_lines,
-            },
-        )
-    }
 }
 
 // Implement ConfigProvider trait for Config

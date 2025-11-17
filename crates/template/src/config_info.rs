@@ -4,6 +4,7 @@
 //! to the template engine. These are lighter-weight versions of the full
 //! Config structs, containing only the information needed by templates.
 
+use guisu_config::{Config, IconMode};
 use serde::{Deserialize, Serialize};
 
 /// Configuration information exposed to templates
@@ -64,4 +65,31 @@ pub struct UiConfigInfo {
     /// Number of lines to show in preview
     #[serde(rename = "previewLines")]
     pub preview_lines: usize,
+}
+
+/// Convert from guisu_config::Config to ConfigInfo
+///
+/// This creates a simplified view of the configuration that is safe to expose
+/// to templates. Sensitive information like identity file paths are not included.
+impl From<&Config> for ConfigInfo {
+    fn from(config: &Config) -> Self {
+        ConfigInfo::new(
+            AgeConfigInfo {
+                derive: config.age.derive,
+            },
+            BitwardenConfigInfo {
+                provider: config.bitwarden.provider.clone(),
+            },
+            UiConfigInfo {
+                icons: match config.ui.icons {
+                    IconMode::Auto => "auto".to_string(),
+                    IconMode::Always => "always".to_string(),
+                    IconMode::Never => "never".to_string(),
+                },
+                diff_format: config.ui.diff_format.clone(),
+                context_lines: config.ui.context_lines,
+                preview_lines: config.ui.preview_lines,
+            },
+        )
+    }
 }

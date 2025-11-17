@@ -4,6 +4,7 @@
 //! for testing and integration with other tools.
 
 pub mod cmd;
+pub mod logging;
 pub mod stats;
 pub mod ui;
 
@@ -409,7 +410,7 @@ pub enum HooksCommands {
 /// Main entry point for the CLI logic
 pub fn run(cli: Cli) -> Result<()> {
     // Initialize logging based on verbosity
-    guisu_config::logging::init(cli.verbose, cli.log_file.as_deref())?;
+    crate::logging::init(cli.verbose, cli.log_file.as_deref())?;
 
     // Save custom source for init command before it's consumed
     let custom_source = cli.source.clone();

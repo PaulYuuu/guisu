@@ -2,7 +2,7 @@
 //!
 //! Provides beautiful terminal output and optional file logging using tracing.
 
-use crate::Result;
+use anyhow::Result;
 use std::path::Path;
 use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
