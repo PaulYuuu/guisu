@@ -7,7 +7,7 @@
 //! The abstraction allows switching between implementations based on configuration
 //! or availability, similar to chezmoi's approach.
 
-use crate::Result;
+use guisu_core::Result;
 use std::path::Path;
 
 /// Helper function to convert git2 errors to guisu_core errors
@@ -355,6 +355,6 @@ fn count_new_commits(repo: &git2::Repository, new_commit: &git2::AnnotatedCommit
 }
 
 /// Create git provider (uses git2)
-pub fn create_provider(_use_builtin: &crate::config::AutoBool) -> Box<dyn GitProvider> {
+pub fn create_provider(_use_builtin: &guisu_config::config::AutoBool) -> Box<dyn GitProvider> {
     Box::new(Git2Provider::new())
 }

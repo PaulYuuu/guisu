@@ -24,6 +24,7 @@ bitflags.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 duct.workspace = true
+git2.workspace = true
 ignore.workspace = true
 indexmap.workspace = true
 os_info.workspace = true

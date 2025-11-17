@@ -17,6 +17,7 @@ pub mod content;
 pub mod database;
 pub mod entry;
 pub mod error;
+pub mod git;
 pub mod hooks;
 pub mod processor;
 pub mod state;

@@ -12,7 +12,6 @@
 pub mod config;
 pub mod config_info;
 pub mod dirs;
-pub mod git;
 pub mod ignores;
 pub mod logging;
 pub mod matcher;
