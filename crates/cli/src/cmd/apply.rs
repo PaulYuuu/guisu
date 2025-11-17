@@ -1165,9 +1165,8 @@ fn decrypt_inline_age_values(
             // This allows the file to be applied, but the application
             // will see "age:..." strings instead of plaintext
             //
-            // TODO: Consider adding a config option to fail loudly instead:
-            // [age]
-            // fail_on_decrypt_error = true
+            // NOTE: Future enhancement - add config option to fail loudly
+            // See CLAUDE.md: "Encryption Failure Handling Configuration"
             Ok(content.to_vec())
         }
     }

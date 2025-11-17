@@ -1075,8 +1075,10 @@ impl TargetState {
                 link_target,
                 ..
             } => {
-                // Symlinks don't have content processing
-                // TODO: Should we support templating in symlink targets?
+                // Symlinks don't have content processing currently
+                // NOTE: Future enhancement - support templating in symlink targets
+                // Chezmoi supports this via .tmpl suffix on symlink files
+                // See CLAUDE.md: "Symlink Target Templating"
                 Ok(TargetEntry::Symlink {
                     path: target_path.clone(),
                     target: link_target.clone(),
