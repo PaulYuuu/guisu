@@ -58,37 +58,49 @@ impl HookLoader {
 
     /// Load hooks from a specific directory (pre or post)
     fn load_hooks_from_dir(&self, dir: &Path) -> Result<Vec<Hook>> {
-        let mut entries: Vec<_> = fs::read_dir(dir)
+        use rayon::prelude::*;
+
+        // First pass: Collect and sort file paths (must be sequential)
+        let mut file_paths: Vec<PathBuf> = fs::read_dir(dir)
             .map_err(|e| {
                 Error::HookConfig(format!("Failed to read directory {}: {}", dir.display(), e))
             })?
             .filter_map(|e| e.ok())
             .filter(|e| e.path().is_file())
+            .map(|e| e.path())
+            .filter(|path| {
+                // Skip hidden files and editor backups
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    !file_name.starts_with('.')
+                        && !file_name.ends_with('~')
+                        && !file_name.ends_with(".swp")
+                } else {
+                    false
+                }
+            })
             .collect();
 
-        // Sort by filename (for numeric prefix ordering)
-        entries.sort_by_key(|e| e.file_name());
+        // Sort by filename for consistent ordering (important for numeric prefixes)
+        file_paths.sort();
 
-        let mut hooks = Vec::new();
-        let mut order = 0;
+        // Second pass: Parallel file loading and parsing
+        // Each file gets an order value based on its position (0, 10, 20, 30...)
+        let hooks_result: Result<Vec<Vec<Hook>>> = file_paths
+            .par_iter()
+            .enumerate()
+            .map(|(idx, path)| {
+                let base_order = (idx * 10) as i32;
+                tracing::debug!(
+                    "Loading hook file: {} (order: {})",
+                    path.display(),
+                    base_order
+                );
+                self.load_hook_file(path, base_order)
+            })
+            .collect();
 
-        for entry in entries {
-            let path = entry.path();
-            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-
-            tracing::debug!("Loading hook file: {}", path.display());
-
-            // Skip hidden files and editor backups
-            if file_name.starts_with('.') || file_name.ends_with('~') || file_name.ends_with(".swp")
-            {
-                tracing::debug!("Skipping hidden/backup file: {}", file_name);
-                continue;
-            }
-
-            let file_hooks = self.load_hook_file(&path, order)?;
-            order += file_hooks.len() as i32;
-            hooks.extend(file_hooks);
-        }
+        // Flatten results into single vector
+        let hooks = hooks_result?.into_iter().flatten().collect();
 
         Ok(hooks)
     }
