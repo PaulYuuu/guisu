@@ -314,6 +314,9 @@ pub fn run(
         }
     }
 
+    // Check and display hooks status
+    print_hooks_status(source_dir)?;
+
     Ok(())
 }
 
@@ -892,4 +895,61 @@ fn render_tree(
     if !is_single_file {
         println!();
     }
+}
+
+/// Check and print hooks status
+fn print_hooks_status(source_dir: &Path) -> Result<()> {
+    use guisu_config::hooks::HookLoader;
+    use guisu_engine::database;
+    use guisu_engine::state::{HookStatePersistence, RedbPersistentState};
+
+    let hooks_dir = source_dir.join(".guisu/hooks");
+
+    // Check if hooks directory exists
+    if !hooks_dir.exists() {
+        return Ok(());
+    }
+
+    // Load hooks
+    let loader = HookLoader::new(source_dir);
+    let collections = match loader.load() {
+        Ok(c) => c,
+        Err(_) => return Ok(()), // Silently skip if hooks fail to load
+    };
+
+    if collections.is_empty() {
+        return Ok(());
+    }
+
+    // Load state from database
+    let db_path = match database::get_db_path() {
+        Ok(p) => p,
+        Err(_) => return Ok(()), // Silently skip if can't get db path
+    };
+
+    let db = match RedbPersistentState::new(&db_path) {
+        Ok(d) => d,
+        Err(_) => return Ok(()), // Silently skip if can't open db
+    };
+
+    let persistence = HookStatePersistence::new(&db);
+    let state = match persistence.load() {
+        Ok(s) => s,
+        Err(_) => return Ok(()), // Silently skip if can't load state
+    };
+
+    let has_changed = state.has_changed(&hooks_dir)?;
+
+    // Only show message if hooks have changed
+    if has_changed {
+        println!();
+        println!(
+            "{} {}",
+            "Hooks:".bold(),
+            "Hooks have changed since last execution".yellow()
+        );
+        println!("  Run {} to execute hooks", "guisu hooks run".cyan());
+    }
+
+    Ok(())
 }

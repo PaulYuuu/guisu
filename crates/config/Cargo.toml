@@ -22,7 +22,9 @@ redb.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
+shell-words = "1.1"
 subtle.workspace = true
+tempfile = "3.10"
 thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true

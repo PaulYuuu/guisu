@@ -127,9 +127,13 @@ pub fn run(
     };
 
     println!();
+    let mut total_files_added = 0;
+
     for file_path in files {
-        let rel_path = add_file(&params, file_path)
+        let (rel_path, count) = add_file(&params, file_path)
             .with_context(|| format!("Failed to add file: {}", file_path.display()))?;
+
+        total_files_added += count;
 
         // Add to create-once list if requested
         if options.create {
@@ -152,12 +156,12 @@ pub fn run(
     println!(
         "\n  {} {}\n",
         "✓".bright_green(),
-        format!("Added {} file(s)", files.len()).bright_white()
+        format!("Added {} file(s)", total_files_added).bright_white()
     );
     Ok(())
 }
 
-fn add_file(params: &AddParams, file_path: &Path) -> Result<guisu_core::path::RelPath> {
+fn add_file(params: &AddParams, file_path: &Path) -> Result<(guisu_core::path::RelPath, usize)> {
     // Check if file is a symlink before canonicalization
     // This prevents symlink-based path traversal attacks
     let metadata = fs::symlink_metadata(file_path)
@@ -197,9 +201,9 @@ fn add_file(params: &AddParams, file_path: &Path) -> Result<guisu_core::path::Re
     let metadata = fs::metadata(file_abs.as_path())
         .with_context(|| format!("Failed to read metadata: {}", file_path.display()))?;
 
-    if metadata.is_dir() {
+    let count = if metadata.is_dir() {
         // Add directory recursively
-        add_directory(params, &file_abs, &rel_path)?;
+        add_directory(params, &file_abs, &rel_path)?
     } else if metadata.is_symlink() {
         // Add symlink
         add_symlink(
@@ -209,12 +213,14 @@ fn add_file(params: &AddParams, file_path: &Path) -> Result<guisu_core::path::Re
             params.force,
             params.config,
         )?;
+        1
     } else {
         // Add regular file
         add_regular_file(params, &rel_path, &file_abs)?;
-    }
+        1
+    };
 
-    Ok(rel_path)
+    Ok((rel_path, count))
 }
 
 /// Add a regular file to the source directory
@@ -424,7 +430,7 @@ fn add_directory(
     params: &AddParams,
     dir_abs: &AbsPath,
     rel_path: &guisu_core::path::RelPath,
-) -> Result<()> {
+) -> Result<usize> {
     // Create the directory in source (with root_entry if configured)
     let source_dir_path = params
         .source_dir
@@ -435,6 +441,8 @@ fn add_directory(
         .with_context(|| format!("Failed to create directory: {}", source_dir_path.display()))?;
 
     println!("  → {}", rel_path.to_string().bright_cyan());
+
+    let mut count = 0;
 
     // Walk the directory and add all files
     for entry in WalkDir::new(dir_abs.as_path())
@@ -474,12 +482,14 @@ fn add_directory(
                 params.force,
                 params.config,
             )?;
+            count += 1;
         } else {
             add_regular_file(params, &entry_rel, &entry_abs)?;
+            count += 1;
         }
     }
 
-    Ok(())
+    Ok(count)
 }
 
 /// Add a symlink to the source directory

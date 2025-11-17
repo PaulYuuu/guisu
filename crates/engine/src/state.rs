@@ -57,6 +57,14 @@ pub struct HookState {
     pub last_executed: Option<std::time::SystemTime>,
     /// SHA256 hash of the hooks directory content
     pub content_hash: Option<Vec<u8>>,
+    /// Names of hooks that have been executed with mode=once
+    /// These hooks will never be executed again unless state is reset
+    #[serde(default)]
+    pub once_executed: std::collections::HashSet<String>,
+    /// Content hashes for hooks with mode=onchange
+    /// Maps hook name to SHA256 hash of its content (cmd or script)
+    #[serde(default)]
+    pub onchange_hashes: std::collections::HashMap<String, Vec<u8>>,
 }
 
 impl HookState {
@@ -65,7 +73,36 @@ impl HookState {
         Self {
             last_executed: None,
             content_hash: None,
+            once_executed: std::collections::HashSet::new(),
+            onchange_hashes: std::collections::HashMap::new(),
         }
+    }
+
+    /// Check if a hook with mode=once has already been executed
+    pub fn has_executed_once(&self, hook_name: &str) -> bool {
+        self.once_executed.contains(hook_name)
+    }
+
+    /// Mark a hook with mode=once as executed
+    pub fn mark_executed_once(&mut self, hook_name: String) {
+        self.once_executed.insert(hook_name);
+    }
+
+    /// Check if a hook's content has changed (for mode=onchange)
+    ///
+    /// Returns true if:
+    /// - No hash is stored (first run)
+    /// - The stored hash differs from the provided hash
+    pub fn hook_content_changed(&self, hook_name: &str, content_hash: &[u8]) -> bool {
+        match self.onchange_hashes.get(hook_name) {
+            None => true, // First run
+            Some(stored_hash) => !bool::from(stored_hash.ct_eq(content_hash)),
+        }
+    }
+
+    /// Update the content hash for a hook with mode=onchange
+    pub fn update_onchange_hash(&mut self, hook_name: String, content_hash: Vec<u8>) {
+        self.onchange_hashes.insert(hook_name, content_hash);
     }
 
     /// Update the state from a hooks directory
@@ -105,40 +142,47 @@ impl HookState {
     /// Compute a hash of all files in a directory
     ///
     /// This creates a combined hash by:
-    /// 1. Collecting all file paths and their content hashes
-    /// 2. Sorting by path for deterministic ordering
-    /// 3. Computing a final hash of all combined hashes
+    /// 1. Collecting all file paths (sequential - required by WalkDir)
+    /// 2. Reading files and computing hashes in parallel
+    /// 3. Sorting by path for deterministic ordering
+    /// 4. Computing a final combined hash
     fn compute_directory_hash(dir: &Path) -> Result<Vec<u8>> {
-        let mut file_hashes: Vec<(String, Vec<u8>)> = Vec::new();
+        use rayon::prelude::*;
 
-        // Walk directory and collect file hashes
-        for entry in WalkDir::new(dir).follow_links(false).into_iter() {
-            let entry = entry.map_err(|e| Error::InvalidConfig {
-                message: format!("Failed to read hooks directory: {}", e),
-            })?;
+        // First pass: collect all file paths (must be sequential due to WalkDir)
+        let file_paths: Vec<std::path::PathBuf> = WalkDir::new(dir)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.path().to_path_buf())
+            .collect();
 
-            // Only process files
-            if !entry.file_type().is_file() {
-                continue;
-            }
+        // Second pass: parallel processing of files (read + hash)
+        // This is where the performance benefit comes from for large hook directories
+        let file_hashes: Result<Vec<(String, Vec<u8>)>> = file_paths
+            .par_iter()
+            .map(|path| {
+                // Get relative path
+                let rel_path = path
+                    .strip_prefix(dir)
+                    .map_err(|_| Error::InvalidConfig {
+                        message: format!("Invalid path in hooks directory: {}", path.display()),
+                    })?
+                    .to_string_lossy()
+                    .to_string();
 
-            let path = entry.path();
-            let rel_path = path
-                .strip_prefix(dir)
-                .map_err(|_| Error::InvalidConfig {
-                    message: format!("Invalid path in hooks directory: {}", path.display()),
-                })?
-                .to_string_lossy()
-                .to_string();
+                // Read file content and compute hash
+                let content = fs::read(path).map_err(|e| Error::InvalidConfig {
+                    message: format!("Failed to read hook file {}: {}", path.display(), e),
+                })?;
 
-            // Read file content and compute hash
-            let content = fs::read(path).map_err(|e| Error::InvalidConfig {
-                message: format!("Failed to read hook file {}: {}", path.display(), e),
-            })?;
+                let file_hash = hash_data(&content);
+                Ok((rel_path, file_hash))
+            })
+            .collect();
 
-            let file_hash = hash_data(&content);
-            file_hashes.push((rel_path, file_hash));
-        }
+        let mut file_hashes = file_hashes?;
 
         // Sort by path for deterministic hashing
         file_hashes.sort_by(|a, b| a.0.cmp(&b.0));

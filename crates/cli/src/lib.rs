@@ -279,7 +279,7 @@ Examples:
         user: bool,
     },
 
-    /// Manage hooks (run, list, check)
+    /// Manage hooks (run, list, show)
     #[command(subcommand)]
     Hooks(HooksCommands),
 }
@@ -386,6 +386,10 @@ pub enum HooksCommands {
         /// Skip confirmation prompt
         #[arg(short, long)]
         yes: bool,
+
+        /// Run only the specified hook by name (optional)
+        #[arg(long)]
+        hook: Option<String>,
     },
 
     /// List configured hooks
@@ -395,11 +399,10 @@ pub enum HooksCommands {
         format: String,
     },
 
-    /// Check hook configuration status
-    Check {
-        /// Output format (simple, json)
-        #[arg(short, long, default_value = "simple")]
-        format: String,
+    /// Show detailed information about a specific hook
+    Show {
+        /// Name of the hook to show
+        name: String,
     },
 }
 
@@ -624,14 +627,14 @@ pub fn run(cli: Cli) -> Result<()> {
             cmd::variables::run(&source_dir, &config, json, filter)?;
         }
         Commands::Hooks(hooks_cmd) => match hooks_cmd {
-            HooksCommands::Run { yes } => {
-                cmd::hooks::run_hooks(&source_dir, &config, yes)?;
+            HooksCommands::Run { yes, hook } => {
+                cmd::hooks::run_hooks(&source_dir, &config, yes, hook.as_deref())?;
             }
             HooksCommands::List { format } => {
                 cmd::hooks::run_list(&source_dir, &config, &format)?;
             }
-            HooksCommands::Check { format } => {
-                cmd::hooks::run_check(&source_dir, &config, &format)?;
+            HooksCommands::Show { name } => {
+                cmd::hooks::run_show(&source_dir, &config, &name)?;
             }
         },
     }
