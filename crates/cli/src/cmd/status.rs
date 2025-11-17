@@ -13,7 +13,6 @@ use guisu_engine::system::RealSystem;
 use owo_colors::OwoColorize;
 use rayon::prelude::*;
 use std::collections::BTreeMap;
-use std::fs;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
@@ -119,10 +118,11 @@ pub fn run(
 
     // Initialize lscolors from environment
     let lscolors = LsColors::from_env().unwrap_or_default();
-    // Get the actual dotfiles directory
-    let dotfiles_dir = config.dotfiles_dir(source_dir);
-    let source_abs = AbsPath::new(fs::canonicalize(&dotfiles_dir)?)?;
-    let dest_abs = AbsPath::new(fs::canonicalize(dest_dir)?)?;
+
+    // Resolve all paths (handles root_entry and canonicalization)
+    let paths = crate::common::ResolvedPaths::resolve(source_dir, dest_dir, config)?;
+    let source_abs = &paths.dotfiles_dir;
+    let dest_abs = &paths.dest_dir;
 
     // Load metadata for create-once tracking
     let metadata =
@@ -135,7 +135,7 @@ pub fn run(
 
     // Read source state with ignore matcher from config
     let source_state =
-        SourceState::read(source_abs.clone()).context("Failed to read source state")?;
+        SourceState::read(source_abs.to_owned()).context("Failed to read source state")?;
 
     if source_state.is_empty() {
         println!("No files managed yet.");
@@ -179,7 +179,7 @@ pub fn run(
 
     // Build filter paths if specific files were requested
     let filter_paths = if !files.is_empty() {
-        let paths = crate::build_filter_paths(files, &dest_abs)?;
+        let paths = crate::build_filter_paths(files, dest_abs)?;
         // Check if any files match
         let has_matches = source_state
             .entries()
@@ -281,8 +281,7 @@ pub fn run(
     }
 
     // Read destination state
-    let dest_abs_clone = dest_abs.clone();
-    let mut dest_state = DestinationState::new(dest_abs);
+    let mut dest_state = DestinationState::new(dest_abs.to_owned());
     let system = RealSystem;
 
     // Collect file information
@@ -291,7 +290,7 @@ pub fn run(
         target_state: &target_state,
         dest_state: &mut dest_state,
         system: &system,
-        dest_root: &dest_abs_clone,
+        dest_root: dest_abs,
         metadata: &metadata,
         filter_paths: filter_paths.as_ref(),
         ignore_matcher: &ignore_matcher,

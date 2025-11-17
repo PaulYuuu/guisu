@@ -4,6 +4,7 @@
 //! for testing and integration with other tools.
 
 pub mod cmd;
+pub mod common;
 pub mod logging;
 pub mod stats;
 pub mod ui;

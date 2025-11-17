@@ -17,10 +17,10 @@ pub fn run(source_dir: &Path, dest_dir: &Path, files: &[PathBuf], config: &Confi
         anyhow::bail!("No files specified. Usage: guisu cat <file>");
     }
 
-    // Get the actual dotfiles directory (may be a subdirectory)
-    let dotfiles_dir = config.dotfiles_dir(source_dir);
-    let source_abs = AbsPath::new(fs::canonicalize(&dotfiles_dir)?)?;
-    let dest_abs = AbsPath::new(fs::canonicalize(dest_dir)?)?;
+    // Resolve all paths (handles root_entry and canonicalization)
+    let paths = crate::common::ResolvedPaths::resolve(source_dir, dest_dir, config)?;
+    let source_abs = &paths.dotfiles_dir;
+    let dest_abs = &paths.dest_dir;
 
     // Create ignore matcher from .guisu/ignores.toml
     // Use dotfiles_dir as the match root so patterns match relative to the dotfiles directory
@@ -28,7 +28,8 @@ pub fn run(source_dir: &Path, dest_dir: &Path, files: &[PathBuf], config: &Confi
         .context("Failed to load ignore patterns from .guisu/ignores.toml")?;
 
     // Read source state
-    let source_state = SourceState::read(source_abs).context("Failed to read source state")?;
+    let source_state =
+        SourceState::read(source_abs.to_owned()).context("Failed to read source state")?;
 
     if source_state.is_empty() {
         anyhow::bail!("No files managed. Add files with: guisu add <file>");
@@ -38,7 +39,7 @@ pub fn run(source_dir: &Path, dest_dir: &Path, files: &[PathBuf], config: &Confi
     for file_path in files {
         cat_file(
             &source_state,
-            &dest_abs,
+            dest_abs,
             file_path,
             config,
             source_dir,

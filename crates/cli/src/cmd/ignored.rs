@@ -23,7 +23,6 @@ use guisu_config::Config;
 /// - Platform-specific patterns from `<platform>` section
 pub fn run_list(source_dir: &Path, config: &Config) -> Result<()> {
     let platform = CURRENT_PLATFORM.os;
-    use guisu_core::path::AbsPath;
     use guisu_engine::entry::SourceEntry;
     use guisu_engine::state::SourceState;
     use owo_colors::OwoColorize;
@@ -32,9 +31,14 @@ pub fn run_list(source_dir: &Path, config: &Config) -> Result<()> {
     let is_tty = std::io::stdout().is_terminal();
     let show_icons = config.ui.icons.should_show_icons(is_tty);
 
-    // Get the actual dotfiles directory (considering root_dir)
-    let dotfiles_dir = config.dotfiles_dir(source_dir);
-    let source_abs = AbsPath::new(std::fs::canonicalize(&dotfiles_dir)?)?;
+    // Resolve dotfiles directory (handles root_entry and canonicalization)
+    // Note: We don't need dest_dir for this command, but we pass home_dir for consistency
+    let paths = crate::common::ResolvedPaths::resolve(
+        source_dir,
+        &dirs::home_dir().unwrap_or_default(),
+        config,
+    )?;
+    let source_abs = &paths.dotfiles_dir;
 
     // Load ignore patterns from source_dir/.guisu/ignores.toml
     // Use dotfiles_dir as the match root so patterns match relative to the dotfiles directory
@@ -42,7 +46,8 @@ pub fn run_list(source_dir: &Path, config: &Config) -> Result<()> {
         .context("Failed to load ignore patterns from .guisu/ignores.toml")?;
 
     // Read ALL source files (without filtering by ignore patterns)
-    let source_state = SourceState::read(source_abs).context("Failed to read source state")?;
+    let source_state =
+        SourceState::read(source_abs.to_owned()).context("Failed to read source state")?;
 
     // Collect all ignored files with their target paths
     let mut ignored_files = Vec::new();

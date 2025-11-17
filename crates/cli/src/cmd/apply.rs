@@ -74,10 +74,11 @@ pub fn run(
 
     let exclude_types: Result<Vec<EntryType>> = options.exclude.iter().map(|s| s.parse()).collect();
     let _exclude_types = exclude_types?;
-    // Get the actual dotfiles directory (may be a subdirectory)
-    let dotfiles_dir = config.dotfiles_dir(source_dir);
-    let source_abs = AbsPath::new(fs::canonicalize(&dotfiles_dir)?)?;
-    let dest_abs = AbsPath::new(fs::canonicalize(dest_dir)?)?;
+
+    // Resolve all paths (handles root_entry and canonicalization)
+    let paths = crate::common::ResolvedPaths::resolve(source_dir, dest_dir, config)?;
+    let source_abs = &paths.dotfiles_dir;
+    let dest_abs = &paths.dest_dir;
 
     if options.dry_run {
         info!("{}", "Dry run mode - no changes will be made".dimmed());
@@ -143,7 +144,7 @@ pub fn run(
 
     // Build filter paths if specific files requested
     let filter_paths = if !files.is_empty() {
-        Some(crate::build_filter_paths(files, &dest_abs)?)
+        Some(crate::build_filter_paths(files, dest_abs)?)
     } else {
         None
     };
@@ -160,10 +161,10 @@ pub fn run(
 
     // Read source state with optional ignore filtering
     let source_state = if let Some(ref matcher) = matcher {
-        SourceState::read_with_matcher(source_abs.clone(), Some(matcher))
+        SourceState::read_with_matcher(source_abs.to_owned(), Some(matcher))
             .context("Failed to read source state with ignore matcher")?
     } else {
-        SourceState::read(source_abs.clone()).context("Failed to read source state")?
+        SourceState::read(source_abs.to_owned()).context("Failed to read source state")?
     };
 
     if let Some(spinner) = spinner {
@@ -259,7 +260,7 @@ pub fn run(
 
     // Check for configuration drift (files modified by user AND source updated)
     if !options.dry_run && !is_single_file {
-        let drift_warnings = detect_config_drift(&entries_to_apply, &dest_abs)?;
+        let drift_warnings = detect_config_drift(&entries_to_apply, dest_abs)?;
         if !drift_warnings.is_empty() {
             println!("\n{}", "Configuration Drift Detected".yellow().bold());
             println!(
@@ -330,7 +331,7 @@ pub fn run(
                     // Detect type of change
                     let change_type = ConflictHandler::detect_change_type(
                         entry,
-                        &dest_abs,
+                        dest_abs,
                         last_written_hash.as_deref(),
                         &identities,
                     )?;
@@ -339,7 +340,7 @@ pub fn run(
                         // Prompt user for action with change type information
                         // Note: We don't store full content in DB, only hash, so last_written_content is None
                         // This means merge operations will use two-way merge instead of three-way
-                        match handler.prompt_action(entry, &dest_abs, None, change_type)? {
+                        match handler.prompt_action(entry, dest_abs, None, change_type)? {
                             ConflictAction::Override => true,
                             ConflictAction::Skip => {
                                 debug!(path = %entry.path(), "Skipping due to user choice");
@@ -378,7 +379,7 @@ pub fn run(
                         // Detect type of change
                         let change_type = ConflictHandler::detect_change_type(
                             entry,
-                            &dest_abs,
+                            dest_abs,
                             last_written_hash.as_deref(),
                             &identities,
                         )?;
@@ -488,7 +489,7 @@ pub fn run(
             // Detect type of change
             if let Ok(Some(change_type)) = ConflictHandler::detect_change_type(
                 entry,
-                &dest_abs,
+                dest_abs,
                 last_written_hash.as_deref(),
                 &identities,
             ) {

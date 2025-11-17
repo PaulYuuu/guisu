@@ -32,10 +32,10 @@ pub fn run(
     interactive: bool,
     config: &Config,
 ) -> Result<()> {
-    // Get the actual dotfiles directory (may be a subdirectory)
-    let dotfiles_dir = config.dotfiles_dir(source_dir);
-    let source_abs = AbsPath::new(fs::canonicalize(&dotfiles_dir)?)?;
-    let dest_abs = AbsPath::new(fs::canonicalize(dest_dir)?)?;
+    // Resolve all paths (handles root_entry and canonicalization)
+    let paths = crate::common::ResolvedPaths::resolve(source_dir, dest_dir, config)?;
+    let source_abs = &paths.dotfiles_dir;
+    let dest_abs = &paths.dest_dir;
 
     // Get .guisu directory and platform name for loading variables and ignore patterns
     let guisu_dir = source_dir.join(".guisu");
@@ -52,7 +52,7 @@ pub fn run(
 
     // Read source state
     let source_state =
-        SourceState::read(source_abs.clone()).context("Failed to read source state")?;
+        SourceState::read(source_abs.to_owned()).context("Failed to read source state")?;
 
     if source_state.is_empty() {
         println!("No files to diff. Add files with: guisu add <file>");
@@ -95,7 +95,7 @@ pub fn run(
 
     // Build filter paths if specific files requested
     let filter_paths = if !files.is_empty() {
-        Some(crate::build_filter_paths(files, &dest_abs)?)
+        Some(crate::build_filter_paths(files, dest_abs)?)
     } else {
         None
     };
@@ -225,7 +225,7 @@ pub fn run(
                 }
             }
 
-            match diff_target_entry(entry, &dest_abs, &stats) {
+            match diff_target_entry(entry, dest_abs, &stats) {
                 Ok(entry_diff) => {
                     if !entry_diff.is_empty() {
                         Some(entry_diff)
