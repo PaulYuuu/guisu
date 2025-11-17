@@ -380,11 +380,6 @@ pub fn run_show(source_dir: &Path, config: &Config, hook_name: &str) -> Result<(
             }
         }
 
-        // Working directory
-        if let Some(ref working_dir) = hook.working_dir {
-            println!("{} {}", "Working directory:".bold(), working_dir);
-        }
-
         // Environment variables
         if !hook.env.is_empty() {
             println!("\n{}", "Environment variables:".bold());
@@ -394,7 +389,18 @@ pub fn run_show(source_dir: &Path, config: &Config, hook_name: &str) -> Result<(
         }
 
         // Timeout
-        println!("{} {} seconds", "Timeout:".bold(), hook.timeout_secs);
+        println!("{} {} seconds", "Timeout:".bold(), hook.timeout);
+
+        // Failfast
+        if hook.failfast {
+            println!("{} {} (stop on error)", "Failfast:".bold(), "true".green());
+        } else {
+            println!(
+                "{} {} (continue on error)",
+                "Failfast:".bold(),
+                "false".yellow()
+            );
+        }
 
         println!();
     } else {

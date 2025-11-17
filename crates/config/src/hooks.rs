@@ -67,17 +67,16 @@ pub struct Hook {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub script: Option<String>,
 
-    /// Working directory for the command/script
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub working_dir: Option<String>,
-
     /// Environment variables to set
     #[serde(default)]
     pub env: IndexMap<String, String>,
 
-    /// Continue on error (default: false)
-    #[serde(default)]
-    pub continue_on_error: bool,
+    /// Fail fast on error (default: true)
+    ///
+    /// If true, stop execution when this hook fails.
+    /// If false, continue executing remaining hooks even if this one fails.
+    #[serde(default = "default_failfast")]
+    pub failfast: bool,
 
     /// Execution mode (always, once, onchange)
     ///
@@ -91,11 +90,7 @@ pub struct Hook {
     ///
     /// Prevents hooks from hanging indefinitely. Set to 0 for no timeout.
     #[serde(default = "default_timeout")]
-    pub timeout_secs: u64,
-
-    /// Whether this hook script is a template (has .j2 extension)
-    #[serde(skip)]
-    pub is_template: bool,
+    pub timeout: u64,
 }
 
 impl Hook {
@@ -147,27 +142,15 @@ impl Hook {
 
         // Validate timeout (max 24 hours = 86400 seconds)
         const MAX_TIMEOUT_SECS: u64 = 86400;
-        if self.timeout_secs > MAX_TIMEOUT_SECS {
+        if self.timeout > MAX_TIMEOUT_SECS {
             return Err(crate::Error::HookConfig(format!(
                 "Hook '{}' has invalid timeout: {} seconds (max: {} seconds / 24 hours)",
-                self.name, self.timeout_secs, MAX_TIMEOUT_SECS
+                self.name, self.timeout, MAX_TIMEOUT_SECS
             )));
         }
 
-        // Validate platform names (common platforms)
-        const VALID_PLATFORMS: &[&str] = &[
-            "darwin",
-            "linux",
-            "windows",
-            "freebsd",
-            "openbsd",
-            "netbsd",
-            "dragonfly",
-            "solaris",
-            "illumos",
-            "android",
-            "ios",
-        ];
+        // Validate platform names (supported platforms)
+        const VALID_PLATFORMS: &[&str] = &["darwin", "linux", "windows"];
 
         for platform in &self.platforms {
             if !VALID_PLATFORMS.contains(&platform.as_str()) {
@@ -288,6 +271,11 @@ fn default_order() -> i32 {
 /// Default timeout value in seconds (5 minutes)
 fn default_timeout() -> u64 {
     300
+}
+
+/// Default failfast value (true = stop on error)
+fn default_failfast() -> bool {
+    true
 }
 
 // ======================================================================
@@ -450,71 +438,49 @@ impl HookLoader {
             .and_then(|n| n.to_str())
             .unwrap_or("unknown");
 
-        // Parse template extension first (e.g., "script.sh.j2" → (true, "script.sh"))
-        let (is_template, clean_name) = parse_template_extension(file_name);
+        // Get the extension
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-        // Get the base extension after removing .j2
-        let ext = get_base_extension(&clean_name).unwrap_or("");
+        // Configuration files - parse and load hooks
+        if ext == "toml" {
+            return self.load_toml_hooks(path, base_order);
+        }
 
-        match ext {
-            // Script files - create a hook that executes the script
-            "sh" | "bash" | "zsh" | "py" | "rb" | "pl" => {
-                let hook = Hook {
-                    name: clean_name.clone(),
-                    order: base_order,
-                    platforms: vec![],
-                    cmd: Some(path.to_string_lossy().to_string()),
-                    script: None,
-                    working_dir: None,
-                    env: Default::default(),
-                    continue_on_error: false,
-                    mode: HookMode::default(),
-                    timeout_secs: default_timeout(),
-                    is_template,
-                };
-                Ok(vec![hook])
-            }
-
-            // Configuration files - parse and load hooks
-            "toml" => self.load_toml_hooks(path, base_order),
-
-            // .j2 alone - skip (should have base extension like .sh.j2)
-            "j2" => {
-                tracing::warn!("Template file without base extension: {}", path.display());
-                Ok(vec![])
-            }
-
-            // Unknown extension - try to determine if executable
-            _ => {
-                // Check if file is executable
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let metadata = fs::metadata(path)?;
-                    let permissions = metadata.permissions();
-                    if permissions.mode() & 0o111 != 0 {
-                        // File is executable
-                        let hook = Hook {
-                            name: clean_name.clone(),
-                            order: base_order,
-                            platforms: vec![],
-                            cmd: Some(path.to_string_lossy().to_string()),
-                            script: None,
-                            working_dir: None,
-                            env: Default::default(),
-                            continue_on_error: false,
-                            mode: HookMode::default(),
-                            timeout_secs: default_timeout(),
-                            is_template,
-                        };
-                        return Ok(vec![hook]);
-                    }
+        // Check if file is executable
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = fs::metadata(path) {
+                let permissions = metadata.permissions();
+                if permissions.mode() & 0o111 != 0 {
+                    // File is executable - create hook
+                    let hook = Hook {
+                        name: file_name.to_string(),
+                        order: base_order,
+                        platforms: vec![],
+                        cmd: Some(path.to_string_lossy().to_string()),
+                        script: None,
+                        env: Default::default(),
+                        failfast: true,
+                        mode: HookMode::default(),
+                        timeout: default_timeout(),
+                    };
+                    return Ok(vec![hook]);
                 }
-
-                tracing::warn!("Skipping unknown file type: {}", path.display());
-                Ok(vec![])
             }
         }
+
+        #[cfg(not(unix))]
+        {
+            // On non-Unix systems, skip executable check
+            tracing::warn!(
+                "Executable check not supported on this platform: {}",
+                path.display()
+            );
+        }
+
+        tracing::warn!("Skipping non-executable file: {}", path.display());
+        Ok(vec![])
     }
 
     /// Load hooks from TOML file
@@ -559,9 +525,6 @@ impl HookLoader {
         if let Some(script) = &hook.script {
             // Skip absolute paths
             if script.starts_with('/') {
-                // Still check for .j2 extension on absolute paths
-                let (is_template, _clean_script) = parse_template_extension(script);
-                hook.is_template = is_template;
                 return Ok(());
             }
 
@@ -577,9 +540,9 @@ impl HookLoader {
             let script_abs = hook_dir.join(script);
 
             // Auto-detect .j2 template version
-            let (final_script_abs, is_template) = if script.ends_with(".j2") {
+            let final_script_abs = if script.ends_with(".j2") {
                 // Explicitly specified as template
-                (script_abs, true)
+                script_abs
             } else {
                 // Check if .j2 version exists
                 let template_version = hook_dir.join(format!("{}.j2", script));
@@ -589,14 +552,12 @@ impl HookLoader {
                         script,
                         template_version.display()
                     );
-                    (template_version, true)
+                    template_version
                 } else {
                     // Use original path
-                    (script_abs, false)
+                    script_abs
                 }
             };
-
-            hook.is_template = is_template;
 
             // Get source directory (.guisu/hooks -> .guisu -> source_dir)
             let source_dir = self
@@ -876,7 +837,7 @@ where
 
             // Validate hook
             if let Err(e) = hook.validate() {
-                if hook.continue_on_error {
+                if !hook.failfast {
                     tracing::warn!("Invalid hook '{}': {}", hook.name, e);
                     continue;
                 } else {
@@ -911,8 +872,8 @@ where
                         hook_name = %hook.name,
                         hook_order = hook.order,
                         hook_mode = ?hook.mode,
-                        timeout_secs = hook.timeout_secs,
-                        continue_on_error = hook.continue_on_error,
+                        timeout = hook.timeout,
+                        failfast = hook.failfast,
                     );
                     let _guard = span.enter();
 
@@ -931,11 +892,11 @@ where
                             );
                         }
                         Err(e) => {
-                            if hook.continue_on_error {
+                            if !hook.failfast {
                                 tracing::warn!(
                                     elapsed_ms = elapsed.as_millis(),
                                     error = %e,
-                                    "Hook failed but continuing"
+                                    "Hook failed but continuing (failfast=false)"
                                 );
                             } else {
                                 tracing::error!(
@@ -959,8 +920,8 @@ where
                         self.mark_hook_executed(hook, cached_hash);
                     }
                     Err(e) => {
-                        if hook.continue_on_error {
-                            // Still mark as executed for continue_on_error hooks
+                        if !hook.failfast {
+                            // Still mark as executed for non-failfast hooks
                             self.mark_hook_executed(hook, cached_hash);
                         } else {
                             // Fail-fast: return first error
@@ -979,18 +940,16 @@ where
 
     /// Execute a single hook
     fn execute_hook(&self, hook: &Hook) -> Result<()> {
-        // If hook uses 'script' and is a template, process it specially
-        if hook.script.is_some() && hook.is_template {
+        // If hook uses 'script' and is a template (.j2 extension), process it specially
+        if let Some(script) = &hook.script
+            && script.ends_with(".j2")
+        {
             return self.execute_template_script(hook);
         }
 
         // Determine working directory
-        let working_dir = if let Some(wd) = &hook.working_dir {
-            let expanded = self.expand_env_vars(wd);
-            std::path::PathBuf::from(expanded.into_owned())
-        } else {
-            self.source_dir.to_path_buf()
-        };
+        // Working directory is always source_dir
+        let working_dir = self.source_dir.to_path_buf();
 
         // Build environment variables (only clone if hook has custom env)
         let env = if hook.env.is_empty() {
@@ -1010,7 +969,7 @@ where
         match (&hook.cmd, &hook.script) {
             (Some(cmd), None) => {
                 // Direct command execution (no shell)
-                self.execute_command(cmd, &working_dir, &env, hook.timeout_secs)
+                self.execute_command(cmd, &working_dir, &env, hook.timeout)
                     .map_err(|e| {
                         crate::Error::HookExecution(format!(
                             "Hook '{}' command failed: {}",
@@ -1025,7 +984,7 @@ where
                 } else {
                     self.source_dir.join(script_path)
                 };
-                self.execute_script(&script_abs, &working_dir, &env, hook.timeout_secs)
+                self.execute_script(&script_abs, &working_dir, &env, hook.timeout)
                     .map_err(|e| {
                         crate::Error::HookExecution(format!(
                             "Hook '{}' script '{}' failed: {}",
@@ -1053,13 +1012,13 @@ where
     /// without invoking a shell. This prevents shell injection vulnerabilities.
     ///
     /// Supports quoted arguments: `git commit -m "Initial commit"`
-    #[tracing::instrument(skip(self, env), fields(cmd = %cmd, working_dir = %working_dir.display(), timeout_secs))]
+    #[tracing::instrument(skip(self, env), fields(cmd = %cmd, working_dir = %working_dir.display(), timeout))]
     fn execute_command(
         &self,
         cmd: &str,
         working_dir: &Path,
         env: &IndexMap<String, String>,
-        timeout_secs: u64,
+        timeout: u64,
     ) -> Result<()> {
         use std::time::Duration;
 
@@ -1081,8 +1040,8 @@ where
 
         tracing::debug!("Executing command: {} {:?}", program, args);
         tracing::debug!("Working directory: {}", working_dir.display());
-        if timeout_secs > 0 {
-            tracing::debug!("Timeout: {} seconds", timeout_secs);
+        if timeout > 0 {
+            tracing::debug!("Timeout: {} seconds", timeout);
         }
 
         // Build command
@@ -1092,16 +1051,16 @@ where
             .stderr_to_stdout();
 
         // Execute with or without timeout
-        if timeout_secs > 0 {
+        if timeout > 0 {
             let handle = cmd_builder.start().map_err(|e| {
                 crate::Error::HookExecution(format!("Failed to start command '{}': {}", program, e))
             })?;
 
-            match handle.wait_timeout(Duration::from_secs(timeout_secs)) {
+            match handle.wait_timeout(Duration::from_secs(timeout)) {
                 Ok(Some(_output)) => Ok(()),
                 Ok(None) => Err(crate::Error::HookExecution(format!(
                     "Command '{}' timed out after {} seconds",
-                    program, timeout_secs
+                    program, timeout
                 ))),
                 Err(e) => Err(crate::Error::HookExecution(format!(
                     "Command '{}' failed: {}",
@@ -1119,13 +1078,13 @@ where
     ///
     /// Reads the script's shebang line to determine the interpreter,
     /// then executes the script with that interpreter.
-    #[tracing::instrument(skip(self, env), fields(script_path = %script_path.display(), working_dir = %working_dir.display(), timeout_secs))]
+    #[tracing::instrument(skip(self, env), fields(script_path = %script_path.display(), working_dir = %working_dir.display(), timeout))]
     fn execute_script(
         &self,
         script_path: &Path,
         working_dir: &Path,
         env: &IndexMap<String, String>,
-        timeout_secs: u64,
+        timeout: u64,
     ) -> Result<()> {
         use std::time::Duration;
 
@@ -1138,8 +1097,8 @@ where
 
         tracing::debug!("Executing script: {}", script_path.display());
         tracing::debug!("Working directory: {}", working_dir.display());
-        if timeout_secs > 0 {
-            tracing::debug!("Timeout: {} seconds", timeout_secs);
+        if timeout > 0 {
+            tracing::debug!("Timeout: {} seconds", timeout);
         }
 
         // Parse shebang to get interpreter
@@ -1158,7 +1117,7 @@ where
             .stderr_to_stdout();
 
         // Execute with or without timeout
-        if timeout_secs > 0 {
+        if timeout > 0 {
             let handle = cmd_builder.start().map_err(|e| {
                 crate::Error::HookExecution(format!(
                     "Failed to start script '{}': {}",
@@ -1167,12 +1126,12 @@ where
                 ))
             })?;
 
-            match handle.wait_timeout(Duration::from_secs(timeout_secs)) {
+            match handle.wait_timeout(Duration::from_secs(timeout)) {
                 Ok(Some(_output)) => Ok(()),
                 Ok(None) => Err(crate::Error::HookExecution(format!(
                     "Script '{}' timed out after {} seconds",
                     script_path.display(),
-                    timeout_secs
+                    timeout
                 ))),
                 Err(e) => Err(crate::Error::HookExecution(format!(
                     "Script '{}' failed: {}",
@@ -1369,13 +1328,8 @@ where
             })?;
         }
 
-        // Determine working directory
-        let working_dir = if let Some(wd) = &hook.working_dir {
-            let expanded = self.expand_env_vars(wd);
-            PathBuf::from(expanded.into_owned())
-        } else {
-            self.source_dir.to_path_buf()
-        };
+        // Working directory is always source_dir
+        let working_dir = self.source_dir.to_path_buf();
 
         // Build environment variables (only clone if hook has custom env)
         let env = if hook.env.is_empty() {
@@ -1397,7 +1351,7 @@ where
 
         // Execute script using shebang (same as regular scripts)
         // temp_file is automatically deleted when dropped
-        self.execute_script(temp_path, &working_dir, &env, hook.timeout_secs)
+        self.execute_script(temp_path, &working_dir, &env, hook.timeout)
     }
 
     /// Expand environment variables in a string (simple ${VAR} expansion)
@@ -1644,33 +1598,4 @@ where
             )),
         }
     }
-}
-
-// ======================================================================
-// Helper functions for template extension parsing
-// ======================================================================
-
-/// Parse template extension from filename
-/// Returns (is_template, clean_name)
-///
-/// Examples:
-/// - "script.sh.j2" → (true, "script.sh")
-/// - "script.sh" → (false, "script.sh")
-fn parse_template_extension(filename: &str) -> (bool, String) {
-    if filename.ends_with(".j2") {
-        let clean = filename.strip_suffix(".j2").unwrap();
-        (true, clean.to_string())
-    } else {
-        (false, filename.to_string())
-    }
-}
-
-/// Get the base extension from a filename (ignoring .j2)
-///
-/// Examples:
-/// - "script.sh" → Some("sh")
-/// - "script.sh.j2" → (should call parse_template_extension first)
-/// - "script" → None
-fn get_base_extension(filename: &str) -> Option<&str> {
-    Path::new(filename).extension()?.to_str()
 }
