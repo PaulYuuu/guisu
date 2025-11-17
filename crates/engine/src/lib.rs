@@ -9,6 +9,7 @@
 //! - **Entry Types**: Representations of files, directories, and symlinks
 //! - **Content Processing**: Trait-based processing with pluggable decryption and rendering
 //! - **System Abstraction**: Filesystem operations abstracted for testing
+//! - **Hooks**: Hook system for custom commands and scripts
 
 pub mod adapters;
 pub mod attr;
@@ -16,6 +17,7 @@ pub mod content;
 pub mod database;
 pub mod entry;
 pub mod error;
+pub mod hooks;
 pub mod processor;
 pub mod state;
 pub mod system;

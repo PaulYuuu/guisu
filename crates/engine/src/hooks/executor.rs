@@ -1,578 +1,14 @@
-//! Hook system for custom commands
+//! Hook execution engine
 //!
-//! Provides a flexible hook system that can execute scripts or commands
-//! at different stages (pre, post) with ordering and parallel execution support.
-//!
-//! ## Execution Model
-//!
-//! - Hooks are executed before and after applying dotfiles
-//! - Different order values execute sequentially (order 10 before order 20)
-//! - Hooks with the same order value execute **in parallel** for maximum performance
-//! - Supports execution modes: Always, Once, OnChange
+//! Provides parallel hook execution with template rendering support.
 
-use crate::Result;
+use super::config::{Hook, HookCollections, HookMode, HookStage};
 use guisu_core::platform::CURRENT_PLATFORM;
+use guisu_core::{Error, Result};
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
-use subtle::ConstantTimeEq;
-
-/// Collections of hooks for different stages
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct HookCollections {
-    /// Hooks to run before applying dotfiles
-    #[serde(default)]
-    pub pre: Vec<Hook>,
-
-    /// Hooks to run after applying dotfiles
-    #[serde(default)]
-    pub post: Vec<Hook>,
-}
-
-impl HookCollections {
-    /// Check if there are no hooks defined
-    pub fn is_empty(&self) -> bool {
-        self.pre.is_empty() && self.post.is_empty()
-    }
-
-    /// Get total number of hooks
-    pub fn total(&self) -> usize {
-        self.pre.len() + self.post.len()
-    }
-}
-
-/// A single hook definition
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Hook {
-    /// Name of the hook (for logging and identification)
-    pub name: String,
-
-    /// Execution order (lower numbers run first)
-    #[serde(default = "default_order")]
-    pub order: i32,
-
-    /// Platforms this hook should run on (empty = all platforms)
-    #[serde(default)]
-    pub platforms: Vec<String>,
-
-    /// Direct command to execute
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cmd: Option<String>,
-
-    /// Path to script file to execute
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub script: Option<String>,
-
-    /// Environment variables to set
-    #[serde(default)]
-    pub env: IndexMap<String, String>,
-
-    /// Fail fast on error (default: true)
-    ///
-    /// If true, stop execution when this hook fails.
-    /// If false, continue executing remaining hooks even if this one fails.
-    #[serde(default = "default_failfast")]
-    pub failfast: bool,
-
-    /// Execution mode (always, once, onchange)
-    ///
-    /// - `always`: Run every time (default)
-    /// - `once`: Run only once, tracked by name
-    /// - `onchange`: Run when hook content changes, tracked by content hash
-    #[serde(default)]
-    pub mode: HookMode,
-
-    /// Timeout in seconds (default: 0 = no timeout)
-    ///
-    /// Set to 0 or omit for no timeout. Otherwise, the hook will be terminated
-    /// if it runs longer than the specified number of seconds.
-    #[serde(default)]
-    pub timeout: u64,
-}
-
-impl Hook {
-    /// Get the content of this hook for hashing (used in onchange mode)
-    ///
-    /// Returns the cmd or script content that should be hashed to detect changes
-    pub fn get_content(&self) -> String {
-        if let Some(cmd) = &self.cmd {
-            cmd.clone()
-        } else if let Some(script) = &self.script {
-            script.clone()
-        } else {
-            String::new()
-        }
-    }
-
-    /// Validate hook configuration
-    ///
-    /// Checks for:
-    /// - Either cmd or script (but not both)
-    /// - Valid platform names
-    /// - Valid environment variable names
-    /// - Non-empty name
-    pub fn validate(&self) -> Result<()> {
-        // Check name is not empty
-        if self.name.is_empty() {
-            return Err(crate::Error::HookConfig(
-                "Hook name cannot be empty".to_string(),
-            ));
-        }
-
-        // Check cmd/script exclusivity
-        match (&self.cmd, &self.script) {
-            (None, None) => {
-                return Err(crate::Error::HookConfig(format!(
-                    "Hook '{}' must have either 'cmd' or 'script'",
-                    self.name
-                )));
-            }
-            (Some(_), Some(_)) => {
-                return Err(crate::Error::HookConfig(format!(
-                    "Hook '{}' cannot have both 'cmd' and 'script'",
-                    self.name
-                )));
-            }
-            _ => {}
-        }
-
-        // Validate platform names (supported platforms)
-        const VALID_PLATFORMS: &[&str] = &["darwin", "linux", "windows"];
-
-        for platform in &self.platforms {
-            if !VALID_PLATFORMS.contains(&platform.as_str()) {
-                tracing::warn!(
-                    hook_name = %self.name,
-                    platform = %platform,
-                    "Hook specifies unknown platform (typo?). Valid platforms: {}",
-                    VALID_PLATFORMS.join(", ")
-                );
-            }
-        }
-
-        // Validate environment variable names (basic check: alphanumeric + underscore)
-        for (key, _value) in &self.env {
-            if key.is_empty() {
-                return Err(crate::Error::HookConfig(format!(
-                    "Hook '{}' has empty environment variable name",
-                    self.name
-                )));
-            }
-
-            // Check if env var name is valid (starts with letter/underscore, contains alphanumeric/underscore)
-            if !key
-                .chars()
-                .next()
-                .map(|c| c.is_ascii_alphabetic() || c == '_')
-                .unwrap_or(false)
-            {
-                return Err(crate::Error::HookConfig(format!(
-                    "Hook '{}' has invalid environment variable name '{}': must start with letter or underscore",
-                    self.name, key
-                )));
-            }
-
-            if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                return Err(crate::Error::HookConfig(format!(
-                    "Hook '{}' has invalid environment variable name '{}': must contain only alphanumeric characters and underscores",
-                    self.name, key
-                )));
-            }
-        }
-
-        // Validate cmd/script is not empty
-        if let Some(cmd) = &self.cmd
-            && cmd.trim().is_empty()
-        {
-            return Err(crate::Error::HookConfig(format!(
-                "Hook '{}' has empty 'cmd' field",
-                self.name
-            )));
-        }
-
-        if let Some(script) = &self.script
-            && script.trim().is_empty()
-        {
-            return Err(crate::Error::HookConfig(format!(
-                "Hook '{}' has empty 'script' field",
-                self.name
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// Check if this hook should run on the given platform
-    pub fn should_run_on(&self, platform: &str) -> bool {
-        self.platforms.is_empty() || self.platforms.iter().any(|p| p == platform)
-    }
-}
-
-/// Hook execution stage
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HookStage {
-    /// Before applying dotfiles
-    Pre,
-    /// After applying dotfiles
-    Post,
-}
-
-impl HookStage {
-    pub fn name(&self) -> &'static str {
-        match self {
-            HookStage::Pre => "pre",
-            HookStage::Post => "post",
-        }
-    }
-}
-
-/// Hook execution mode
-///
-/// Controls when a hook should be executed based on its execution history
-/// and content changes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum HookMode {
-    /// Always run the hook (default behavior)
-    #[default]
-    Always,
-
-    /// Run the hook only once, ever
-    ///
-    /// After successful execution, the hook will never run again unless
-    /// the state is manually reset. Tracked by hook name in persistent state.
-    Once,
-
-    /// Run the hook when its content changes
-    ///
-    /// The hook's content (script or command) is hashed and compared with
-    /// the previous execution. Runs again when the hash differs.
-    OnChange,
-}
-
-/// Default order value
-fn default_order() -> i32 {
-    100
-}
-
-/// Default failfast value (true = stop on error)
-fn default_failfast() -> bool {
-    true
-}
-
-// ======================================================================
-
-/// Hook configuration state
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HookState {
-    /// SHA256 hash of the configuration file content
-    pub config_hash: Vec<u8>,
-
-    /// Last execution timestamp
-    pub last_executed: SystemTime,
-}
-
-impl Default for HookState {
-    fn default() -> Self {
-        Self {
-            config_hash: Vec::new(),
-            last_executed: SystemTime::UNIX_EPOCH,
-        }
-    }
-}
-
-impl HookState {
-    /// Create a new state with config hash
-    pub fn new(config_path: &Path) -> Result<Self> {
-        let config_hash = Self::compute_config_hash(config_path)?;
-        Ok(Self {
-            config_hash,
-            last_executed: SystemTime::now(),
-        })
-    }
-
-    /// Compute SHA256 hash of a configuration file
-    pub fn compute_config_hash(config_path: &Path) -> Result<Vec<u8>> {
-        let content = fs::read(config_path).map_err(|e| {
-            crate::Error::State(format!(
-                "Failed to read config file {}: {}",
-                config_path.display(),
-                e
-            ))
-        })?;
-
-        let mut hasher = Sha256::new();
-        hasher.update(&content);
-        Ok(hasher.finalize().to_vec())
-    }
-
-    /// Check if configuration has changed since last execution
-    pub fn has_changed(&self, config_path: &Path) -> Result<bool> {
-        let current_hash = Self::compute_config_hash(config_path)?;
-        // Use constant-time comparison for hash to prevent timing side-channel attacks
-        Ok(!bool::from(self.config_hash.ct_eq(&current_hash)))
-    }
-
-    /// Update state with new config hash
-    pub fn update(&mut self, config_path: &Path) -> Result<()> {
-        self.config_hash = Self::compute_config_hash(config_path)?;
-        self.last_executed = SystemTime::now();
-        Ok(())
-    }
-}
-
-// ======================================================================
-
-/// Discover and load hooks from the hooks directory
-pub struct HookLoader {
-    hooks_dir: PathBuf,
-}
-
-impl HookLoader {
-    /// Create a new hook loader for the given source directory
-    pub fn new(source_dir: &Path) -> Self {
-        Self {
-            hooks_dir: source_dir.join(".guisu/hooks"),
-        }
-    }
-
-    /// Check if hooks directory exists
-    pub fn exists(&self) -> bool {
-        self.hooks_dir.exists()
-    }
-
-    /// Load all hooks from the hooks directory
-    pub fn load(&self) -> Result<HookCollections> {
-        if !self.hooks_dir.exists() {
-            tracing::debug!(
-                "Hooks directory does not exist: {}",
-                self.hooks_dir.display()
-            );
-            return Ok(HookCollections::default());
-        }
-
-        let mut collections = HookCollections::default();
-
-        // Load pre hooks
-        let pre_dir = self.hooks_dir.join("pre");
-        if pre_dir.exists() {
-            collections.pre = self.load_hooks_from_dir(&pre_dir).map_err(|e| {
-                crate::Error::HookConfig(format!("Failed to load pre hooks: {}", e))
-            })?;
-        }
-
-        // Load post hooks
-        let post_dir = self.hooks_dir.join("post");
-        if post_dir.exists() {
-            collections.post = self.load_hooks_from_dir(&post_dir).map_err(|e| {
-                crate::Error::HookConfig(format!("Failed to load post hooks: {}", e))
-            })?;
-        }
-
-        Ok(collections)
-    }
-
-    /// Load hooks from a specific directory (pre or post)
-    fn load_hooks_from_dir(&self, dir: &Path) -> Result<Vec<Hook>> {
-        let mut entries: Vec<_> = fs::read_dir(dir)
-            .map_err(|e| {
-                crate::Error::HookConfig(format!(
-                    "Failed to read directory {}: {}",
-                    dir.display(),
-                    e
-                ))
-            })?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_file())
-            .collect();
-
-        // Sort by filename (for numeric prefix ordering)
-        entries.sort_by_key(|e| e.file_name());
-
-        let mut hooks = Vec::new();
-        let mut order = 0;
-
-        for entry in entries {
-            let path = entry.path();
-            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-
-            tracing::debug!("Loading hook file: {}", path.display());
-
-            // Skip hidden files and editor backups
-            if file_name.starts_with('.') || file_name.ends_with('~') || file_name.ends_with(".swp")
-            {
-                tracing::debug!("Skipping hidden/backup file: {}", file_name);
-                continue;
-            }
-
-            let file_hooks = self.load_hook_file(&path, order)?;
-            order += file_hooks.len() as i32;
-            hooks.extend(file_hooks);
-        }
-
-        Ok(hooks)
-    }
-
-    /// Load hooks from a single file
-    fn load_hook_file(&self, path: &Path, base_order: i32) -> Result<Vec<Hook>> {
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown");
-
-        // Get the extension
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-
-        // Configuration files - parse and load hooks
-        if ext == "toml" {
-            return self.load_toml_hooks(path, base_order);
-        }
-
-        // Check if file is executable
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(metadata) = fs::metadata(path) {
-                let permissions = metadata.permissions();
-                if permissions.mode() & 0o111 != 0 {
-                    // File is executable - create hook
-                    let hook = Hook {
-                        name: file_name.to_string(),
-                        order: base_order,
-                        platforms: vec![],
-                        cmd: Some(path.to_string_lossy().to_string()),
-                        script: None,
-                        env: Default::default(),
-                        failfast: true,
-                        mode: HookMode::default(),
-                        timeout: 0, // No timeout by default
-                    };
-                    return Ok(vec![hook]);
-                }
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            // On non-Unix systems, skip executable check
-            tracing::warn!(
-                "Executable check not supported on this platform: {}",
-                path.display()
-            );
-        }
-
-        tracing::warn!("Skipping non-executable file: {}", path.display());
-        Ok(vec![])
-    }
-
-    /// Load hooks from TOML file
-    fn load_toml_hooks(&self, path: &Path, _base_order: i32) -> Result<Vec<Hook>> {
-        let content = fs::read_to_string(path).map_err(|e| {
-            crate::Error::HookConfig(format!(
-                "Failed to read TOML file {}: {}",
-                path.display(),
-                e
-            ))
-        })?;
-
-        // Try to parse as array of hooks first
-        if let Ok(mut hooks) = toml::from_str::<Vec<Hook>>(&content) {
-            // Resolve script paths relative to hook file directory
-            for hook in &mut hooks {
-                self.resolve_script_path(hook, path)?;
-            }
-            return Ok(hooks);
-        }
-
-        // Try to parse as single hook
-        if let Ok(mut hook) = toml::from_str::<Hook>(&content) {
-            // Resolve script path relative to hook file directory
-            self.resolve_script_path(&mut hook, path)?;
-            return Ok(vec![hook]);
-        }
-
-        Err(crate::Error::HookConfig(format!(
-            "Failed to parse TOML hooks from: {}",
-            path.display()
-        )))
-    }
-
-    /// Resolve script path relative to hook file directory
-    ///
-    /// This function supports automatic .j2 template detection:
-    /// - If script = "script.sh.j2", uses it directly as a template
-    /// - If script = "script.sh" and "script.sh.j2" exists, uses the template version
-    /// - Otherwise, uses the specified path as-is
-    fn resolve_script_path(&self, hook: &mut Hook, hook_file_path: &Path) -> Result<()> {
-        if let Some(script) = &hook.script {
-            // Skip absolute paths
-            if script.starts_with('/') {
-                return Ok(());
-            }
-
-            // Get hook file directory
-            let hook_dir = hook_file_path.parent().ok_or_else(|| {
-                crate::Error::HookConfig(format!(
-                    "Cannot get parent directory of hook file: {}",
-                    hook_file_path.display()
-                ))
-            })?;
-
-            // Resolve script path relative to hook directory
-            let script_abs = hook_dir.join(script);
-
-            // Auto-detect .j2 template version
-            let final_script_abs = if script.ends_with(".j2") {
-                // Explicitly specified as template
-                script_abs
-            } else {
-                // Check if .j2 version exists
-                let template_version = hook_dir.join(format!("{}.j2", script));
-                if template_version.exists() {
-                    tracing::debug!(
-                        "Auto-detected template version: {} -> {}",
-                        script,
-                        template_version.display()
-                    );
-                    template_version
-                } else {
-                    // Use original path
-                    script_abs
-                }
-            };
-
-            // Get source directory (.guisu/hooks -> .guisu -> source_dir)
-            let source_dir = self
-                .hooks_dir
-                .parent()
-                .and_then(|p| p.parent())
-                .ok_or_else(|| {
-                    crate::Error::HookConfig(format!(
-                        "Cannot determine source directory from hooks dir: {}",
-                        self.hooks_dir.display()
-                    ))
-                })?;
-
-            // Convert to relative path from source_dir
-            let script_rel = final_script_abs.strip_prefix(source_dir).map_err(|_| {
-                crate::Error::HookConfig(format!(
-                    "Script path is outside source directory: {}",
-                    final_script_abs.display()
-                ))
-            })?;
-
-            hook.script = Some(script_rel.display().to_string());
-        }
-
-        Ok(())
-    }
-}
-
-// ======================================================================
 
 /// Template rendering trait for hook scripts
 pub trait TemplateRenderer {
@@ -911,7 +347,7 @@ where
                             self.mark_hook_executed(hook, cached_hash);
                         } else {
                             // Fail-fast: return first error
-                            return Err(crate::Error::HookExecution(format!(
+                            return Err(Error::HookExecution(format!(
                                 "Hook '{}' failed: {}",
                                 hook.name, e
                             )));
@@ -957,10 +393,7 @@ where
                 // Direct command execution (no shell)
                 self.execute_command(cmd, &working_dir, &env, hook.timeout)
                     .map_err(|e| {
-                        crate::Error::HookExecution(format!(
-                            "Hook '{}' command failed: {}",
-                            hook.name, e
-                        ))
+                        Error::HookExecution(format!("Hook '{}' command failed: {}", hook.name, e))
                     })
             }
             (None, Some(script_path)) => {
@@ -972,13 +405,13 @@ where
                 };
                 self.execute_script(&script_abs, &working_dir, &env, hook.timeout)
                     .map_err(|e| {
-                        crate::Error::HookExecution(format!(
+                        Error::HookExecution(format!(
                             "Hook '{}' script '{}' failed: {}",
                             hook.name, script_path, e
                         ))
                     })
             }
-            (None, None) => Err(crate::Error::HookExecution(format!(
+            (None, None) => Err(Error::HookExecution(format!(
                 "Hook '{}' has neither cmd nor script (validation should have caught this)",
                 hook.name
             ))),
@@ -1014,11 +447,11 @@ where
         // Parse command using shell-words for proper quote handling
         // Handles: git commit -m "Initial commit" → ["git", "commit", "-m", "Initial commit"]
         let parts = shell_words::split(&expanded_cmd).map_err(|e| {
-            crate::Error::HookExecution(format!("Failed to parse command '{}': {}", cmd, e))
+            Error::HookExecution(format!("Failed to parse command '{}': {}", cmd, e))
         })?;
 
         if parts.is_empty() {
-            return Err(crate::Error::HookExecution("Empty command".to_string()));
+            return Err(Error::HookExecution("Empty command".to_string()));
         }
 
         let program = &parts[0];
@@ -1039,24 +472,25 @@ where
         // Execute with or without timeout
         if timeout > 0 {
             let handle = cmd_builder.start().map_err(|e| {
-                crate::Error::HookExecution(format!("Failed to start command '{}': {}", program, e))
+                Error::HookExecution(format!("Failed to start command '{}': {}", program, e))
             })?;
 
             match handle.wait_timeout(Duration::from_secs(timeout)) {
                 Ok(Some(_output)) => Ok(()),
-                Ok(None) => Err(crate::Error::HookExecution(format!(
+                Ok(None) => Err(Error::HookExecution(format!(
                     "Command '{}' timed out after {} seconds",
                     program, timeout
                 ))),
-                Err(e) => Err(crate::Error::HookExecution(format!(
+                Err(e) => Err(Error::HookExecution(format!(
                     "Command '{}' failed: {}",
                     program, e
                 ))),
             }
         } else {
-            cmd_builder.run().map(|_| ()).map_err(|e| {
-                crate::Error::HookExecution(format!("Command '{}' failed: {}", program, e))
-            })
+            cmd_builder
+                .run()
+                .map(|_| ())
+                .map_err(|e| Error::HookExecution(format!("Command '{}' failed: {}", program, e)))
         }
     }
 
@@ -1075,7 +509,7 @@ where
         use std::time::Duration;
 
         if !script_path.exists() {
-            return Err(crate::Error::HookExecution(format!(
+            return Err(Error::HookExecution(format!(
                 "Script not found: {}",
                 script_path.display()
             )));
@@ -1105,7 +539,7 @@ where
         // Execute with or without timeout
         if timeout > 0 {
             let handle = cmd_builder.start().map_err(|e| {
-                crate::Error::HookExecution(format!(
+                Error::HookExecution(format!(
                     "Failed to start script '{}': {}",
                     script_path.display(),
                     e
@@ -1114,12 +548,12 @@ where
 
             match handle.wait_timeout(Duration::from_secs(timeout)) {
                 Ok(Some(_output)) => Ok(()),
-                Ok(None) => Err(crate::Error::HookExecution(format!(
+                Ok(None) => Err(Error::HookExecution(format!(
                     "Script '{}' timed out after {} seconds",
                     script_path.display(),
                     timeout
                 ))),
-                Err(e) => Err(crate::Error::HookExecution(format!(
+                Err(e) => Err(Error::HookExecution(format!(
                     "Script '{}' failed: {}",
                     script_path.display(),
                     e
@@ -1127,11 +561,7 @@ where
             }
         } else {
             cmd_builder.run().map(|_| ()).map_err(|e| {
-                crate::Error::HookExecution(format!(
-                    "Script '{}' failed: {}",
-                    script_path.display(),
-                    e
-                ))
+                Error::HookExecution(format!("Script '{}' failed: {}", script_path.display(), e))
             })
         }
     }
@@ -1149,7 +579,7 @@ where
         use std::io::{BufRead, BufReader};
 
         let file = fs::File::open(script_path).map_err(|e| {
-            crate::Error::HookExecution(format!(
+            Error::HookExecution(format!(
                 "Failed to open script {}: {}",
                 script_path.display(),
                 e
@@ -1159,7 +589,7 @@ where
         let mut reader = BufReader::new(file);
         let mut first_line = String::new();
         reader.read_line(&mut first_line).map_err(|e| {
-            crate::Error::HookExecution(format!(
+            Error::HookExecution(format!(
                 "Failed to read script {}: {}",
                 script_path.display(),
                 e
@@ -1179,7 +609,7 @@ where
         if shebang.starts_with("/usr/bin/env") || shebang.starts_with("/bin/env") {
             let parts: Vec<&str> = shebang.split_whitespace().collect();
             if parts.len() < 2 {
-                return Err(crate::Error::HookExecution(format!(
+                return Err(Error::HookExecution(format!(
                     "Invalid env shebang: {}",
                     first_line
                 )));
@@ -1193,7 +623,7 @@ where
         // Handle "#! /bin/bash" or "#! /bin/bash -e"
         let parts: Vec<&str> = shebang.split_whitespace().collect();
         if parts.is_empty() {
-            return Err(crate::Error::HookExecution(format!(
+            return Err(Error::HookExecution(format!(
                 "Empty shebang: {}",
                 first_line
             )));
@@ -1204,9 +634,7 @@ where
         let interpreter = interpreter_path
             .file_name()
             .and_then(|n| n.to_str())
-            .ok_or_else(|| {
-                crate::Error::HookExecution(format!("Invalid interpreter path: {}", parts[0]))
-            })?
+            .ok_or_else(|| Error::HookExecution(format!("Invalid interpreter path: {}", parts[0])))?
             .to_string();
 
         let args = parts[1..].iter().map(|s| s.to_string()).collect();
@@ -1245,7 +673,7 @@ where
                 "sh"
             }
             _ => {
-                return Err(crate::Error::HookExecution(format!(
+                return Err(Error::HookExecution(format!(
                     "Cannot infer interpreter for script: {} (extension: {})",
                     script_path.display(),
                     extension
@@ -1258,9 +686,10 @@ where
 
     /// Execute a template script by rendering it first
     fn execute_template_script(&self, hook: &Hook) -> Result<()> {
-        let script_path = hook.script.as_ref().ok_or_else(|| {
-            crate::Error::HookExecution("Template hook missing script path".to_string())
-        })?;
+        let script_path = hook
+            .script
+            .as_ref()
+            .ok_or_else(|| Error::HookExecution("Template hook missing script path".to_string()))?;
 
         // Resolve full script path
         let full_script_path = if script_path.starts_with('/') {
@@ -1273,7 +702,7 @@ where
 
         // Read script content
         let content = fs::read_to_string(&full_script_path).map_err(|e| {
-            crate::Error::HookExecution(format!(
+            Error::HookExecution(format!(
                 "Failed to read script {}: {}",
                 full_script_path.display(),
                 e
@@ -1282,9 +711,10 @@ where
 
         // Render template using the renderer
         tracing::debug!("Rendering template for hook '{}'", hook.name);
-        let processed_content = self.template_renderer.render(&content).map_err(|e| {
-            crate::Error::HookExecution(format!("Failed to render template: {}", e))
-        })?;
+        let processed_content = self
+            .template_renderer
+            .render(&content)
+            .map_err(|e| Error::HookExecution(format!("Failed to render template: {}", e)))?;
 
         // Execute the processed script
         self.execute_processed_script(&processed_content, hook)
@@ -1295,23 +725,23 @@ where
         use tempfile::NamedTempFile;
 
         // Create temporary file
-        let mut temp_file = NamedTempFile::new().map_err(|e| {
-            crate::Error::HookExecution(format!("Failed to create temp file: {}", e))
-        })?;
+        let mut temp_file = NamedTempFile::new()
+            .map_err(|e| Error::HookExecution(format!("Failed to create temp file: {}", e)))?;
 
         // Write content
-        temp_file.write_all(content.as_bytes()).map_err(|e| {
-            crate::Error::HookExecution(format!("Failed to write temp file: {}", e))
-        })?;
+        temp_file
+            .write_all(content.as_bytes())
+            .map_err(|e| Error::HookExecution(format!("Failed to write temp file: {}", e)))?;
 
         // Set executable permissions (Unix)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = fs::Permissions::from_mode(0o700);
-            temp_file.as_file().set_permissions(perms).map_err(|e| {
-                crate::Error::HookExecution(format!("Failed to set permissions: {}", e))
-            })?;
+            temp_file
+                .as_file()
+                .set_permissions(perms)
+                .map_err(|e| Error::HookExecution(format!("Failed to set permissions: {}", e)))?;
         }
 
         // Working directory is always source_dir
@@ -1410,7 +840,7 @@ where
 /// # Examples
 ///
 /// ```ignore
-/// use guisu_config::hooks::{HookRunner, HookStage};
+/// use guisu_engine::hooks::{HookRunner, HookStage};
 ///
 /// let runner = HookRunner::builder(&collections, source_dir)
 ///     .template_renderer(my_renderer)

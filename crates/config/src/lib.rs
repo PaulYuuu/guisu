@@ -18,9 +18,6 @@ pub mod logging;
 pub mod matcher;
 pub mod variables;
 
-// Hooks module - submodules are in hooks/ directory
-pub mod hooks;
-
 // Re-export error types from core
 pub use guisu_core::{Error, Result};
 

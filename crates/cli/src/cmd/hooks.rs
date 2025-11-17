@@ -4,16 +4,16 @@
 //! Hooks are executed before and after applying dotfiles.
 
 use anyhow::{Context, Result};
-use guisu_config::hooks::{HookLoader, HookRunner, HookStage, TemplateRenderer};
+use guisu_config::Config;
 use guisu_core::platform::CURRENT_PLATFORM;
+use guisu_engine::database;
+use guisu_engine::hooks::{HookLoader, HookRunner, HookStage, TemplateRenderer};
 use guisu_engine::state::{HookStatePersistence, RedbPersistentState};
 use owo_colors::OwoColorize;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use crate::ui::icons::StatusIcon;
-use guisu_config::Config;
-use guisu_engine::database;
 
 /// Run hooks
 pub fn run_hooks(

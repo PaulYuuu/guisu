@@ -899,8 +899,8 @@ fn render_tree(
 
 /// Check and print hooks status
 fn print_hooks_status(source_dir: &Path) -> Result<()> {
-    use guisu_config::hooks::HookLoader;
     use guisu_engine::database;
+    use guisu_engine::hooks::HookLoader;
     use guisu_engine::state::{HookStatePersistence, RedbPersistentState};
 
     let hooks_dir = source_dir.join(".guisu/hooks");
