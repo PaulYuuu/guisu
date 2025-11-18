@@ -10,8 +10,8 @@
 
 pub mod config;
 pub mod dirs;
-pub mod ignore_matcher;
 pub mod ignores;
+pub mod patterns;
 pub mod variables;
 
 // Re-export error types from core
@@ -24,5 +24,5 @@ pub use config::{
 // NOTE: database module moved to guisu-engine
 // CLI should import from engine::database directly
 pub use dirs::{data_dir, default_source_dir, state_dir};
-pub use ignore_matcher::IgnoreMatcher;
 pub use ignores::IgnoresConfig;
+pub use patterns::IgnoreMatcher;

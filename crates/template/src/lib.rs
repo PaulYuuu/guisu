@@ -5,15 +5,15 @@
 //! This crate provides template rendering capabilities with custom functions
 //! for accessing system information, environment variables, and more.
 
-pub mod config_info;
 pub mod context;
 pub mod engine;
 pub mod functions;
+pub mod info;
 
-pub use config_info::{AgeConfigInfo, BitwardenConfigInfo, ConfigInfo, UiConfigInfo};
 pub use context::TemplateContext;
 pub use engine::TemplateEngine;
 pub use functions::set_source_dir;
+pub use info::{AgeConfigInfo, BitwardenConfigInfo, ConfigInfo, UiConfigInfo};
 
 use thiserror::Error;
 

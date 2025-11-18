@@ -2,7 +2,7 @@
 //!
 //! The context provides data that is available to templates during rendering.
 
-use crate::config_info::ConfigInfo;
+use crate::info::ConfigInfo;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::env;
