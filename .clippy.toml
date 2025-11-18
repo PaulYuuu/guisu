@@ -1,0 +1,11 @@
+# Clippy configuration for guisu
+# See: https://rust-lang.github.io/rust-clippy/master/index.html
+
+# Cognitive complexity threshold (default: 25)
+cognitive-complexity-threshold = 30
+
+# Documentation private items
+# This is useful during development but can be disabled for release
+# doc-markdown = true
+
+# Lint level configuration is in workspace Cargo.toml [lints.clippy]

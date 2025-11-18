@@ -20,6 +20,31 @@ homepage = "https://github.com/PaulYuuu/guisu"
 keywords = ["dotfiles manager"]
 documentation = "https://github.com/PaulYuuu/guisu"
 
+[workspace.lints.clippy]
+# Pedantic lints for high code quality
+pedantic = { level = "warn", priority = -1 }
+# Specific adjustments to pedantic lints
+module_name_repetitions = "allow" # Often necessary for clarity
+missing_errors_doc = "allow"      # Too verbose for internal code
+missing_panics_doc = "allow"      # Too verbose for internal code
+must_use_candidate = "allow"      # Too many false positives
+# Performance lints
+perf = { level = "warn", priority = -1 }
+# Correctness (highest priority)
+correctness = { level = "deny", priority = -1 }
+# Complexity lints
+complexity = { level = "warn", priority = -1 }
+# Style lints
+style = { level = "warn", priority = -1 }
+
+[workspace.lints.rust]
+# Deny unsafe code by default
+unsafe_code = "deny"
+# Warn on missing documentation for public items
+missing_docs = "warn"
+# Future incompatibility
+rust_2024_compatibility = { level = "warn", priority = -1 }
+
 [workspace.dependencies]
 age = { version = "0.11", features = ["ssh", "armor"] }
 anyhow = "1.0"
