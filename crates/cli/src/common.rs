@@ -5,6 +5,7 @@ use guisu_config::Config;
 use guisu_core::path::AbsPath;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Resolved paths for dotfile operations
 ///
@@ -75,5 +76,91 @@ impl ResolvedPaths {
             dest_dir: dest_abs,
             dotfiles_dir: dotfiles_abs,
         })
+    }
+}
+
+/// Runtime context for CLI commands
+///
+/// This struct consolidates common parameters that are passed to most commands,
+/// reducing parameter count and making it easier to add new shared resources.
+///
+/// # Benefits
+///
+/// - **Reduced boilerplate**: Commands receive one context instead of 4-5 parameters
+/// - **Shared ownership**: Config is shared via Arc (no cloning)
+/// - **Extensible**: Easy to add new shared resources without changing all commands
+/// - **Testability**: Easy to create mock contexts for testing
+///
+/// # Examples
+///
+/// ```no_run
+/// use guisu_cli::common::RuntimeContext;
+/// use guisu_config::Config;
+/// use std::path::Path;
+///
+/// let config = Config::default();
+/// let context = RuntimeContext::new(
+///     config,
+///     Path::new("~/.local/share/guisu"),
+///     Path::new("/home/user")
+/// )?;
+///
+/// // Use in commands
+/// // my_command::run(&context, &options)?;
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+#[derive(Clone)]
+pub struct RuntimeContext {
+    /// Shared configuration (uses Arc to avoid cloning)
+    pub config: Arc<Config>,
+    /// Resolved and canonicalized paths
+    pub paths: ResolvedPaths,
+}
+
+impl RuntimeContext {
+    /// Create a new runtime context
+    ///
+    /// This will resolve and canonicalize all paths based on the configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The guisu configuration
+    /// * `source_dir` - The source directory (typically ~/.local/share/guisu)
+    /// * `dest_dir` - The destination directory (typically $HOME)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if path resolution or canonicalization fails.
+    pub fn new(config: Config, source_dir: &Path, dest_dir: &Path) -> Result<Self> {
+        let paths = ResolvedPaths::resolve(source_dir, dest_dir, &config)?;
+        Ok(Self {
+            config: Arc::new(config),
+            paths,
+        })
+    }
+
+    /// Create a context from an already-resolved paths struct
+    ///
+    /// Useful when you've already resolved paths and want to create a context.
+    pub fn from_parts(config: Arc<Config>, paths: ResolvedPaths) -> Self {
+        Self { config, paths }
+    }
+
+    /// Get the source directory (original input, may contain .guisu)
+    #[inline]
+    pub fn source_dir(&self) -> &Path {
+        &self.paths.source_dir
+    }
+
+    /// Get the destination directory (canonicalized)
+    #[inline]
+    pub fn dest_dir(&self) -> &AbsPath {
+        &self.paths.dest_dir
+    }
+
+    /// Get the dotfiles directory (canonicalized, includes root_entry if configured)
+    #[inline]
+    pub fn dotfiles_dir(&self) -> &AbsPath {
+        &self.paths.dotfiles_dir
     }
 }

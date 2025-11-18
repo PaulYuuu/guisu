@@ -17,6 +17,7 @@ use subtle::ConstantTimeEq;
 use tracing::{debug, info, warn};
 
 use crate::cmd::conflict::{ChangeType, ConflictHandler};
+use crate::common::RuntimeContext;
 use crate::stats::ApplyStats;
 use crate::ui::ConflictAction;
 use crate::ui::progress;
@@ -60,13 +61,14 @@ impl std::str::FromStr for EntryType {
     }
 }
 
-/// Run the apply command
-pub fn run(
-    source_dir: &Path,
-    dest_dir: &Path,
+/// Run the apply command with RuntimeContext
+///
+/// This is the preferred way to run the apply command, as it uses the
+/// shared RuntimeContext to reduce parameter passing.
+pub fn run_with_context(
+    context: &RuntimeContext,
     files: &[PathBuf],
     options: &ApplyOptions,
-    config: &Config,
 ) -> Result<()> {
     // Parse entry type filters
     let include_types: Result<Vec<EntryType>> = options.include.iter().map(|s| s.parse()).collect();
@@ -75,10 +77,11 @@ pub fn run(
     let exclude_types: Result<Vec<EntryType>> = options.exclude.iter().map(|s| s.parse()).collect();
     let _exclude_types = exclude_types?;
 
-    // Resolve all paths (handles root_entry and canonicalization)
-    let paths = crate::common::ResolvedPaths::resolve(source_dir, dest_dir, config)?;
-    let source_abs = &paths.dotfiles_dir;
-    let dest_abs = &paths.dest_dir;
+    // Extract paths and config from context
+    let source_abs = context.dotfiles_dir();
+    let dest_abs = context.dest_dir();
+    let source_dir = context.source_dir();
+    let config = &context.config;
 
     if options.dry_run {
         info!("{}", "Dry run mode - no changes will be made".dimmed());
@@ -287,7 +290,7 @@ pub fn run(
     // Create conflict handler for interactive mode
     let mut conflict_handler = if options.interactive && !options.dry_run {
         Some(ConflictHandler::new(
-            config.clone(),
+            Arc::clone(config),
             Arc::clone(&identities),
         ))
     } else {
@@ -1170,4 +1173,27 @@ fn decrypt_inline_age_values(
             Ok(content.to_vec())
         }
     }
+}
+
+/// Run the apply command (legacy interface)
+///
+/// This function provides backward compatibility with the old interface.
+/// New code should use `run_with_context` instead, which accepts a
+/// `RuntimeContext` and reduces parameter passing.
+///
+/// # Deprecated
+///
+/// Prefer `run_with_context` for new code.
+pub fn run(
+    source_dir: &Path,
+    dest_dir: &Path,
+    files: &[PathBuf],
+    options: &ApplyOptions,
+    config: &Config,
+) -> Result<()> {
+    // Create RuntimeContext from individual parameters
+    let context = RuntimeContext::new(config.clone(), source_dir, dest_dir)?;
+
+    // Delegate to the new implementation
+    run_with_context(&context, files, options)
 }

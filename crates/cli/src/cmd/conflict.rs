@@ -108,8 +108,8 @@ pub fn compare_three_way(
 pub struct ConflictHandler {
     /// Whether to override all remaining conflicts
     override_all: bool,
-    /// Configuration (unused but kept for future use)
-    _config: Config,
+    /// Configuration (shared, unused but kept for future use)
+    _config: std::sync::Arc<Config>,
     /// Diff viewer
     diff_viewer: DiffViewer,
     /// Age identities for decrypting inline age values
@@ -118,7 +118,10 @@ pub struct ConflictHandler {
 
 impl ConflictHandler {
     /// Create a new conflict handler
-    pub fn new(config: Config, identities: std::sync::Arc<Vec<guisu_crypto::Identity>>) -> Self {
+    pub fn new(
+        config: std::sync::Arc<Config>,
+        identities: std::sync::Arc<Vec<guisu_crypto::Identity>>,
+    ) -> Self {
         let diff_format = config.ui.diff_format.parse().unwrap_or(DiffFormat::Unified);
         let diff_viewer = DiffViewer::new(diff_format, config.ui.context_lines);
 
