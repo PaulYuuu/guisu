@@ -39,7 +39,7 @@
 //! # }
 //! ```
 
-use crate::error::Result;
+use guisu_core::Result;
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

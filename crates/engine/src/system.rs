@@ -3,8 +3,8 @@
 //! This module provides a trait-based abstraction over filesystem operations,
 //! enabling testing and dry-run mode.
 
-use crate::error::{Error, Result};
 use guisu_core::path::AbsPath;
+use guisu_core::{Error, Result};
 use std::fs::{self, Metadata};
 use std::path::Path;
 
@@ -54,7 +54,7 @@ pub struct RealSystem;
 impl System for RealSystem {
     fn read_file(&self, path: &AbsPath) -> Result<Vec<u8>> {
         fs::read(path.as_path()).map_err(|e| Error::FileRead {
-            path: path.clone(),
+            path: path.as_path().to_path_buf(),
             source: e,
         })
     }
@@ -67,7 +67,7 @@ impl System for RealSystem {
 
         // Write the file
         fs::write(path.as_path(), content).map_err(|e| Error::FileWrite {
-            path: path.clone(),
+            path: path.as_path().to_path_buf(),
             source: e,
         })?;
 
@@ -77,7 +77,7 @@ impl System for RealSystem {
             use std::os::unix::fs::PermissionsExt;
             let permissions = fs::Permissions::from_mode(mode);
             fs::set_permissions(path.as_path(), permissions).map_err(|e| Error::FileWrite {
-                path: path.clone(),
+                path: path.as_path().to_path_buf(),
                 source: e,
             })?;
         }
@@ -87,7 +87,7 @@ impl System for RealSystem {
 
     fn create_dir(&self, path: &AbsPath, mode: Option<u32>) -> Result<()> {
         fs::create_dir(path.as_path()).map_err(|e| Error::DirectoryCreate {
-            path: path.clone(),
+            path: path.as_path().to_path_buf(),
             source: e,
         })?;
 
@@ -98,7 +98,7 @@ impl System for RealSystem {
             let permissions = fs::Permissions::from_mode(mode);
             fs::set_permissions(path.as_path(), permissions).map_err(|e| {
                 Error::DirectoryCreate {
-                    path: path.clone(),
+                    path: path.as_path().to_path_buf(),
                     source: e,
                 }
             })?;
@@ -109,7 +109,7 @@ impl System for RealSystem {
 
     fn create_dir_all(&self, path: &AbsPath, mode: Option<u32>) -> Result<()> {
         fs::create_dir_all(path.as_path()).map_err(|e| Error::DirectoryCreate {
-            path: path.clone(),
+            path: path.as_path().to_path_buf(),
             source: e,
         })?;
 
@@ -120,7 +120,7 @@ impl System for RealSystem {
             let permissions = fs::Permissions::from_mode(mode);
             fs::set_permissions(path.as_path(), permissions).map_err(|e| {
                 Error::DirectoryCreate {
-                    path: path.clone(),
+                    path: path.as_path().to_path_buf(),
                     source: e,
                 }
             })?;
@@ -148,7 +148,7 @@ impl System for RealSystem {
 
     fn metadata(&self, path: &AbsPath) -> Result<Metadata> {
         fs::metadata(path.as_path()).map_err(|e| Error::Metadata {
-            path: path.clone(),
+            path: path.as_path().to_path_buf(),
             source: e,
         })
     }
@@ -273,7 +273,7 @@ impl System for DryRunSystem {
     fn metadata(&self, path: &AbsPath) -> Result<Metadata> {
         // Can't get metadata in dry-run mode
         Err(Error::Metadata {
-            path: path.clone(),
+            path: path.as_path().to_path_buf(),
             source: std::io::Error::new(std::io::ErrorKind::NotFound, "dry-run mode"),
         })
     }

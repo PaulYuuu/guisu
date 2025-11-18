@@ -10,8 +10,8 @@
 
 use crate::attr::FileAttributes;
 use crate::content::{Decryptor, TemplateRenderer};
-use crate::error::{Error, Result};
 use guisu_core::path::AbsPath;
+use guisu_core::{Error, Result};
 use std::fs;
 
 /// Content processor with pluggable decryption and rendering
@@ -87,7 +87,7 @@ where
     ) -> Result<Vec<u8>> {
         // 1. Read source file
         let mut content = fs::read(source_path.as_path()).map_err(|e| Error::FileRead {
-            path: source_path.clone(),
+            path: source_path.as_path().to_path_buf(),
             source: e,
         })?;
 

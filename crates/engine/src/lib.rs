@@ -16,7 +16,6 @@ pub mod attr;
 pub mod content;
 pub mod database;
 pub mod entry;
-pub mod error;
 pub mod git;
 pub mod hooks;
 pub mod processor;
@@ -26,7 +25,9 @@ pub mod system;
 // Re-export path types from core
 pub use guisu_core::path::{AbsPath, RelPath, SourceRelPath};
 
+// Re-export error types from core
+pub use guisu_core::{Error, Result};
+
 // Re-export commonly used types
 pub use attr::FileAttributes;
 pub use entry::{SourceEntry, TargetEntry};
-pub use error::{Error, Result};

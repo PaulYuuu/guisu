@@ -85,12 +85,7 @@ impl From<guisu_core::Error> for CommandError {
     }
 }
 
-impl From<guisu_engine::Error> for CommandError {
-    fn from(err: guisu_engine::Error) -> Self {
-        Self::Other(err.into())
-    }
-}
-
+// Note: guisu_engine now re-exports guisu_core::Error, so we only need one From impl
 // Note: guisu_config, guisu_template, and guisu_crypto may not have
 // their own error types, so errors from those crates will be wrapped
 // in anyhow::Error and converted via the Other variant

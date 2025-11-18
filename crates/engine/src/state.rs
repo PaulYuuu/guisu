@@ -4,10 +4,10 @@
 
 use crate::attr::FileAttributes;
 use crate::entry::{DestEntry, SourceEntry, TargetEntry};
-use crate::error::{Error, Result};
 use crate::processor::ContentProcessor;
 use crate::system::System;
 use guisu_core::path::{AbsPath, RelPath, SourceRelPath};
+use guisu_core::{Error, Result};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -380,7 +380,7 @@ impl Metadata {
             let abs_path = guisu_core::path::AbsPath::new(abs_metadata_path.clone())
                 .expect("canonicalized path should be absolute");
             Error::FileRead {
-                path: abs_path,
+                path: abs_path.as_path().to_path_buf(),
                 source: e,
             }
         })?;
@@ -405,7 +405,7 @@ impl Metadata {
                 let abs_path = guisu_core::path::AbsPath::new(abs_guisu_dir.clone())
                     .expect("canonicalized path should be absolute");
                 Error::DirectoryCreate {
-                    path: abs_path,
+                    path: abs_path.as_path().to_path_buf(),
                     source: e,
                 }
             })?;
@@ -422,7 +422,7 @@ impl Metadata {
             let abs_path = guisu_core::path::AbsPath::new(abs_metadata_path.clone())
                 .expect("canonicalized path should be absolute");
             Error::FileWrite {
-                path: abs_path,
+                path: abs_path.as_path().to_path_buf(),
                 source: e,
             }
         })?;
@@ -894,7 +894,10 @@ impl SourceState {
                     .to_string_lossy();
 
                 let metadata = std::fs::metadata(path).map_err(|e| Error::FileRead {
-                    path: root.join(&source_rel_path.to_rel_path()),
+                    path: root
+                        .join(&source_rel_path.to_rel_path())
+                        .as_path()
+                        .to_path_buf(),
                     source: e,
                 })?;
 

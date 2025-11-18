@@ -2,9 +2,9 @@
 //!
 //! This module provides a singleton database instance stored in XDG state directory.
 
-use crate::Result;
 use crate::state::{ENTRY_STATE_BUCKET, EntryState, PersistentState, RedbPersistentState};
 use guisu_config::dirs;
+use guisu_core::{Error, Result};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use tracing::warn;
@@ -15,11 +15,11 @@ static DB_INSTANCE: OnceLock<Arc<Mutex<Option<RedbPersistentState>>>> = OnceLock
 /// Get the database path in XDG state directory
 pub fn get_db_path() -> Result<PathBuf> {
     let state_dir = dirs::state_dir()
-        .ok_or_else(|| crate::Error::State("Failed to get state directory".to_string()))?;
+        .ok_or_else(|| Error::State("Failed to get state directory".to_string()))?;
 
     // Ensure state directory exists
     std::fs::create_dir_all(&state_dir).map_err(|e| {
-        crate::Error::State(format!(
+        Error::State(format!(
             "Failed to create state directory {}: {}",
             state_dir.display(),
             e
@@ -40,7 +40,7 @@ pub fn get_db() -> Result<Arc<Mutex<Option<RedbPersistentState>>>> {
 pub fn open_db() -> Result<()> {
     let db_path = get_db_path()?;
     let db = RedbPersistentState::new(&db_path).map_err(|e| {
-        crate::Error::State(format!(
+        Error::State(format!(
             "Failed to open database at {}: {}",
             db_path.display(),
             e
@@ -107,11 +107,9 @@ pub fn save_entry_state(path: &str, content: &[u8], mode: Option<u32>) -> Result
     if let Some(db) = guard.as_ref() {
         let state = EntryState::new(content, mode);
         db.set(ENTRY_STATE_BUCKET, path.as_bytes(), &state.to_bytes())
-            .map_err(|e| {
-                crate::Error::State(format!("Failed to save state for {}: {}", path, e))
-            })?;
+            .map_err(|e| Error::State(format!("Failed to save state for {}: {}", path, e)))?;
     } else {
-        return Err(crate::Error::State("Database not opened".to_string()));
+        return Err(Error::State("Database not opened".to_string()));
     }
 
     Ok(())
@@ -128,11 +126,11 @@ pub fn get_entry_state(path: &str) -> Result<Option<EntryState>> {
     if let Some(db) = guard.as_ref() {
         let bytes = db
             .get(ENTRY_STATE_BUCKET, path.as_bytes())
-            .map_err(|e| crate::Error::State(format!("Failed to get state for {}: {}", path, e)))?;
+            .map_err(|e| Error::State(format!("Failed to get state for {}: {}", path, e)))?;
 
         Ok(bytes.and_then(|b| EntryState::from_bytes(&b)))
     } else {
-        Err(crate::Error::State("Database not opened".to_string()))
+        Err(Error::State("Database not opened".to_string()))
     }
 }
 
@@ -146,9 +144,7 @@ pub fn delete_entry_state(path: &str) -> Result<()> {
 
     if let Some(db) = guard.as_ref() {
         db.delete(ENTRY_STATE_BUCKET, path.as_bytes())
-            .map_err(|e| {
-                crate::Error::State(format!("Failed to delete state for {}: {}", path, e))
-            })?;
+            .map_err(|e| Error::State(format!("Failed to delete state for {}: {}", path, e)))?;
     }
 
     Ok(())
