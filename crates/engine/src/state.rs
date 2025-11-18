@@ -512,17 +512,42 @@ impl RedbPersistentState {
             .map_err(|e| crate::Error::State(format!("Failed to open database: {}", e)))?;
         Ok(Self { db })
     }
+
+    /// Create table definition, avoiding String allocation for known buckets
+    ///
+    /// Returns a tuple of (String, TableDefinition) where String is only populated
+    /// for unknown buckets (to satisfy 'static lifetime requirement).
+    #[inline]
+    fn table_def_with_storage(
+        bucket: &str,
+    ) -> (
+        Option<String>,
+        TableDefinition<'_, &'static [u8], &'static [u8]>,
+    ) {
+        // For known buckets, use static strings to avoid allocation
+        match bucket {
+            ENTRY_STATE_BUCKET => (None, TableDefinition::new(ENTRY_STATE_BUCKET)),
+            SCRIPT_STATE_BUCKET => (None, TableDefinition::new(SCRIPT_STATE_BUCKET)),
+            CONFIG_STATE_BUCKET => (None, TableDefinition::new(CONFIG_STATE_BUCKET)),
+            PACKAGE_STATE_BUCKET => (None, TableDefinition::new(PACKAGE_STATE_BUCKET)),
+            HOOK_STATE_BUCKET => (None, TableDefinition::new(HOOK_STATE_BUCKET)),
+            // For unknown buckets, allocate String and leak to satisfy 'static
+            _ => {
+                let bucket_string = bucket.to_string();
+                let leaked: &'static str = Box::leak(bucket_string.clone().into_boxed_str());
+                (Some(bucket_string), TableDefinition::new(leaked))
+            }
+        }
+    }
 }
 
 impl PersistentState for RedbPersistentState {
     fn get(&self, bucket: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        // Convert bucket to owned string to satisfy 'static requirement
-        let bucket_name = bucket.to_string();
         let read_txn = self
             .db
             .begin_read()
             .map_err(|e| crate::Error::State(format!("Failed to begin read transaction: {}", e)))?;
-        let table_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new(&bucket_name);
+        let (_storage, table_def) = Self::table_def_with_storage(bucket);
 
         let table = match read_txn.open_table(table_def) {
             Ok(t) => t,
@@ -537,12 +562,11 @@ impl PersistentState for RedbPersistentState {
     }
 
     fn set(&self, bucket: &str, key: &[u8], value: &[u8]) -> Result<()> {
-        let bucket_name = bucket.to_string();
         let write_txn = self.db.begin_write().map_err(|e| {
             crate::Error::State(format!("Failed to begin write transaction: {}", e))
         })?;
         {
-            let table_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new(&bucket_name);
+            let (_storage, table_def) = Self::table_def_with_storage(bucket);
             let mut table = write_txn
                 .open_table(table_def)
                 .map_err(|e| crate::Error::State(format!("Failed to open table: {}", e)))?;
@@ -557,12 +581,11 @@ impl PersistentState for RedbPersistentState {
     }
 
     fn delete(&self, bucket: &str, key: &[u8]) -> Result<()> {
-        let bucket_name = bucket.to_string();
         let write_txn = self.db.begin_write().map_err(|e| {
             crate::Error::State(format!("Failed to begin write transaction: {}", e))
         })?;
         {
-            let table_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new(&bucket_name);
+            let (_storage, table_def) = Self::table_def_with_storage(bucket);
             let mut table = write_txn
                 .open_table(table_def)
                 .map_err(|e| crate::Error::State(format!("Failed to open table: {}", e)))?;
@@ -577,11 +600,10 @@ impl PersistentState for RedbPersistentState {
     }
 
     fn delete_bucket(&self, bucket: &str) -> Result<()> {
-        let bucket_name = bucket.to_string();
         let write_txn = self.db.begin_write().map_err(|e| {
             crate::Error::State(format!("Failed to begin write transaction: {}", e))
         })?;
-        let table_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new(&bucket_name);
+        let (_storage, table_def) = Self::table_def_with_storage(bucket);
         write_txn
             .delete_table(table_def)
             .map_err(|e| crate::Error::State(format!("Failed to delete table: {}", e)))?;
@@ -595,12 +617,11 @@ impl PersistentState for RedbPersistentState {
     where
         F: FnMut(&[u8], &[u8]) -> Result<()>,
     {
-        let bucket_name = bucket.to_string();
         let read_txn = self
             .db
             .begin_read()
             .map_err(|e| crate::Error::State(format!("Failed to begin read transaction: {}", e)))?;
-        let table_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new(&bucket_name);
+        let (_storage, table_def) = Self::table_def_with_storage(bucket);
 
         let table = match read_txn.open_table(table_def) {
             Ok(t) => t,
