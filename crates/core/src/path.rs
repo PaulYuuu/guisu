@@ -50,6 +50,7 @@ use std::path::{Path, PathBuf};
 /// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct AbsPath(PathBuf);
 
 impl AbsPath {
@@ -181,6 +182,7 @@ impl AbsPath {
 /// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct RelPath(PathBuf);
 
 impl RelPath {
@@ -261,6 +263,7 @@ impl RelPath {
 /// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct SourceRelPath(PathBuf);
 
 impl SourceRelPath {

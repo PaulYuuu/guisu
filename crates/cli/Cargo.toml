@@ -27,7 +27,6 @@ anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
 comfy-table = "7.2"
-console = "0.16"
 crossterm.workspace = true
 dialoguer = "0.12"
 dirs.workspace = true

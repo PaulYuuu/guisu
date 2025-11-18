@@ -19,6 +19,11 @@ use guisu_vault::{CachedSecretProvider, bws::BwsCli};
 // Global source directory for include functions
 static SOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+// Cached system information
+static HOSTNAME_CACHE: OnceLock<String> = OnceLock::new();
+static USERNAME_CACHE: OnceLock<String> = OnceLock::new();
+static HOME_DIR_CACHE: OnceLock<String> = OnceLock::new();
+
 // Bitwarden cache structure with separated provider and cache
 struct BitwardenCache {
     provider: Box<dyn SecretProvider>,
@@ -163,31 +168,35 @@ pub fn arch() -> &'static str {
 /// Get the system hostname
 ///
 /// Usage: `{{ hostname() }}`
-pub fn hostname() -> std::borrow::Cow<'static, str> {
-    hostname::get()
-        .ok()
-        .and_then(|h| h.into_string().ok())
-        .map(std::borrow::Cow::Owned)
-        .unwrap_or(std::borrow::Cow::Borrowed("unknown"))
+pub fn hostname() -> &'static str {
+    HOSTNAME_CACHE.get_or_init(|| {
+        hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "unknown".to_string())
+    })
 }
 
 /// Get the current username
 ///
 /// Usage: `{{ username() }}`
-pub fn username() -> std::borrow::Cow<'static, str> {
-    env::var("USER")
-        .or_else(|_| env::var("USERNAME"))
-        .map(std::borrow::Cow::Owned)
-        .unwrap_or(std::borrow::Cow::Borrowed("unknown"))
+pub fn username() -> &'static str {
+    USERNAME_CACHE.get_or_init(|| {
+        env::var("USER")
+            .or_else(|_| env::var("USERNAME"))
+            .unwrap_or_else(|_| "unknown".to_string())
+    })
 }
 
 /// Get the home directory
 ///
 /// Usage: `{{ home_dir() }}`
-pub fn home_dir() -> String {
-    dirs::home_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "/home/unknown".to_string())
+pub fn home_dir() -> &'static str {
+    HOME_DIR_CACHE.get_or_init(|| {
+        dirs::home_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/home/unknown".to_string())
+    })
 }
 
 /// Join path components
@@ -200,7 +209,7 @@ pub fn join_path(args: &[Value]) -> String {
             path.push(s);
         }
     }
-    path.to_string_lossy().to_string()
+    path.to_string_lossy().into_owned()
 }
 
 /// Look up an executable in PATH
@@ -238,7 +247,7 @@ pub fn look_path(name: &str) -> Result<String, minijinja::Error> {
 
     Ok(which::which(name)
         .ok()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default())
 }
 
