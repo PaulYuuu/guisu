@@ -3,17 +3,44 @@
 //! Pull the latest changes from the source repository and optionally apply them.
 
 use anyhow::{Context, Result, anyhow};
+use clap::Args;
 use git2::{AnnotatedCommit, AutotagOption, FetchOptions, RemoteCallbacks, Repository};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 use tracing::{debug, info, warn};
 
+use crate::command::Command;
+use crate::common::RuntimeContext;
 use guisu_config::Config;
 
-/// Run the update command
+/// Update command
+#[derive(Args)]
+pub struct UpdateCommand {
+    /// Apply changes after pulling (default: true)
+    #[arg(short, long, default_value_t = true)]
+    pub apply: bool,
+
+    /// Use rebase instead of merge when branches have diverged
+    #[arg(short, long)]
+    pub rebase: bool,
+}
+
+impl Command for UpdateCommand {
+    fn execute(&self, context: &RuntimeContext) -> Result<()> {
+        run_impl(
+            context.source_dir(),
+            context.dest_dir().as_path(),
+            self.apply,
+            self.rebase,
+            &context.config,
+        )
+    }
+}
+
+/// Run the update command implementation
 ///
 /// Pulls the latest changes from the remote repository and optionally applies them.
-pub fn run(
+fn run_impl(
     source_dir: &Path,
     dest_dir: &Path,
     apply: bool,
@@ -165,8 +192,21 @@ pub fn run(
     // Apply changes if requested
     if apply {
         println!("\nApplying changes...");
-        let options = crate::cmd::apply::ApplyOptions::default();
-        crate::cmd::apply::run(&dotfiles_dir, dest_dir, &[], &options, config)
+
+        // Create ApplyCommand with default options (all files)
+        let apply_cmd = crate::cmd::apply::ApplyCommand {
+            files: vec![],
+            dry_run: false,
+            force: false,
+            interactive: false,
+            include: vec![],
+            exclude: vec![],
+        };
+
+        // Create RuntimeContext and execute
+        let context = crate::common::RuntimeContext::new(config.clone(), &dotfiles_dir, dest_dir)?;
+        apply_cmd
+            .execute(&context)
             .context("Failed to apply changes")?;
     } else {
         println!("\nTo apply these changes, run:");

@@ -3,11 +3,14 @@
 //! Display current guisu status information.
 
 use anyhow::Result;
+use clap::Args;
 use owo_colors::OwoColorize;
 use std::path::Path;
-use std::process::Command;
+use std::process::Command as ProcessCommand;
 use tracing::debug;
 
+use crate::command::Command;
+use crate::common::RuntimeContext;
 use guisu_config::Config;
 
 use serde::Serialize;
@@ -68,8 +71,26 @@ struct BitwardenInfo {
     version: Option<String>,
 }
 
-/// Run the info command
-pub fn run(source_dir: &Path, config: &Config, all: bool, json: bool) -> Result<()> {
+/// Info command
+#[derive(Args)]
+pub struct InfoCommand {
+    /// Show all details (build info, versions, public keys, configuration, etc.)
+    #[arg(long)]
+    pub all: bool,
+
+    /// Output in JSON format (default: table format)
+    #[arg(long)]
+    pub json: bool,
+}
+
+impl Command for InfoCommand {
+    fn execute(&self, context: &RuntimeContext) -> Result<()> {
+        run_impl(context.source_dir(), &context.config, self.all, self.json)
+    }
+}
+
+/// Run the info command implementation
+fn run_impl(source_dir: &Path, config: &Config, all: bool, json: bool) -> Result<()> {
     // Validate configuration
     validate_configuration(source_dir)?;
 
@@ -265,7 +286,7 @@ fn get_bitwarden_info(config: &Config) -> (String, Option<String>) {
     let provider = config.bitwarden.provider.clone();
 
     // Get command version based on provider
-    let command_version = match Command::new(&provider).arg("--version").output() {
+    let command_version = match ProcessCommand::new(&provider).arg("--version").output() {
         Ok(output) if output.status.success() => {
             let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
             // Remove provider prefix (e.g., "rbw 1.14.1" -> "1.14.1")

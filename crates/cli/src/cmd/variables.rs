@@ -3,6 +3,7 @@
 //! Display all template variables available to guisu templates.
 
 use anyhow::{Context, Result};
+use clap::Args;
 use guisu_template::TemplateContext;
 use owo_colors::OwoColorize;
 use serde::Serialize;
@@ -10,6 +11,39 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use guisu_config::Config;
+
+use crate::command::Command;
+use crate::common::RuntimeContext;
+
+/// Variables command arguments
+#[derive(Debug, Args)]
+pub struct VariablesCommand {
+    /// Output in JSON format (default: pretty format)
+    #[arg(long)]
+    pub json: bool,
+
+    /// Show only builtin (system) variables
+    #[arg(long)]
+    pub builtin: bool,
+
+    /// Show only user-defined variables
+    #[arg(long)]
+    pub user: bool,
+}
+
+impl Command for VariablesCommand {
+    fn execute(&self, context: &RuntimeContext) -> Result<()> {
+        // Determine filter based on flags
+        let filter = match (self.builtin, self.user) {
+            (true, true) => VariableFilter::All, // Both = show all
+            (true, false) => VariableFilter::BuiltinOnly,
+            (false, true) => VariableFilter::UserOnly,
+            (false, false) => VariableFilter::All, // Default = show all
+        };
+
+        run_impl(context.source_dir(), &context.config, self.json, filter)
+    }
+}
 
 /// Which variables to display
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,8 +97,8 @@ struct GuisuVariables {
     root_entry: Option<String>,
 }
 
-/// Run the variables command
-pub fn run(source_dir: &Path, config: &Config, json: bool, filter: VariableFilter) -> Result<()> {
+/// Run the variables command (implementation)
+fn run_impl(source_dir: &Path, config: &Config, json: bool, filter: VariableFilter) -> Result<()> {
     // Create template context to get system variables
     let context = TemplateContext::new();
 

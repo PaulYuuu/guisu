@@ -3,16 +3,38 @@
 //! Display the processed content of managed files (decrypt + render templates).
 
 use anyhow::{Context, Result};
+use clap::Args;
 use guisu_core::path::AbsPath;
 use guisu_engine::state::SourceState;
 use guisu_template::TemplateContext;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::command::Command;
+use crate::common::RuntimeContext;
 use guisu_config::Config;
 
-/// Run the cat command
-pub fn run(source_dir: &Path, dest_dir: &Path, files: &[PathBuf], config: &Config) -> Result<()> {
+/// Cat command
+#[derive(Args)]
+pub struct CatCommand {
+    /// Files to display
+    #[arg(required = true)]
+    pub files: Vec<PathBuf>,
+}
+
+impl Command for CatCommand {
+    fn execute(&self, context: &RuntimeContext) -> Result<()> {
+        run_impl(
+            context.source_dir(),
+            context.dest_dir().as_path(),
+            &self.files,
+            &context.config,
+        )
+    }
+}
+
+/// Run the cat command implementation
+fn run_impl(source_dir: &Path, dest_dir: &Path, files: &[PathBuf], config: &Config) -> Result<()> {
     if files.is_empty() {
         anyhow::bail!("No files specified. Usage: guisu cat <file>");
     }

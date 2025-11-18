@@ -3,6 +3,7 @@
 //! Show status of managed files with multiple output formats.
 
 use anyhow::{Context, Result};
+use clap::Args;
 use guisu_core::path::{AbsPath, RelPath};
 use guisu_engine::adapters::crypto::CryptoDecryptorAdapter;
 use guisu_engine::adapters::template::TemplateRendererAdapter;
@@ -15,10 +16,13 @@ use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::debug;
 
 use crate::cmd::conflict::{ThreeWayComparisonResult, compare_three_way};
+use crate::command::Command;
+use crate::common::RuntimeContext;
 use crate::ui::icons::{FileIconInfo, icon_for_file};
 use guisu_config::Config;
 use lscolors::{LsColors, Style};
@@ -104,12 +108,45 @@ impl FileInfo {
     }
 }
 
-/// Run the status command
-pub fn run(
+/// Status command
+#[derive(Args)]
+pub struct StatusCommand {
+    /// Specific files to check (all if not specified)
+    pub files: Vec<PathBuf>,
+
+    /// Show all files including synced ones
+    #[arg(short, long)]
+    pub all: bool,
+
+    /// Display output in tree format
+    #[arg(long)]
+    pub tree: bool,
+}
+
+impl Command for StatusCommand {
+    fn execute(&self, context: &RuntimeContext) -> Result<()> {
+        let output_format = if self.tree {
+            OutputFormat::Tree
+        } else {
+            OutputFormat::Simple
+        };
+        run_impl(
+            context.source_dir(),
+            context.dest_dir().as_path(),
+            &context.config,
+            &self.files,
+            self.all,
+            output_format,
+        )
+    }
+}
+
+/// Run the status command implementation
+fn run_impl(
     source_dir: &Path,
     dest_dir: &Path,
     config: &Config,
-    files: &[std::path::PathBuf],
+    files: &[PathBuf],
     show_all: bool,
     output_format: OutputFormat,
 ) -> Result<()> {

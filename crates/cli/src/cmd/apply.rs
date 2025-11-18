@@ -3,6 +3,7 @@
 //! Apply the source state to the destination directory.
 
 use anyhow::{Context, Result};
+use clap::Args;
 use guisu_core::path::AbsPath;
 use guisu_engine::entry::TargetEntry;
 use guisu_engine::processor::ContentProcessor;
@@ -11,26 +12,594 @@ use owo_colors::OwoColorize;
 use rayon::prelude::*;
 use std::fs;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use tracing::{debug, info, warn};
 
 use crate::cmd::conflict::{ChangeType, ConflictHandler};
+use crate::command::Command;
 use crate::common::RuntimeContext;
 use crate::stats::ApplyStats;
 use crate::ui::ConflictAction;
 use crate::ui::progress;
-use guisu_config::Config;
 
-/// Options for the apply command
-#[derive(Debug, Clone, Default)]
-pub struct ApplyOptions {
+/// Apply the source state to the destination
+#[derive(Debug, Clone, Args)]
+pub struct ApplyCommand {
+    /// Specific files to apply (all if not specified)
+    #[arg(value_name = "FILES")]
+    pub files: Vec<PathBuf>,
+
+    /// Dry run - show what would be done
+    #[arg(short = 'n', long)]
     pub dry_run: bool,
+
+    /// Force overwrite of changed files
+    #[arg(short, long)]
     pub force: bool,
+
+    /// Interactive mode - prompt on conflicts
+    #[arg(short, long)]
     pub interactive: bool,
+
+    /// Include only these entry types (comma-separated)
+    #[arg(long, value_delimiter = ',')]
     pub include: Vec<String>,
+
+    /// Exclude these entry types (comma-separated)
+    #[arg(long, value_delimiter = ',')]
     pub exclude: Vec<String>,
+}
+
+impl Command for ApplyCommand {
+    fn execute(&self, context: &RuntimeContext) -> Result<()> {
+        // Parse entry type filters
+        let include_types: Result<Vec<EntryType>> =
+            self.include.iter().map(|s| s.parse()).collect();
+        let _include_types = include_types?;
+
+        let exclude_types: Result<Vec<EntryType>> =
+            self.exclude.iter().map(|s| s.parse()).collect();
+        let _exclude_types = exclude_types?;
+
+        // Extract paths and config from context
+        let source_abs = context.dotfiles_dir();
+        let dest_abs = context.dest_dir();
+        let source_dir = context.source_dir();
+        let config = &context.config;
+
+        if self.dry_run {
+            info!("{}", "Dry run mode - no changes will be made".dimmed());
+        }
+
+        // Load age identities for decryption
+        let spinner = progress::create_spinner("Loading identities...");
+        let identities = std::sync::Arc::new(config.age_identities().unwrap_or_default());
+        spinner.finish_and_clear();
+
+        // Detect if output is to a terminal for icon auto mode
+        let is_tty = std::io::stdout().is_terminal();
+        let show_icons = config.ui.icons.should_show_icons(is_tty);
+
+        // Load variables from .guisu/variables/ directory
+        let guisu_dir = source_dir.join(".guisu");
+        let platform_name = guisu_core::platform::CURRENT_PLATFORM.os;
+
+        let guisu_variables = if guisu_dir.exists() {
+            guisu_config::variables::load_variables(&guisu_dir, platform_name)
+                .context("Failed to load variables from .guisu/variables/")?
+        } else {
+            indexmap::IndexMap::new()
+        };
+
+        // Merge variables: guisu variables + config variables (config overrides)
+        let mut all_variables = guisu_variables;
+        for (key, value) in &config.variables {
+            all_variables.insert(key.clone(), value.clone());
+        }
+
+        // Create template engine with identities, template directory, and bitwarden provider
+        let template_engine =
+            crate::create_template_engine(source_dir, Arc::clone(&identities), config);
+
+        // Create content processor with real decryptor and renderer
+        use guisu_engine::adapters::crypto::CryptoDecryptorAdapter;
+        use guisu_engine::adapters::template::TemplateRendererAdapter;
+
+        // Use Arc to share identity without cloning
+        let identity_arc = if let Some(first) = identities.first() {
+            // Share the first identity from the Arc<Vec>
+            Arc::new(first.clone())
+        } else {
+            // Generate a new identity if none configured
+            Arc::new(guisu_crypto::Identity::generate())
+        };
+        let decryptor = CryptoDecryptorAdapter::from_arc(identity_arc);
+        let renderer = TemplateRendererAdapter::new(template_engine);
+        let processor = ContentProcessor::new(decryptor, renderer);
+
+        // Load metadata for create-once tracking
+        let metadata =
+            guisu_engine::state::Metadata::load(source_dir).context("Failed to load metadata")?;
+
+        // Create ignore matcher from .guisu/ignores.toml
+        // Use dotfiles_dir as the match root so patterns match relative to the dotfiles directory
+        let ignore_matcher = guisu_config::IgnoreMatcher::from_ignores_toml(source_dir)
+            .context("Failed to load ignore patterns from .guisu/ignores.toml")?;
+
+        // Check if we're applying a single file (affects output verbosity)
+        let is_single_file = !self.files.is_empty() && self.files.len() == 1;
+
+        // Build filter paths if specific files requested
+        let filter_paths = if !self.files.is_empty() {
+            Some(crate::build_filter_paths(&self.files, dest_abs)?)
+        } else {
+            None
+        };
+
+        // Read source state with ignore matcher from config
+        let spinner = if !is_single_file {
+            Some(progress::create_spinner("Reading source state..."))
+        } else {
+            None
+        };
+
+        // Load ignore matcher if .guisu/ignores.toml exists
+        let matcher = guisu_config::IgnoreMatcher::from_ignores_toml(source_dir).ok();
+
+        // Read source state with optional ignore filtering
+        let source_state = if let Some(ref matcher) = matcher {
+            SourceState::read_with_matcher(source_abs.to_owned(), Some(matcher))
+                .context("Failed to read source state with ignore matcher")?
+        } else {
+            SourceState::read(source_abs.to_owned()).context("Failed to read source state")?
+        };
+
+        if let Some(spinner) = spinner {
+            spinner.finish_with_message(format!("Found {} entries", source_state.len()));
+        }
+
+        if source_state.is_empty() {
+            if !is_single_file {
+                info!("No files to apply");
+            }
+            return Ok(());
+        }
+
+        // Use the full source state - we'll filter later
+        let filtered_source_state = source_state;
+
+        // Build target state from filtered source state (processes templates and decrypts files)
+        let spinner = if !is_single_file {
+            Some(progress::create_spinner(
+                "Processing templates and encrypted files...",
+            ))
+        } else {
+            None
+        };
+        // Create template context with system variables and guisu info
+        let template_context = guisu_template::TemplateContext::new()
+            .with_variables(all_variables)
+            .with_guisu_info(
+                source_abs.to_string(),
+                dest_abs.to_string(),
+                config.general.root_entry.display().to_string(),
+            );
+        let template_context_value = serde_json::to_value(&template_context)
+            .context("Failed to serialize template context")?;
+        let target_state =
+            TargetState::from_source(&filtered_source_state, &processor, &template_context_value)?;
+        if let Some(spinner) = spinner {
+            spinner.finish_and_clear();
+        }
+
+        // Filter out create-once files that already exist at the destination
+        // Also filter out ignored files
+        // Also filter by specific file paths if requested
+        let mut entries_to_apply: Vec<&TargetEntry> = target_state
+            .entries()
+            .filter(|entry| {
+                let path_str = entry.path().to_string();
+                let target_path = entry.path();
+
+                // If filtering by specific files, skip entries not in the filter
+                if let Some(ref filter) = filter_paths
+                    && !filter.iter().any(|p| p == target_path)
+                {
+                    return false;
+                }
+
+                // Skip if file is ignored
+                if ignore_matcher.is_ignored(entry.path().as_path()) {
+                    debug!(
+                        path = %path_str,
+                        "Skipping ignored file"
+                    );
+                    return false;
+                }
+
+                // If file is marked as create-once and already exists, skip it
+                if metadata.is_create_once(&path_str) {
+                    let dest_path = dest_abs.join(entry.path());
+                    if dest_path.as_path().exists() {
+                        debug!(
+                            path = %path_str,
+                            "Skipping create-once file that already exists"
+                        );
+                        return false;
+                    }
+                }
+
+                true
+            })
+            .collect();
+
+        // Sort entries by path for consistent output
+        entries_to_apply.sort_by(|a, b| a.path().as_path().cmp(b.path().as_path()));
+
+        if entries_to_apply.is_empty() {
+            info!("No matching files to apply");
+            return Ok(());
+        }
+
+        // Open database for state tracking (only if not dry run)
+        if !self.dry_run {
+            guisu_engine::database::open_db().context("Failed to open state database")?;
+        }
+
+        // Check for configuration drift (files modified by user AND source updated)
+        if !self.dry_run && !is_single_file {
+            let drift_warnings = detect_config_drift(&entries_to_apply, dest_abs)?;
+            if !drift_warnings.is_empty() {
+                println!("\n{}", "Configuration Drift Detected".yellow().bold());
+                println!(
+                    "{}",
+                    "The following files have been modified both locally and in the source:"
+                        .yellow()
+                );
+                for warning in &drift_warnings {
+                    println!("  {} {}", "•".yellow(), warning.bright_white());
+                }
+                println!();
+                println!(
+                    "{}",
+                    "These local changes will be overwritten during apply.".yellow()
+                );
+                println!(
+                    "{}",
+                    "Consider backing up modified files or using interactive mode (-i) for control."
+                        .dimmed()
+                );
+                println!();
+            }
+        }
+
+        // Create conflict handler for interactive mode
+        let mut conflict_handler = if self.interactive && !self.dry_run {
+            Some(ConflictHandler::new(
+                Arc::clone(config),
+                Arc::clone(&identities),
+            ))
+        } else {
+            None
+        };
+
+        // Apply entries
+        let stats = Arc::new(ApplyStats::new());
+
+        // Use parallel processing only when NOT in interactive mode
+        if self.interactive || self.dry_run {
+            // Sequential processing for interactive mode or dry run
+            for entry in entries_to_apply {
+                let dest_path = dest_abs.join(entry.path());
+
+                if self.dry_run {
+                    // Skip if file doesn't need update
+                    if !needs_update(entry, &dest_path, &identities) {
+                        debug!(path = %entry.path(), "File is already up to date, skipping");
+                        continue;
+                    }
+
+                    debug!(path = %entry.path(), "Would apply entry");
+                    print_dry_run_entry(entry, show_icons);
+                    stats.record_dry_run(entry);
+                } else {
+                    // Check for conflicts if interactive mode is enabled
+                    let should_apply = if let Some(ref mut handler) = conflict_handler {
+                        // Load last written state from database (only for files)
+                        let last_written_hash = match entry {
+                            TargetEntry::File { .. } => {
+                                let path_str = entry.path().to_string();
+                                guisu_engine::database::get_entry_state(&path_str)
+                                    .ok()
+                                    .flatten()
+                                    .map(|state| state.content_hash)
+                            }
+                            _ => None,
+                        };
+
+                        // Detect type of change
+                        let change_type = ConflictHandler::detect_change_type(
+                            entry,
+                            dest_abs,
+                            last_written_hash.as_deref(),
+                            &identities,
+                        )?;
+
+                        if let Some(change_type) = change_type {
+                            // Prompt user for action with change type information
+                            // Note: We don't store full content in DB, only hash, so last_written_content is None
+                            // This means merge operations will use two-way merge instead of three-way
+                            match handler.prompt_action(entry, dest_abs, None, change_type)? {
+                                ConflictAction::Override => true,
+                                ConflictAction::Skip => {
+                                    debug!(path = %entry.path(), "Skipping due to user choice");
+                                    println!("  {} {}", "⏭".yellow(), entry.path().bright_white());
+                                    false
+                                }
+                                ConflictAction::Quit => {
+                                    info!("Apply operation cancelled by user");
+                                    return Ok(());
+                                }
+                                // Merge and Edit are handled internally by prompt_action and return Override when done
+                                // Diff continues the prompt loop internally
+                                _ => unreachable!("Unexpected action returned from prompt_action"),
+                            }
+                        } else {
+                            // No change detected, but check if file actually needs update
+                            needs_update(entry, &dest_path, &identities)
+                        }
+                    } else {
+                        // Non-interactive mode: check for local modifications and warn user
+                        if !needs_update(entry, &dest_path, &identities) {
+                            false
+                        } else {
+                            // Load last written state to detect change type
+                            let last_written_hash = match entry {
+                                TargetEntry::File { .. } => {
+                                    let path_str = entry.path().to_string();
+                                    guisu_engine::database::get_entry_state(&path_str)
+                                        .ok()
+                                        .flatten()
+                                        .map(|state| state.content_hash)
+                                }
+                                _ => None,
+                            };
+
+                            // Detect type of change
+                            let change_type = ConflictHandler::detect_change_type(
+                                entry,
+                                dest_abs,
+                                last_written_hash.as_deref(),
+                                &identities,
+                            )?;
+
+                            // If local modification or true conflict detected, warn user
+                            if let Some(change_type) = change_type {
+                                match change_type {
+                                    ChangeType::LocalModification | ChangeType::TrueConflict => {
+                                        // Show warning
+                                        let change_label = match change_type {
+                                            ChangeType::LocalModification => "Local modification",
+                                            ChangeType::TrueConflict => {
+                                                "Conflict (both local and source modified)"
+                                            }
+                                            _ => unreachable!(),
+                                        };
+
+                                        println!(
+                                            "\n{} {}",
+                                            "⚠".yellow(),
+                                            change_label.yellow().bold()
+                                        );
+                                        println!("  File: {}", entry.path().bright_white());
+                                        println!(
+                                            "  {}",
+                                            "This file has been modified locally.".yellow()
+                                        );
+                                        println!(
+                                            "  {}",
+                                            "Applying will overwrite your local changes.".yellow()
+                                        );
+
+                                        // Ask for confirmation
+                                        use dialoguer::{Confirm, theme::ColorfulTheme};
+                                        let theme = ColorfulTheme::default();
+
+                                        Confirm::with_theme(&theme)
+                                            .with_prompt("Continue and overwrite local changes?")
+                                            .default(false)
+                                            .interact()
+                                            .context("Failed to read user input")?
+                                    }
+                                    ChangeType::SourceUpdate => {
+                                        // Source update only, safe to apply
+                                        true
+                                    }
+                                }
+                            } else {
+                                // No change detected by change_type, but needs_update said yes
+                                // This can happen for new files or permission changes
+                                true
+                            }
+                        }
+                    };
+
+                    if should_apply {
+                        match apply_target_entry(entry, &dest_path, &identities) {
+                            Ok(_) => {
+                                debug!(path = %entry.path(), "Applied entry successfully");
+
+                                // Save state to database after successful application
+                                // If state save fails, treat the entire operation as failed
+                                match save_entry_state_to_db(entry) {
+                                    Ok(_) => {
+                                        print_success_entry(entry, show_icons);
+                                        stats.record_success(entry);
+                                    }
+                                    Err(e) => {
+                                        warn!(path = %entry.path(), error = %e, "Failed to save state to database");
+                                        print_error_entry(entry, &e, show_icons);
+                                        stats.record_failure();
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!(path = %entry.path(), error = %e, "Failed to apply entry");
+                                print_error_entry(entry, &e, show_icons);
+                                stats.record_failure();
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Parallel processing for non-interactive mode
+            // First, pre-scan for local modifications and get confirmations
+            use std::collections::HashSet;
+            let mut confirmed_paths = HashSet::new();
+            let mut has_warnings = false;
+
+            for entry in &entries_to_apply {
+                let dest_path = dest_abs.join(entry.path());
+
+                // Skip if file doesn't need update
+                if !needs_update(entry, &dest_path, &identities) {
+                    continue;
+                }
+
+                // Load last written state to detect change type
+                let last_written_hash = match entry {
+                    TargetEntry::File { .. } => {
+                        let path_str = entry.path().to_string();
+                        guisu_engine::database::get_entry_state(&path_str)
+                            .ok()
+                            .flatten()
+                            .map(|state| state.content_hash)
+                    }
+                    _ => None,
+                };
+
+                // Detect type of change
+                if let Ok(Some(change_type)) = ConflictHandler::detect_change_type(
+                    entry,
+                    dest_abs,
+                    last_written_hash.as_deref(),
+                    &identities,
+                ) {
+                    match change_type {
+                        ChangeType::LocalModification | ChangeType::TrueConflict => {
+                            has_warnings = true;
+
+                            // Show warning
+                            let change_label = match change_type {
+                                ChangeType::LocalModification => "Local modification",
+                                ChangeType::TrueConflict => {
+                                    "Conflict (both local and source modified)"
+                                }
+                                _ => unreachable!(),
+                            };
+
+                            println!("\n{} {}", "⚠".yellow(), change_label.yellow().bold());
+                            println!("  File: {}", entry.path().bright_white());
+                            println!("  {}", "This file has been modified locally.".yellow());
+                            println!(
+                                "  {}",
+                                "Applying will overwrite your local changes.".yellow()
+                            );
+
+                            // Ask for confirmation
+                            use dialoguer::{Confirm, theme::ColorfulTheme};
+                            let theme = ColorfulTheme::default();
+
+                            let confirmed = Confirm::with_theme(&theme)
+                                .with_prompt("Continue and overwrite local changes?")
+                                .default(false)
+                                .interact()
+                                .context("Failed to read user input")?;
+
+                            if confirmed {
+                                confirmed_paths.insert(entry.path().to_string());
+                            }
+                        }
+                        ChangeType::SourceUpdate => {
+                            // Source update only, safe to apply
+                            confirmed_paths.insert(entry.path().to_string());
+                        }
+                    }
+                } else {
+                    // No change detected or error - apply by default
+                    confirmed_paths.insert(entry.path().to_string());
+                }
+            }
+
+            if has_warnings {
+                println!();
+            }
+
+            // Now process confirmed files in parallel
+            let results: Vec<Result<()>> = entries_to_apply
+                .par_iter()
+                .filter(|entry| confirmed_paths.contains(&entry.path().to_string()))
+                .map(|entry| {
+                    let dest_path = dest_abs.join(entry.path());
+
+                    // Skip if file doesn't need update
+                    if !needs_update(entry, &dest_path, &identities) {
+                        debug!(path = %entry.path(), "File is already up to date, skipping");
+                        return Ok(());
+                    }
+
+                    match apply_target_entry(entry, &dest_path, &identities) {
+                        Ok(_) => {
+                            debug!(path = %entry.path(), "Applied entry successfully");
+
+                            // Save state to database after successful application
+                            // If state save fails, treat the entire operation as failed
+                            match save_entry_state_to_db(entry) {
+                                Ok(_) => {
+                                    print_success_entry(entry, show_icons);
+                                    stats.record_success(entry);
+                                    Ok(())
+                                }
+                                Err(e) => {
+                                    warn!(path = %entry.path(), error = %e, "Failed to save state to database");
+                                    print_error_entry(entry, &e, show_icons);
+                                    stats.record_failure();
+                                    Err(e)
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(path = %entry.path(), error = %e, "Failed to apply entry");
+                            print_error_entry(entry, &e, show_icons);
+                            stats.record_failure();
+                            Err(e)
+                        }
+                    }
+                })
+                .collect();
+
+            // Check for any errors in parallel execution
+            for result in results {
+                result?;
+            }
+        }
+
+        // Print summary (skip for single file mode)
+        if !is_single_file {
+            println!();
+            stats.print_summary(self.dry_run);
+        }
+
+        let failed_count = stats.failed();
+        if failed_count > 0 {
+            anyhow::bail!("Failed to apply {} entries", failed_count);
+        }
+
+        Ok(())
+    }
 }
 
 /// Entry type filter for apply command
@@ -60,553 +629,6 @@ impl std::str::FromStr for EntryType {
         }
     }
 }
-
-/// Run the apply command with RuntimeContext
-///
-/// This is the preferred way to run the apply command, as it uses the
-/// shared RuntimeContext to reduce parameter passing.
-pub fn run_with_context(
-    context: &RuntimeContext,
-    files: &[PathBuf],
-    options: &ApplyOptions,
-) -> Result<()> {
-    // Parse entry type filters
-    let include_types: Result<Vec<EntryType>> = options.include.iter().map(|s| s.parse()).collect();
-    let _include_types = include_types?;
-
-    let exclude_types: Result<Vec<EntryType>> = options.exclude.iter().map(|s| s.parse()).collect();
-    let _exclude_types = exclude_types?;
-
-    // Extract paths and config from context
-    let source_abs = context.dotfiles_dir();
-    let dest_abs = context.dest_dir();
-    let source_dir = context.source_dir();
-    let config = &context.config;
-
-    if options.dry_run {
-        info!("{}", "Dry run mode - no changes will be made".dimmed());
-    }
-
-    // Load age identities for decryption
-    let spinner = progress::create_spinner("Loading identities...");
-    let identities = std::sync::Arc::new(config.age_identities().unwrap_or_default());
-    spinner.finish_and_clear();
-
-    // Detect if output is to a terminal for icon auto mode
-    let is_tty = std::io::stdout().is_terminal();
-    let show_icons = config.ui.icons.should_show_icons(is_tty);
-
-    // Load variables from .guisu/variables/ directory
-    let guisu_dir = source_dir.join(".guisu");
-    let platform_name = guisu_core::platform::CURRENT_PLATFORM.os;
-
-    let guisu_variables = if guisu_dir.exists() {
-        guisu_config::variables::load_variables(&guisu_dir, platform_name)
-            .context("Failed to load variables from .guisu/variables/")?
-    } else {
-        indexmap::IndexMap::new()
-    };
-
-    // Merge variables: guisu variables + config variables (config overrides)
-    let mut all_variables = guisu_variables;
-    for (key, value) in &config.variables {
-        all_variables.insert(key.clone(), value.clone());
-    }
-
-    // Create template engine with identities, template directory, and bitwarden provider
-    let template_engine =
-        crate::create_template_engine(source_dir, Arc::clone(&identities), config);
-
-    // Create content processor with real decryptor and renderer
-    use guisu_engine::adapters::crypto::CryptoDecryptorAdapter;
-    use guisu_engine::adapters::template::TemplateRendererAdapter;
-
-    // Use Arc to share identity without cloning
-    let identity_arc = if let Some(first) = identities.first() {
-        // Share the first identity from the Arc<Vec>
-        Arc::new(first.clone())
-    } else {
-        // Generate a new identity if none configured
-        Arc::new(guisu_crypto::Identity::generate())
-    };
-    let decryptor = CryptoDecryptorAdapter::from_arc(identity_arc);
-    let renderer = TemplateRendererAdapter::new(template_engine);
-    let processor = ContentProcessor::new(decryptor, renderer);
-
-    // Load metadata for create-once tracking
-    let metadata =
-        guisu_engine::state::Metadata::load(source_dir).context("Failed to load metadata")?;
-
-    // Create ignore matcher from .guisu/ignores.toml
-    // Use dotfiles_dir as the match root so patterns match relative to the dotfiles directory
-    let ignore_matcher = guisu_config::IgnoreMatcher::from_ignores_toml(source_dir)
-        .context("Failed to load ignore patterns from .guisu/ignores.toml")?;
-
-    // Check if we're applying a single file (affects output verbosity)
-    let is_single_file = !files.is_empty() && files.len() == 1;
-
-    // Build filter paths if specific files requested
-    let filter_paths = if !files.is_empty() {
-        Some(crate::build_filter_paths(files, dest_abs)?)
-    } else {
-        None
-    };
-
-    // Read source state with ignore matcher from config
-    let spinner = if !is_single_file {
-        Some(progress::create_spinner("Reading source state..."))
-    } else {
-        None
-    };
-
-    // Load ignore matcher if .guisu/ignores.toml exists
-    let matcher = guisu_config::IgnoreMatcher::from_ignores_toml(source_dir).ok();
-
-    // Read source state with optional ignore filtering
-    let source_state = if let Some(ref matcher) = matcher {
-        SourceState::read_with_matcher(source_abs.to_owned(), Some(matcher))
-            .context("Failed to read source state with ignore matcher")?
-    } else {
-        SourceState::read(source_abs.to_owned()).context("Failed to read source state")?
-    };
-
-    if let Some(spinner) = spinner {
-        spinner.finish_with_message(format!("Found {} entries", source_state.len()));
-    }
-
-    if source_state.is_empty() {
-        if !is_single_file {
-            info!("No files to apply");
-        }
-        return Ok(());
-    }
-
-    // Use the full source state - we'll filter later
-    let filtered_source_state = source_state;
-
-    // Build target state from filtered source state (processes templates and decrypts files)
-    let spinner = if !is_single_file {
-        Some(progress::create_spinner(
-            "Processing templates and encrypted files...",
-        ))
-    } else {
-        None
-    };
-    // Create template context with system variables and guisu info
-    let template_context = guisu_template::TemplateContext::new()
-        .with_variables(all_variables)
-        .with_guisu_info(
-            source_abs.to_string(),
-            dest_abs.to_string(),
-            config.general.root_entry.display().to_string(),
-        );
-    let context =
-        serde_json::to_value(&template_context).context("Failed to serialize template context")?;
-    let target_state = TargetState::from_source(&filtered_source_state, &processor, &context)?;
-    if let Some(spinner) = spinner {
-        spinner.finish_and_clear();
-    }
-
-    // Filter out create-once files that already exist at the destination
-    // Also filter out ignored files
-    // Also filter by specific file paths if requested
-    let mut entries_to_apply: Vec<&TargetEntry> = target_state
-        .entries()
-        .filter(|entry| {
-            let path_str = entry.path().to_string();
-            let target_path = entry.path();
-
-            // If filtering by specific files, skip entries not in the filter
-            if let Some(ref filter) = filter_paths
-                && !filter.iter().any(|p| p == target_path)
-            {
-                return false;
-            }
-
-            // Skip if file is ignored
-            if ignore_matcher.is_ignored(entry.path().as_path()) {
-                debug!(
-                    path = %path_str,
-                    "Skipping ignored file"
-                );
-                return false;
-            }
-
-            // If file is marked as create-once and already exists, skip it
-            if metadata.is_create_once(&path_str) {
-                let dest_path = dest_abs.join(entry.path());
-                if dest_path.as_path().exists() {
-                    debug!(
-                        path = %path_str,
-                        "Skipping create-once file that already exists"
-                    );
-                    return false;
-                }
-            }
-
-            true
-        })
-        .collect();
-
-    // Sort entries by path for consistent output
-    entries_to_apply.sort_by(|a, b| a.path().as_path().cmp(b.path().as_path()));
-
-    if entries_to_apply.is_empty() {
-        info!("No matching files to apply");
-        return Ok(());
-    }
-
-    // Open database for state tracking (only if not dry run)
-    if !options.dry_run {
-        guisu_engine::database::open_db().context("Failed to open state database")?;
-    }
-
-    // Check for configuration drift (files modified by user AND source updated)
-    if !options.dry_run && !is_single_file {
-        let drift_warnings = detect_config_drift(&entries_to_apply, dest_abs)?;
-        if !drift_warnings.is_empty() {
-            println!("\n{}", "Configuration Drift Detected".yellow().bold());
-            println!(
-                "{}",
-                "The following files have been modified both locally and in the source:".yellow()
-            );
-            for warning in &drift_warnings {
-                println!("  {} {}", "•".yellow(), warning.bright_white());
-            }
-            println!();
-            println!(
-                "{}",
-                "These local changes will be overwritten during apply.".yellow()
-            );
-            println!(
-                "{}",
-                "Consider backing up modified files or using interactive mode (-i) for control."
-                    .dimmed()
-            );
-            println!();
-        }
-    }
-
-    // Create conflict handler for interactive mode
-    let mut conflict_handler = if options.interactive && !options.dry_run {
-        Some(ConflictHandler::new(
-            Arc::clone(config),
-            Arc::clone(&identities),
-        ))
-    } else {
-        None
-    };
-
-    // Apply entries
-    let stats = Arc::new(ApplyStats::new());
-
-    // Use parallel processing only when NOT in interactive mode
-    if options.interactive || options.dry_run {
-        // Sequential processing for interactive mode or dry run
-        for entry in entries_to_apply {
-            let dest_path = dest_abs.join(entry.path());
-
-            if options.dry_run {
-                // Skip if file doesn't need update
-                if !needs_update(entry, &dest_path, &identities) {
-                    debug!(path = %entry.path(), "File is already up to date, skipping");
-                    continue;
-                }
-
-                debug!(path = %entry.path(), "Would apply entry");
-                print_dry_run_entry(entry, show_icons);
-                stats.record_dry_run(entry);
-            } else {
-                // Check for conflicts if interactive mode is enabled
-                let should_apply = if let Some(ref mut handler) = conflict_handler {
-                    // Load last written state from database (only for files)
-                    let last_written_hash = match entry {
-                        TargetEntry::File { .. } => {
-                            let path_str = entry.path().to_string();
-                            guisu_engine::database::get_entry_state(&path_str)
-                                .ok()
-                                .flatten()
-                                .map(|state| state.content_hash)
-                        }
-                        _ => None,
-                    };
-
-                    // Detect type of change
-                    let change_type = ConflictHandler::detect_change_type(
-                        entry,
-                        dest_abs,
-                        last_written_hash.as_deref(),
-                        &identities,
-                    )?;
-
-                    if let Some(change_type) = change_type {
-                        // Prompt user for action with change type information
-                        // Note: We don't store full content in DB, only hash, so last_written_content is None
-                        // This means merge operations will use two-way merge instead of three-way
-                        match handler.prompt_action(entry, dest_abs, None, change_type)? {
-                            ConflictAction::Override => true,
-                            ConflictAction::Skip => {
-                                debug!(path = %entry.path(), "Skipping due to user choice");
-                                println!("  {} {}", "⏭".yellow(), entry.path().bright_white());
-                                false
-                            }
-                            ConflictAction::Quit => {
-                                info!("Apply operation cancelled by user");
-                                return Ok(());
-                            }
-                            // Merge and Edit are handled internally by prompt_action and return Override when done
-                            // Diff continues the prompt loop internally
-                            _ => unreachable!("Unexpected action returned from prompt_action"),
-                        }
-                    } else {
-                        // No change detected, but check if file actually needs update
-                        needs_update(entry, &dest_path, &identities)
-                    }
-                } else {
-                    // Non-interactive mode: check for local modifications and warn user
-                    if !needs_update(entry, &dest_path, &identities) {
-                        false
-                    } else {
-                        // Load last written state to detect change type
-                        let last_written_hash = match entry {
-                            TargetEntry::File { .. } => {
-                                let path_str = entry.path().to_string();
-                                guisu_engine::database::get_entry_state(&path_str)
-                                    .ok()
-                                    .flatten()
-                                    .map(|state| state.content_hash)
-                            }
-                            _ => None,
-                        };
-
-                        // Detect type of change
-                        let change_type = ConflictHandler::detect_change_type(
-                            entry,
-                            dest_abs,
-                            last_written_hash.as_deref(),
-                            &identities,
-                        )?;
-
-                        // If local modification or true conflict detected, warn user
-                        if let Some(change_type) = change_type {
-                            match change_type {
-                                ChangeType::LocalModification | ChangeType::TrueConflict => {
-                                    // Show warning
-                                    let change_label = match change_type {
-                                        ChangeType::LocalModification => "Local modification",
-                                        ChangeType::TrueConflict => {
-                                            "Conflict (both local and source modified)"
-                                        }
-                                        _ => unreachable!(),
-                                    };
-
-                                    println!("\n{} {}", "⚠".yellow(), change_label.yellow().bold());
-                                    println!("  File: {}", entry.path().bright_white());
-                                    println!(
-                                        "  {}",
-                                        "This file has been modified locally.".yellow()
-                                    );
-                                    println!(
-                                        "  {}",
-                                        "Applying will overwrite your local changes.".yellow()
-                                    );
-
-                                    // Ask for confirmation
-                                    use dialoguer::{Confirm, theme::ColorfulTheme};
-                                    let theme = ColorfulTheme::default();
-
-                                    Confirm::with_theme(&theme)
-                                        .with_prompt("Continue and overwrite local changes?")
-                                        .default(false)
-                                        .interact()
-                                        .context("Failed to read user input")?
-                                }
-                                ChangeType::SourceUpdate => {
-                                    // Source update only, safe to apply
-                                    true
-                                }
-                            }
-                        } else {
-                            // No change detected by change_type, but needs_update said yes
-                            // This can happen for new files or permission changes
-                            true
-                        }
-                    }
-                };
-
-                if should_apply {
-                    match apply_target_entry(entry, &dest_path, &identities) {
-                        Ok(_) => {
-                            debug!(path = %entry.path(), "Applied entry successfully");
-
-                            // Save state to database after successful application
-                            // If state save fails, treat the entire operation as failed
-                            match save_entry_state_to_db(entry) {
-                                Ok(_) => {
-                                    print_success_entry(entry, show_icons);
-                                    stats.record_success(entry);
-                                }
-                                Err(e) => {
-                                    warn!(path = %entry.path(), error = %e, "Failed to save state to database");
-                                    print_error_entry(entry, &e, show_icons);
-                                    stats.record_failure();
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(path = %entry.path(), error = %e, "Failed to apply entry");
-                            print_error_entry(entry, &e, show_icons);
-                            stats.record_failure();
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        // Parallel processing for non-interactive mode
-        // First, pre-scan for local modifications and get confirmations
-        use std::collections::HashSet;
-        let mut confirmed_paths = HashSet::new();
-        let mut has_warnings = false;
-
-        for entry in &entries_to_apply {
-            let dest_path = dest_abs.join(entry.path());
-
-            // Skip if file doesn't need update
-            if !needs_update(entry, &dest_path, &identities) {
-                continue;
-            }
-
-            // Load last written state to detect change type
-            let last_written_hash = match entry {
-                TargetEntry::File { .. } => {
-                    let path_str = entry.path().to_string();
-                    guisu_engine::database::get_entry_state(&path_str)
-                        .ok()
-                        .flatten()
-                        .map(|state| state.content_hash)
-                }
-                _ => None,
-            };
-
-            // Detect type of change
-            if let Ok(Some(change_type)) = ConflictHandler::detect_change_type(
-                entry,
-                dest_abs,
-                last_written_hash.as_deref(),
-                &identities,
-            ) {
-                match change_type {
-                    ChangeType::LocalModification | ChangeType::TrueConflict => {
-                        has_warnings = true;
-
-                        // Show warning
-                        let change_label = match change_type {
-                            ChangeType::LocalModification => "Local modification",
-                            ChangeType::TrueConflict => "Conflict (both local and source modified)",
-                            _ => unreachable!(),
-                        };
-
-                        println!("\n{} {}", "⚠".yellow(), change_label.yellow().bold());
-                        println!("  File: {}", entry.path().bright_white());
-                        println!("  {}", "This file has been modified locally.".yellow());
-                        println!(
-                            "  {}",
-                            "Applying will overwrite your local changes.".yellow()
-                        );
-
-                        // Ask for confirmation
-                        use dialoguer::{Confirm, theme::ColorfulTheme};
-                        let theme = ColorfulTheme::default();
-
-                        let confirmed = Confirm::with_theme(&theme)
-                            .with_prompt("Continue and overwrite local changes?")
-                            .default(false)
-                            .interact()
-                            .context("Failed to read user input")?;
-
-                        if confirmed {
-                            confirmed_paths.insert(entry.path().to_string());
-                        }
-                    }
-                    ChangeType::SourceUpdate => {
-                        // Source update only, safe to apply
-                        confirmed_paths.insert(entry.path().to_string());
-                    }
-                }
-            } else {
-                // No change detected or error - apply by default
-                confirmed_paths.insert(entry.path().to_string());
-            }
-        }
-
-        if has_warnings {
-            println!();
-        }
-
-        // Now process confirmed files in parallel
-        let results: Vec<Result<()>> = entries_to_apply
-            .par_iter()
-            .filter(|entry| confirmed_paths.contains(&entry.path().to_string()))
-            .map(|entry| {
-                let dest_path = dest_abs.join(entry.path());
-
-                // Skip if file doesn't need update
-                if !needs_update(entry, &dest_path, &identities) {
-                    debug!(path = %entry.path(), "File is already up to date, skipping");
-                    return Ok(());
-                }
-
-                match apply_target_entry(entry, &dest_path, &identities) {
-                    Ok(_) => {
-                        debug!(path = %entry.path(), "Applied entry successfully");
-
-                        // Save state to database after successful application
-                        // If state save fails, treat the entire operation as failed
-                        match save_entry_state_to_db(entry) {
-                            Ok(_) => {
-                                print_success_entry(entry, show_icons);
-                                stats.record_success(entry);
-                                Ok(())
-                            }
-                            Err(e) => {
-                                warn!(path = %entry.path(), error = %e, "Failed to save state to database");
-                                print_error_entry(entry, &e, show_icons);
-                                stats.record_failure();
-                                Err(e)
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!(path = %entry.path(), error = %e, "Failed to apply entry");
-                        print_error_entry(entry, &e, show_icons);
-                        stats.record_failure();
-                        Err(e)
-                    }
-                }
-            })
-            .collect();
-
-        // Check for any errors in parallel execution
-        for result in results {
-            result?;
-        }
-    }
-
-    // Print summary (skip for single file mode)
-    if !is_single_file {
-        println!();
-        stats.print_summary(options.dry_run);
-    }
-
-    let failed_count = stats.failed();
-    if failed_count > 0 {
-        anyhow::bail!("Failed to apply {} entries", failed_count);
-    }
-
-    Ok(())
-}
-
 /// Check if a target entry needs to be updated at the destination
 ///
 /// Returns true if:
@@ -1173,27 +1195,4 @@ fn decrypt_inline_age_values(
             Ok(content.to_vec())
         }
     }
-}
-
-/// Run the apply command (legacy interface)
-///
-/// This function provides backward compatibility with the old interface.
-/// New code should use `run_with_context` instead, which accepts a
-/// `RuntimeContext` and reduces parameter passing.
-///
-/// # Deprecated
-///
-/// Prefer `run_with_context` for new code.
-pub fn run(
-    source_dir: &Path,
-    dest_dir: &Path,
-    files: &[PathBuf],
-    options: &ApplyOptions,
-    config: &Config,
-) -> Result<()> {
-    // Create RuntimeContext from individual parameters
-    let context = RuntimeContext::new(config.clone(), source_dir, dest_dir)?;
-
-    // Delegate to the new implementation
-    run_with_context(&context, files, options)
 }

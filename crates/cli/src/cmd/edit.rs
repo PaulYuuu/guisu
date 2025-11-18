@@ -3,14 +3,17 @@
 //! Edit files in the source directory with transparent decryption for encrypted files.
 
 use anyhow::{Context, Result};
+use clap::Args;
 use once_cell::sync::Lazy;
 use owo_colors::OwoColorize;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::Command as ProcessCommand;
 use tempfile::TempDir;
 
+use crate::command::Command;
+use crate::common::RuntimeContext;
 use guisu_config::Config;
 
 /// Cached regex for matching inline age encrypted values
@@ -19,8 +22,32 @@ static AGE_VALUE_REGEX: Lazy<regex::Regex> = Lazy::new(|| {
         .expect("AGE_VALUE_REGEX compilation should never fail")
 });
 
-/// Run the edit command
-pub fn run(
+/// Edit command
+#[derive(Args)]
+pub struct EditCommand {
+    /// Target file to edit (e.g., ~/.bashrc)
+    #[arg(required = true)]
+    pub target: PathBuf,
+
+    /// Apply changes after editing
+    #[arg(short, long)]
+    pub apply: bool,
+}
+
+impl Command for EditCommand {
+    fn execute(&self, context: &RuntimeContext) -> Result<()> {
+        run_impl(
+            context.source_dir(),
+            context.dest_dir().as_path(),
+            &self.target,
+            self.apply,
+            &context.config,
+        )
+    }
+}
+
+/// Run the edit command implementation
+fn run_impl(
     source_dir: &Path,
     dest_dir: &Path,
     target: &Path,
@@ -46,14 +73,20 @@ pub fn run(
     // Apply if requested
     if apply {
         println!("\n  {} Applying changes...", "→".bright_blue());
-        let options = crate::cmd::apply::ApplyOptions::default();
-        crate::cmd::apply::run(
-            source_dir,
-            dest_dir,
-            &[target.to_path_buf()],
-            &options,
-            config,
-        )?;
+
+        // Create ApplyCommand with target file
+        let apply_cmd = crate::cmd::apply::ApplyCommand {
+            files: vec![target.to_path_buf()],
+            dry_run: false,
+            force: false,
+            interactive: false,
+            include: vec![],
+            exclude: vec![],
+        };
+
+        // Create RuntimeContext and execute
+        let context = crate::common::RuntimeContext::new(config.clone(), source_dir, dest_dir)?;
+        apply_cmd.execute(&context)?;
     }
 
     println!();
@@ -151,7 +184,7 @@ fn get_editor(config: &Config) -> Result<(String, Vec<String>)> {
 
 /// Run the editor with the given file
 fn run_editor(editor: &str, args: &[String], file: &Path) -> Result<()> {
-    let status = Command::new(editor)
+    let status = ProcessCommand::new(editor)
         .args(args)
         .arg(file)
         .status()

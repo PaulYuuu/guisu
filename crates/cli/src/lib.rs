@@ -4,6 +4,7 @@
 //! for testing and integration with other tools.
 
 pub mod cmd;
+pub mod command;
 pub mod common;
 pub mod logging;
 pub mod stats;
@@ -13,6 +14,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use owo_colors::OwoColorize;
 use std::path::PathBuf;
+
+use command::Command;
+use common::RuntimeContext;
 
 /// Guisu - A dotfile manager inspired by chezmoi
 #[derive(Parser)]
@@ -107,111 +111,27 @@ Examples:
     },
 
     /// Add a file to the source directory
-    Add {
-        /// Files to add to the source directory
-        #[arg(required = true)]
-        files: Vec<PathBuf>,
-
-        /// Mark file as a template
-        #[arg(short, long)]
-        template: bool,
-
-        /// Auto-detect template variables and create templates (implies --template)
-        #[arg(short, long)]
-        autotemplate: bool,
-
-        /// Encrypt the file with age
-        #[arg(short = 'E', long)]
-        encrypt: bool,
-
-        /// Mark file for create-once (only copy if destination doesn't exist)
-        #[arg(short, long)]
-        create: bool,
-
-        /// Force overwrite if file already exists in source
-        #[arg(short, long)]
-        force: bool,
-
-        /// How to handle files containing secrets (ignore, warning, error)
-        #[arg(long, default_value = "warning")]
-        secrets: String,
-    },
+    Add(cmd::add::AddCommand),
 
     /// Apply the source state to the destination
-    Apply {
-        /// Specific files to apply (all if not specified)
-        files: Vec<PathBuf>,
-
-        /// Dry run - show what would be done
-        #[arg(short = 'n', long)]
-        dry_run: bool,
-
-        /// Force overwrite of changed files
-        #[arg(short, long)]
-        force: bool,
-
-        /// Interactive mode - prompt on conflicts
-        #[arg(short, long)]
-        interactive: bool,
-
-        /// Include only these entry types (comma-separated: files,dirs,symlinks,templates,encrypted)
-        #[arg(long, value_delimiter = ',')]
-        include: Vec<String>,
-
-        /// Exclude these entry types (comma-separated: files,dirs,symlinks,templates,encrypted)
-        #[arg(long, value_delimiter = ',')]
-        exclude: Vec<String>,
-    },
+    #[command(name = "apply")]
+    Apply(cmd::apply::ApplyCommand),
 
     /// Show differences between source and destination
-    Diff {
-        /// Specific files to diff (all if not specified)
-        files: Vec<PathBuf>,
-
-        /// Use pager for output
-        #[arg(long)]
-        pager: bool,
-
-        /// Interactive diff viewer
-        #[arg(short, long)]
-        interactive: bool,
-    },
+    Diff(cmd::diff::DiffCommand),
 
     /// Manage age encryption identities
     #[command(subcommand)]
     Age(AgeCommands),
 
     /// Show status of managed files
-    Status {
-        /// Specific files to check (all if not specified)
-        files: Vec<PathBuf>,
-
-        /// Show all files including synced ones
-        #[arg(short, long)]
-        all: bool,
-
-        /// Display output in tree format
-        #[arg(long)]
-        tree: bool,
-    },
+    Status(cmd::status::StatusCommand),
 
     /// Display file contents (decrypt and render templates)
-    Cat {
-        /// Files to display
-        #[arg(required = true)]
-        files: Vec<PathBuf>,
-    },
+    Cat(cmd::cat::CatCommand),
 
     /// Edit the source state of a target file
-    Edit {
-        /// Target file to edit (e.g., ~/.bashrc)
-        #[arg(required = true)]
-        target: PathBuf,
-
-        /// Apply changes after editing
-        #[arg(short, long)]
-        apply: bool,
-    },
+    Edit(cmd::edit::EditCommand),
 
     /// View ignored files and patterns
     #[command(subcommand)]
@@ -245,41 +165,13 @@ Examples:
 
   • guisu update --rebase
       → Use rebase instead of fast-forward when branches diverge")]
-    Update {
-        /// Apply changes after pulling (default: true)
-        #[arg(short, long, default_value_t = true)]
-        apply: bool,
-
-        /// Use rebase instead of merge when branches have diverged
-        #[arg(short, long)]
-        rebase: bool,
-    },
+    Update(cmd::update::UpdateCommand),
 
     /// Display guisu status information and validate configuration
-    Info {
-        /// Show all details (build info, versions, public keys, configuration, etc.)
-        #[arg(long)]
-        all: bool,
-
-        /// Output in JSON format (default: table format)
-        #[arg(long)]
-        json: bool,
-    },
+    Info(cmd::info::InfoCommand),
 
     /// Display all template variables
-    Variables {
-        /// Output in JSON format (default: pretty format)
-        #[arg(long)]
-        json: bool,
-
-        /// Show only builtin (system) variables
-        #[arg(long)]
-        builtin: bool,
-
-        /// Show only user-defined variables
-        #[arg(long)]
-        user: bool,
-    },
+    Variables(cmd::variables::VariablesCommand),
 
     /// Manage hooks (run, list, show)
     #[command(subcommand)]
@@ -472,8 +364,20 @@ pub fn run(cli: Cli) -> Result<()> {
             println!("\nApplying changes...");
             // Now load config after source directory is created
             let config = load_config_with_template_support(cli.config.as_deref(), &source_path)?;
-            let options = crate::cmd::apply::ApplyOptions::default();
-            crate::cmd::apply::run(&source_path, &dest_dir, &[], &options, &config)?;
+
+            // Create ApplyCommand with default options (all files)
+            let apply_cmd = cmd::apply::ApplyCommand {
+                files: vec![],
+                dry_run: false,
+                force: false,
+                interactive: false,
+                include: vec![],
+                exclude: vec![],
+            };
+
+            // Create RuntimeContext and execute
+            let context = RuntimeContext::new(config, &source_path, &dest_dir)?;
+            apply_cmd.execute(&context)?;
         }
         return Ok(());
     }
@@ -481,40 +385,22 @@ pub fn run(cli: Cli) -> Result<()> {
     // For all other commands, load config now
     let config = load_config_with_template_support(cli.config.as_deref(), &source_dir)?;
 
+    // Create RuntimeContext for commands
+    let context = RuntimeContext::new(config.clone(), &source_dir, &dest_dir)?;
+
     // Execute the command
     match cli.command {
         Commands::Init { .. } => {
             unreachable!("Init command already handled above")
         }
-        Commands::Add {
-            files,
-            template,
-            autotemplate,
-            encrypt,
-            create,
-            force,
-            secrets,
-        } => {
-            let options = cmd::add::AddOptions {
-                template,
-                autotemplate,
-                encrypt,
-                create,
-                force,
-                secrets,
-            };
-            cmd::add::run(&source_dir, &dest_dir, &files, &options, &config)?;
+        Commands::Add(add_cmd) => {
+            add_cmd.execute(&context)?;
         }
-        Commands::Apply {
-            files,
-            dry_run,
-            force,
-            interactive,
-            include,
-            exclude,
-        } => {
+        Commands::Apply(apply_cmd) => {
             // Handle pre-apply hooks (unless it's a dry run)
-            if !dry_run && let Err(e) = cmd::hooks::handle_hooks_pre(&source_dir, &config) {
+            if !apply_cmd.dry_run
+                && let Err(e) = cmd::hooks::handle_hooks_pre(context.source_dir(), &context.config)
+            {
                 tracing::warn!("Pre-apply hooks failed: {}", e);
                 println!(
                     "{}: Pre-apply hooks encountered issues: {}",
@@ -524,18 +410,13 @@ pub fn run(cli: Cli) -> Result<()> {
                 println!("Continuing with file application...\n");
             }
 
-            // Apply dotfiles
-            let options = cmd::apply::ApplyOptions {
-                dry_run,
-                force,
-                interactive,
-                include,
-                exclude,
-            };
-            cmd::apply::run(&source_dir, &dest_dir, &files, &options, &config)?;
+            // Execute apply command
+            apply_cmd.execute(&context)?;
 
             // Handle post-apply hooks (unless it's a dry run)
-            if !dry_run && let Err(e) = cmd::hooks::handle_hooks_post(&source_dir, &config) {
+            if !apply_cmd.dry_run
+                && let Err(e) = cmd::hooks::handle_hooks_post(context.source_dir(), &context.config)
+            {
                 tracing::warn!("Post-apply hooks failed: {}", e);
                 println!(
                     "{}: Post-apply hooks encountered issues: {}",
@@ -544,29 +425,25 @@ pub fn run(cli: Cli) -> Result<()> {
                 );
             }
         }
-        Commands::Diff {
-            files,
-            pager,
-            interactive,
-        } => {
-            cmd::diff::run(&source_dir, &dest_dir, &files, pager, interactive, &config)?;
+        Commands::Diff(diff_cmd) => {
+            diff_cmd.execute(&context)?;
         }
         Commands::Age(age_cmd) => match age_cmd {
             AgeCommands::Generate { output } => {
                 cmd::age::generate(output)?;
             }
             AgeCommands::Show => {
-                cmd::age::show(&config)?;
+                cmd::age::show(&context.config)?;
             }
             AgeCommands::Encrypt {
                 value,
                 interactive,
                 recipients,
             } => {
-                cmd::age::encrypt(value, interactive, recipients, &config)?;
+                cmd::age::encrypt(value, interactive, recipients, &context.config)?;
             }
             AgeCommands::Decrypt { value } => {
-                cmd::age::decrypt(value, &config)?;
+                cmd::age::decrypt(value, &context.config)?;
             }
             AgeCommands::Migrate {
                 old_identities,
@@ -574,69 +451,63 @@ pub fn run(cli: Cli) -> Result<()> {
                 dry_run,
                 yes,
             } => {
-                cmd::age::migrate(&source_dir, &old_identities, &new_identities, dry_run, yes)?;
+                cmd::age::migrate(
+                    context.source_dir(),
+                    &old_identities,
+                    &new_identities,
+                    dry_run,
+                    yes,
+                )?;
             }
         },
-        Commands::Status { files, all, tree } => {
-            let output_format = if tree {
-                cmd::status::OutputFormat::Tree
-            } else {
-                cmd::status::OutputFormat::Simple
-            };
-            cmd::status::run(&source_dir, &dest_dir, &config, &files, all, output_format)?;
+        Commands::Status(status_cmd) => {
+            status_cmd.execute(&context)?;
         }
-        Commands::Cat { files } => {
-            cmd::cat::run(&source_dir, &dest_dir, &files, &config)?;
+        Commands::Cat(cat_cmd) => {
+            cat_cmd.execute(&context)?;
         }
-        Commands::Edit { target, apply } => {
-            cmd::edit::run(&source_dir, &dest_dir, &target, apply, &config)?;
+        Commands::Edit(edit_cmd) => {
+            edit_cmd.execute(&context)?;
         }
         Commands::Ignored(ignored_cmd) => match ignored_cmd {
             IgnoredCommands::List => {
-                cmd::ignored::run_list(&source_dir, &config)?;
+                cmd::ignored::run_list(context.source_dir(), &context.config)?;
             }
             IgnoredCommands::Rules { all } => {
-                cmd::ignored::run_show(&source_dir, &config, all)?;
+                cmd::ignored::run_show(context.source_dir(), &context.config, all)?;
             }
         },
         Commands::Templates(templates_cmd) => match templates_cmd {
             TemplatesCommands::List => {
-                cmd::templates::run_list(&source_dir, &config)?;
+                cmd::templates::run_list(context.source_dir(), &context.config)?;
             }
             TemplatesCommands::Show { name } => {
-                cmd::templates::run_show(&source_dir, &dest_dir, &name, &config)?;
+                cmd::templates::run_show(
+                    context.source_dir(),
+                    context.dest_dir().as_path(),
+                    &name,
+                    &context.config,
+                )?;
             }
         },
-        Commands::Update { apply, rebase } => {
-            cmd::update::run(&source_dir, &dest_dir, apply, rebase, &config)?;
+        Commands::Update(update_cmd) => {
+            update_cmd.execute(&context)?;
         }
-        Commands::Info { all, json } => {
-            cmd::info::run(&source_dir, &config, all, json)?;
+        Commands::Info(info_cmd) => {
+            info_cmd.execute(&context)?;
         }
-        Commands::Variables {
-            json,
-            builtin,
-            user,
-        } => {
-            // Determine filter based on flags
-            let filter = match (builtin, user) {
-                (true, true) => cmd::variables::VariableFilter::All, // Both = show all
-                (true, false) => cmd::variables::VariableFilter::BuiltinOnly,
-                (false, true) => cmd::variables::VariableFilter::UserOnly,
-                (false, false) => cmd::variables::VariableFilter::All, // Default = show all
-            };
-
-            cmd::variables::run(&source_dir, &config, json, filter)?;
+        Commands::Variables(vars_cmd) => {
+            vars_cmd.execute(&context)?;
         }
         Commands::Hooks(hooks_cmd) => match hooks_cmd {
             HooksCommands::Run { yes, hook } => {
-                cmd::hooks::run_hooks(&source_dir, &config, yes, hook.as_deref())?;
+                cmd::hooks::run_hooks(context.source_dir(), &context.config, yes, hook.as_deref())?;
             }
             HooksCommands::List { format } => {
-                cmd::hooks::run_list(&source_dir, &config, &format)?;
+                cmd::hooks::run_list(context.source_dir(), &context.config, &format)?;
             }
             HooksCommands::Show { name } => {
-                cmd::hooks::run_show(&source_dir, &config, &name)?;
+                cmd::hooks::run_show(context.source_dir(), &context.config, &name)?;
             }
         },
     }
@@ -871,7 +742,10 @@ pub fn create_template_engine(
 /// ```no_run
 /// # use std::fs;
 /// # use std::path::Path;
-/// # use guisu_cli::path_io_error;
+/// # use anyhow::anyhow;
+/// # fn path_io_error(path: &Path, op: &str, e: std::io::Error) -> anyhow::Error {
+/// #     anyhow!("Failed to {} '{}': {}", op, path.display(), e)
+/// # }
 /// let path = Path::new("config.toml");
 /// let content = fs::read_to_string(path)
 ///     .map_err(|e| path_io_error(path, "read config file", e))?;

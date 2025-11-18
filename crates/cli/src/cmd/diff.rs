@@ -3,6 +3,7 @@
 //! Show differences between source and destination states.
 
 use anyhow::{Context, Result};
+use clap::Args;
 use guisu_core::path::AbsPath;
 use guisu_engine::adapters::crypto::CryptoDecryptorAdapter;
 use guisu_engine::adapters::template::TemplateRendererAdapter;
@@ -15,16 +16,47 @@ use similar::{ChangeTag, TextDiff};
 use std::env;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
+use crate::command::Command;
+use crate::common::RuntimeContext;
 use crate::stats::DiffStats;
 use guisu_config::Config;
 
-/// Run the diff command
-pub fn run(
+/// Diff command
+#[derive(Args)]
+pub struct DiffCommand {
+    /// Specific files to diff (all if not specified)
+    pub files: Vec<PathBuf>,
+
+    /// Use pager for output
+    #[arg(long)]
+    pub pager: bool,
+
+    /// Interactive diff viewer
+    #[arg(short, long)]
+    pub interactive: bool,
+}
+
+impl Command for DiffCommand {
+    fn execute(&self, context: &RuntimeContext) -> Result<()> {
+        run_impl(
+            context.source_dir(),
+            context.dest_dir().as_path(),
+            &self.files,
+            self.pager,
+            self.interactive,
+            &context.config,
+        )
+    }
+}
+
+/// Run the diff command implementation
+fn run_impl(
     source_dir: &Path,
     dest_dir: &Path,
     files: &[PathBuf],
@@ -584,7 +616,11 @@ fn maybe_use_pager(output: &str, _config: &Config) -> Result<()> {
     let cmd = parts.next().unwrap_or("less");
     let args: Vec<_> = parts.collect();
 
-    match Command::new(cmd).args(&args).stdin(Stdio::piped()).spawn() {
+    match ProcessCommand::new(cmd)
+        .args(&args)
+        .stdin(Stdio::piped())
+        .spawn()
+    {
         Ok(mut child) => {
             if let Some(mut stdin) = child.stdin.take() {
                 // Write colored output

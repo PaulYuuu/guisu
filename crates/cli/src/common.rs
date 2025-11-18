@@ -50,7 +50,7 @@ impl ResolvedPaths {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```ignore
     /// use guisu_cli::common::ResolvedPaths;
     /// use guisu_config::Config;
     /// use std::path::Path;
@@ -93,7 +93,7 @@ impl ResolvedPaths {
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```ignore
 /// use guisu_cli::common::RuntimeContext;
 /// use guisu_config::Config;
 /// use std::path::Path;

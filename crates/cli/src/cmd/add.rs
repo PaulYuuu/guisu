@@ -3,6 +3,7 @@
 //! Add files to the guisu source directory.
 
 use anyhow::{Context, Result};
+use clap::Args;
 use guisu_core::path::AbsPath;
 use once_cell::sync::Lazy;
 use owo_colors::OwoColorize;
@@ -11,6 +12,8 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 use walkdir::WalkDir;
 
+use crate::command::Command;
+use crate::common::RuntimeContext;
 use guisu_config::Config;
 
 /// How to handle files containing secrets
@@ -24,28 +27,36 @@ enum SecretsMode {
     Error,
 }
 
-/// Options for the add command
-#[derive(Debug, Clone)]
-pub struct AddOptions {
-    pub template: bool,
-    pub autotemplate: bool,
-    pub encrypt: bool,
-    pub create: bool,
-    pub force: bool,
-    pub secrets: String,
-}
+/// Add files to the source directory
+#[derive(Debug, Clone, Args)]
+pub struct AddCommand {
+    /// Files to add to the source directory
+    #[arg(required = true)]
+    pub files: Vec<PathBuf>,
 
-impl Default for AddOptions {
-    fn default() -> Self {
-        Self {
-            template: false,
-            autotemplate: false,
-            encrypt: false,
-            create: false,
-            force: false,
-            secrets: "error".to_string(),
-        }
-    }
+    /// Mark file as a template
+    #[arg(short, long)]
+    pub template: bool,
+
+    /// Auto-detect template variables and create templates (implies --template)
+    #[arg(short, long)]
+    pub autotemplate: bool,
+
+    /// Encrypt the file with age
+    #[arg(short = 'E', long)]
+    pub encrypt: bool,
+
+    /// Mark file for create-once (only copy if destination doesn't exist)
+    #[arg(short, long)]
+    pub create: bool,
+
+    /// Force overwrite if file already exists in source
+    #[arg(short, long)]
+    pub force: bool,
+
+    /// How to handle files containing secrets (ignore, warning, error)
+    #[arg(long, default_value = "warning")]
+    pub secrets: String,
 }
 
 /// Parameters for adding files to guisu (internal)
@@ -61,104 +72,92 @@ struct AddParams<'a> {
     config: &'a Config,
 }
 
-pub fn run(
-    source_dir: &Path,
-    dest_dir: &Path,
-    files: &[PathBuf],
-    options: &AddOptions,
-    config: &Config,
-) -> Result<()> {
-    // Parse secrets handling mode
-    let secrets_mode = match options.secrets.as_str() {
-        "ignore" => SecretsMode::Ignore,
-        "warning" => SecretsMode::Warning,
-        "error" => SecretsMode::Error,
-        _ => anyhow::bail!(
-            "Invalid secrets mode: {}. Must be one of: ignore, warning, error",
-            options.secrets
-        ),
-    };
+impl Command for AddCommand {
+    fn execute(&self, context: &RuntimeContext) -> Result<()> {
+        // Parse secrets handling mode
+        let secrets_mode = match self.secrets.as_str() {
+            "ignore" => SecretsMode::Ignore,
+            "warning" => SecretsMode::Warning,
+            "error" => SecretsMode::Error,
+            _ => anyhow::bail!(
+                "Invalid secrets mode: {}. Must be one of: ignore, warning, error",
+                self.secrets
+            ),
+        };
 
-    // Create source directory if it doesn't exist
-    if !source_dir.exists() {
-        fs::create_dir_all(source_dir).with_context(|| {
-            format!(
-                "Failed to create source directory: {}",
-                source_dir.display()
-            )
-        })?;
-        println!(
-            "\n  {} {}",
-            "created".dimmed(),
-            source_dir.display().to_string().bright_cyan()
-        );
-    }
+        let source_dir = context.source_dir();
+        let source_abs = context.dotfiles_dir();
+        let dest_abs = context.dest_dir();
+        let config = &context.config;
 
-    let source_abs = AbsPath::new(fs::canonicalize(source_dir).with_context(|| {
-        format!(
-            "Failed to access source directory: {}",
-            source_dir.display()
-        )
-    })?)?;
-    let dest_abs = AbsPath::new(fs::canonicalize(dest_dir).with_context(|| {
-        format!(
-            "Failed to access destination directory: {}",
-            dest_dir.display()
-        )
-    })?)?;
-
-    // Load metadata if create flag is used
-    let mut metadata = if options.create {
-        guisu_engine::state::Metadata::load(source_dir).context("Failed to load metadata")?
-    } else {
-        guisu_engine::state::Metadata::default()
-    };
-
-    // Create AddParams struct to pass to helper functions
-    let params = AddParams {
-        source_dir: &source_abs,
-        dest_dir: &dest_abs,
-        template: options.template,
-        autotemplate: options.autotemplate,
-        encrypt: options.encrypt,
-        force: options.force,
-        secrets_mode,
-        config,
-    };
-
-    println!();
-    let mut total_files_added = 0;
-
-    for file_path in files {
-        let (rel_path, count) = add_file(&params, file_path)
-            .with_context(|| format!("Failed to add file: {}", file_path.display()))?;
-
-        total_files_added += count;
-
-        // Add to create-once list if requested
-        if options.create {
-            metadata.add_create_once(rel_path.to_string());
+        // Create source directory if it doesn't exist
+        if !source_dir.exists() {
+            fs::create_dir_all(source_dir).with_context(|| {
+                format!(
+                    "Failed to create source directory: {}",
+                    source_dir.display()
+                )
+            })?;
+            println!(
+                "\n  {} {}",
+                "created".dimmed(),
+                source_dir.display().to_string().bright_cyan()
+            );
         }
-    }
 
-    // Save metadata if create flag was used
-    if options.create {
-        metadata
-            .save(source_dir)
-            .context("Failed to save metadata")?;
+        // Load metadata if create flag is used
+        let mut metadata = if self.create {
+            guisu_engine::state::Metadata::load(source_dir).context("Failed to load metadata")?
+        } else {
+            guisu_engine::state::Metadata::default()
+        };
+
+        // Create AddParams struct to pass to helper functions
+        let params = AddParams {
+            source_dir: source_abs,
+            dest_dir: dest_abs,
+            template: self.template,
+            autotemplate: self.autotemplate,
+            encrypt: self.encrypt,
+            force: self.force,
+            secrets_mode,
+            config,
+        };
+
+        println!();
+        let mut total_files_added = 0;
+
+        for file_path in &self.files {
+            let (rel_path, count) = add_file(&params, file_path)
+                .with_context(|| format!("Failed to add file: {}", file_path.display()))?;
+
+            total_files_added += count;
+
+            // Add to create-once list if requested
+            if self.create {
+                metadata.add_create_once(rel_path.to_string());
+            }
+        }
+
+        // Save metadata if create flag was used
+        if self.create {
+            metadata
+                .save(source_dir)
+                .context("Failed to save metadata")?;
+            println!(
+                "  {} {}",
+                "✓".bright_green(),
+                "Updated .guisu/state.toml with create-once files".dimmed()
+            );
+        }
+
         println!(
-            "  {} {}",
+            "\n  {} {}\n",
             "✓".bright_green(),
-            "Updated .guisu/state.toml with create-once files".dimmed()
+            format!("Added {} file(s)", total_files_added).bright_white()
         );
+        Ok(())
     }
-
-    println!(
-        "\n  {} {}\n",
-        "✓".bright_green(),
-        format!("Added {} file(s)", total_files_added).bright_white()
-    );
-    Ok(())
 }
 
 fn add_file(params: &AddParams, file_path: &Path) -> Result<(guisu_core::path::RelPath, usize)> {
