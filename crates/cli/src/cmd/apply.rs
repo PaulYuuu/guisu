@@ -52,8 +52,26 @@ pub struct ApplyCommand {
     pub exclude: Vec<String>,
 }
 
+/// Get the last written content hash for an entry from the database
+///
+/// Returns the content hash if the entry is a file and has state in the database.
+/// Returns None for non-file entries or if no state exists.
+fn get_last_written_hash(entry: &TargetEntry) -> Option<Vec<u8>> {
+    match entry {
+        TargetEntry::File { .. } => {
+            let path_str = entry.path().to_string();
+            guisu_engine::database::get_entry_state(&path_str)
+                .ok()
+                .flatten()
+                .map(|state| state.content_hash)
+        }
+        _ => None,
+    }
+}
+
 impl Command for ApplyCommand {
-    fn execute(&self, context: &RuntimeContext) -> Result<()> {
+    type Output = ();
+    fn execute(&self, context: &RuntimeContext) -> crate::error::Result<()> {
         // Parse entry type filters
         let include_types: Result<Vec<EntryType>> =
             self.include.iter().map(|s| s.parse()).collect();
@@ -95,9 +113,7 @@ impl Command for ApplyCommand {
 
         // Merge variables: guisu variables + config variables (config overrides)
         let mut all_variables = guisu_variables;
-        for (key, value) in &config.variables {
-            all_variables.insert(key.clone(), value.clone());
-        }
+        all_variables.extend(config.variables.iter().map(|(k, v)| (k.clone(), v.clone())));
 
         // Create template engine with identities, template directory, and bitwarden provider
         let template_engine =
@@ -307,17 +323,8 @@ impl Command for ApplyCommand {
                 } else {
                     // Check for conflicts if interactive mode is enabled
                     let should_apply = if let Some(ref mut handler) = conflict_handler {
-                        // Load last written state from database (only for files)
-                        let last_written_hash = match entry {
-                            TargetEntry::File { .. } => {
-                                let path_str = entry.path().to_string();
-                                guisu_engine::database::get_entry_state(&path_str)
-                                    .ok()
-                                    .flatten()
-                                    .map(|state| state.content_hash)
-                            }
-                            _ => None,
-                        };
+                        // Load last written state from database
+                        let last_written_hash = get_last_written_hash(entry);
 
                         // Detect type of change
                         let change_type = ConflictHandler::detect_change_type(
@@ -356,16 +363,7 @@ impl Command for ApplyCommand {
                             false
                         } else {
                             // Load last written state to detect change type
-                            let last_written_hash = match entry {
-                                TargetEntry::File { .. } => {
-                                    let path_str = entry.path().to_string();
-                                    guisu_engine::database::get_entry_state(&path_str)
-                                        .ok()
-                                        .flatten()
-                                        .map(|state| state.content_hash)
-                                }
-                                _ => None,
-                            };
+                            let last_written_hash = get_last_written_hash(entry);
 
                             // Detect type of change
                             let change_type = ConflictHandler::detect_change_type(
@@ -470,16 +468,7 @@ impl Command for ApplyCommand {
                 }
 
                 // Load last written state to detect change type
-                let last_written_hash = match entry {
-                    TargetEntry::File { .. } => {
-                        let path_str = entry.path().to_string();
-                        guisu_engine::database::get_entry_state(&path_str)
-                            .ok()
-                            .flatten()
-                            .map(|state| state.content_hash)
-                    }
-                    _ => None,
-                };
+                let last_written_hash = get_last_written_hash(entry);
 
                 // Detect type of change
                 if let Ok(Some(change_type)) = ConflictHandler::detect_change_type(
@@ -595,7 +584,7 @@ impl Command for ApplyCommand {
 
         let failed_count = stats.failed();
         if failed_count > 0 {
-            anyhow::bail!("Failed to apply {} entries", failed_count);
+            return Err(anyhow::anyhow!("Failed to apply {} entries", failed_count).into());
         }
 
         Ok(())

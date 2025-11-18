@@ -138,6 +138,7 @@ pub enum TargetEntry {
 
 impl TargetEntry {
     /// Get the destination path for this entry
+    #[inline]
     pub fn path(&self) -> &RelPath {
         match self {
             TargetEntry::File { path, .. } => path,
@@ -148,6 +149,7 @@ impl TargetEntry {
     }
 
     /// Get the file mode if applicable
+    #[inline]
     pub fn mode(&self) -> Option<u32> {
         match self {
             TargetEntry::File { mode, .. } => *mode,
@@ -157,6 +159,7 @@ impl TargetEntry {
     }
 
     /// Check if this is a removal entry
+    #[inline]
     pub fn is_removal(&self) -> bool {
         matches!(self, TargetEntry::Remove { .. })
     }

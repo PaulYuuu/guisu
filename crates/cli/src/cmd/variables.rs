@@ -32,7 +32,8 @@ pub struct VariablesCommand {
 }
 
 impl Command for VariablesCommand {
-    fn execute(&self, context: &RuntimeContext) -> Result<()> {
+    type Output = ();
+    fn execute(&self, context: &RuntimeContext) -> crate::error::Result<()> {
         // Determine filter based on flags
         let filter = match (self.builtin, self.user) {
             (true, true) => VariableFilter::All, // Both = show all
@@ -41,7 +42,7 @@ impl Command for VariablesCommand {
             (false, false) => VariableFilter::All, // Default = show all
         };
 
-        run_impl(context.source_dir(), &context.config, self.json, filter)
+        run_impl(context.source_dir(), &context.config, self.json, filter).map_err(Into::into)
     }
 }
 
@@ -125,16 +126,16 @@ fn run_impl(source_dir: &Path, config: &Config, json: bool, filter: VariableFilt
     // Collect guisu runtime variables (only if needed)
     let guisu_vars = if matches!(filter, VariableFilter::All | VariableFilter::BuiltinOnly) {
         let dest_dir = dirs::home_dir()
-            .map(|p| p.to_string_lossy().to_string())
+            .map(|p| crate::path_to_string(&p))
             .unwrap_or_else(|| "/home/unknown".to_string());
 
         // Get the full dotfiles directory (including rootEntry if configured)
         let dotfiles_dir = config.dotfiles_dir(source_dir);
 
         Some(GuisuVariables {
-            src_dir: dotfiles_dir.to_string_lossy().to_string(),
+            src_dir: crate::path_to_string(&dotfiles_dir),
             dst_dir: dest_dir,
-            root_entry: Some(config.general.root_entry.to_string_lossy().to_string()),
+            root_entry: Some(crate::path_to_string(&config.general.root_entry)),
         })
     } else {
         None
@@ -154,9 +155,7 @@ fn run_impl(source_dir: &Path, config: &Config, json: bool, filter: VariableFilt
         };
 
         // Merge with config variables (config overrides)
-        for (key, value) in &config.variables {
-            all_vars.insert(key.clone(), value.clone());
-        }
+        all_vars.extend(config.variables.iter().map(|(k, v)| (k.clone(), v.clone())));
 
         all_vars.into_iter().collect()
     } else {

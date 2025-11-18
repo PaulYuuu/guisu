@@ -23,13 +23,15 @@ pub struct CatCommand {
 }
 
 impl Command for CatCommand {
-    fn execute(&self, context: &RuntimeContext) -> Result<()> {
+    type Output = ();
+    fn execute(&self, context: &RuntimeContext) -> crate::error::Result<()> {
         run_impl(
             context.source_dir(),
             context.dest_dir().as_path(),
             &self.files,
             &context.config,
         )
+        .map_err(Into::into)
     }
 }
 
@@ -167,19 +169,16 @@ fn cat_file(
         let engine =
             crate::create_template_engine(source_dir, std::sync::Arc::new(identities), config);
 
-        let dotfiles_dir_str = config
-            .dotfiles_dir(source_dir)
-            .to_string_lossy()
-            .to_string();
-        let root_entry_str = config.general.root_entry.to_string_lossy().to_string();
+        let dotfiles_dir_str = crate::path_to_string(&config.dotfiles_dir(source_dir));
+        let root_entry_str = crate::path_to_string(&config.general.root_entry);
         let mut context = TemplateContext::new().with_guisu_info(
             dotfiles_dir_str,
-            dest_dir.to_string_lossy().to_string(),
+            crate::path_to_string(dest_dir),
             root_entry_str.clone(),
         );
 
         // Add user variables from config
-        context = context.with_variables(config.variables.clone());
+        context = context.with_variables_ref(&config.variables);
 
         // Build template name with root_entry prefix
         let template_name = format!("{}/{}", root_entry_str, source_path.as_path().display());

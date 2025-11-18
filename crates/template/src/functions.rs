@@ -6,6 +6,7 @@ use guisu_crypto::{Identity, decrypt_inline, encrypt_inline};
 use indexmap::IndexMap;
 use minijinja::Value;
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -23,6 +24,11 @@ static SOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
 static HOSTNAME_CACHE: OnceLock<String> = OnceLock::new();
 static USERNAME_CACHE: OnceLock<String> = OnceLock::new();
 static HOME_DIR_CACHE: OnceLock<String> = OnceLock::new();
+
+// Regex cache - stores compiled regexes to avoid repeated compilation
+// Limited to 32 entries to prevent unbounded memory growth
+static REGEX_CACHE: OnceLock<Mutex<HashMap<String, regex::Regex>>> = OnceLock::new();
+const MAX_REGEX_CACHE_SIZE: usize = 32;
 
 // Bitwarden cache structure with separated provider and cache
 struct BitwardenCache {
@@ -93,7 +99,6 @@ impl BitwardenCache {
 // Bitwarden cache singleton
 // Since provider is configured once in config, we only need one cache instance
 // The cache is initialized on first use with the configured provider
-use std::collections::HashMap;
 static BITWARDEN_CACHE: OnceLock<Mutex<HashMap<String, Arc<BitwardenCache>>>> = OnceLock::new();
 
 // Cache for Bitwarden Secrets Manager CLI calls
@@ -300,7 +305,13 @@ pub fn from_json(value: &str) -> Result<Value, minijinja::Error> {
 /// {{ bitwarden("item", "id").field | trim }}
 /// ```
 pub fn trim(value: &str) -> String {
-    value.trim().to_string()
+    let trimmed = value.trim();
+    if trimmed.len() == value.len() {
+        // No trimming needed - avoid allocation
+        value.to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Trim whitespace from the start (left) of a string
@@ -314,7 +325,13 @@ pub fn trim(value: &str) -> String {
 /// {{ someVar | trimStart }}
 /// ```
 pub fn trim_start(value: &str) -> String {
-    value.trim_start().to_string()
+    let trimmed = value.trim_start();
+    if trimmed.len() == value.len() {
+        // No trimming needed - avoid allocation
+        value.to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Trim whitespace from the end (right) of a string
@@ -328,7 +345,13 @@ pub fn trim_start(value: &str) -> String {
 /// {{ someVar | trimEnd }}
 /// ```
 pub fn trim_end(value: &str) -> String {
-    value.trim_end().to_string()
+    let trimmed = value.trim_end();
+    if trimmed.len() == value.len() {
+        // No trimming needed - avoid allocation
+        value.to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Test if a string matches a regular expression
@@ -357,7 +380,22 @@ pub fn regex_match(text: &str, pattern: &str) -> Result<bool, minijinja::Error> 
         ));
     }
 
-    // Build regex with size limits to prevent catastrophic backtracking
+    // Get or compile regex (with caching for performance)
+    let re = get_compiled_regex(pattern)?;
+    Ok(re.is_match(text))
+}
+
+/// Get a compiled regex from cache or compile and cache it
+fn get_compiled_regex(pattern: &str) -> Result<regex::Regex, minijinja::Error> {
+    let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache_guard = cache.lock().unwrap();
+
+    // Check cache first
+    if let Some(re) = cache_guard.get(pattern) {
+        return Ok(re.clone());
+    }
+
+    // Cache miss - compile regex
     let re = regex::RegexBuilder::new(pattern)
         .size_limit(10 * (1 << 20)) // 10MB
         .dfa_size_limit(2 * (1 << 20)) // 2MB
@@ -369,7 +407,14 @@ pub fn regex_match(text: &str, pattern: &str) -> Result<bool, minijinja::Error> 
             )
         })?;
 
-    Ok(re.is_match(text))
+    // Clear cache if it's getting too large (simple eviction strategy)
+    if cache_guard.len() >= MAX_REGEX_CACHE_SIZE {
+        cache_guard.clear();
+    }
+
+    // Store in cache
+    cache_guard.insert(pattern.to_string(), re.clone());
+    Ok(re)
 }
 
 /// Replace all matches of a regular expression with a replacement string
@@ -400,18 +445,8 @@ pub fn regex_replace_all(
         ));
     }
 
-    // Build regex with size limits to prevent catastrophic backtracking
-    let re = regex::RegexBuilder::new(pattern)
-        .size_limit(10 * (1 << 20)) // 10MB
-        .dfa_size_limit(2 * (1 << 20)) // 2MB
-        .build()
-        .map_err(|e| {
-            minijinja::Error::new(
-                minijinja::ErrorKind::InvalidOperation,
-                format!("Invalid regex pattern: {}", e),
-            )
-        })?;
-
+    // Get or compile regex (with caching for performance)
+    let re = get_compiled_regex(pattern)?;
     Ok(re.replace_all(text, replacement).to_string())
 }
 

@@ -17,8 +17,8 @@ use crate::common::RuntimeContext;
 use guisu_config::Config;
 
 /// How to handle files containing secrets
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum SecretsMode {
+#[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
+pub enum SecretsMode {
     /// Ignore secrets and add files anyway
     Ignore,
     /// Show warnings about secrets but proceed
@@ -54,13 +54,13 @@ pub struct AddCommand {
     #[arg(short, long)]
     pub force: bool,
 
-    /// How to handle files containing secrets (ignore, warning, error)
-    #[arg(long, default_value = "warning")]
-    pub secrets: String,
+    /// How to handle files containing secrets
+    #[arg(long, value_enum, default_value = "warning")]
+    pub secrets: SecretsMode,
 }
 
 /// Parameters for adding files to guisu (internal)
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct AddParams<'a> {
     source_dir: &'a AbsPath,
     dest_dir: &'a AbsPath,
@@ -73,18 +73,8 @@ struct AddParams<'a> {
 }
 
 impl Command for AddCommand {
-    fn execute(&self, context: &RuntimeContext) -> Result<()> {
-        // Parse secrets handling mode
-        let secrets_mode = match self.secrets.as_str() {
-            "ignore" => SecretsMode::Ignore,
-            "warning" => SecretsMode::Warning,
-            "error" => SecretsMode::Error,
-            _ => anyhow::bail!(
-                "Invalid secrets mode: {}. Must be one of: ignore, warning, error",
-                self.secrets
-            ),
-        };
-
+    type Output = ();
+    fn execute(&self, context: &RuntimeContext) -> crate::error::Result<()> {
         let source_dir = context.source_dir();
         let source_abs = context.dotfiles_dir();
         let dest_abs = context.dest_dir();
@@ -120,7 +110,7 @@ impl Command for AddCommand {
             autotemplate: self.autotemplate,
             encrypt: self.encrypt,
             force: self.force,
-            secrets_mode,
+            secrets_mode: self.secrets,
             config,
         };
 

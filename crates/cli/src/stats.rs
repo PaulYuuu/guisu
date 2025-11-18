@@ -1,14 +1,17 @@
 //! Thread-safe statistics tracking for parallel operations
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Thread-safe statistics for apply operations
+///
+/// Uses AtomicU32 instead of AtomicUsize to save memory (4 bytes vs 8 bytes on 64-bit systems).
+/// File counts are unlikely to exceed u32::MAX (~4.3 billion).
 #[derive(Debug, Default)]
 pub struct ApplyStats {
-    files: AtomicUsize,
-    directories: AtomicUsize,
-    symlinks: AtomicUsize,
-    failed: AtomicUsize,
+    files: AtomicU32,
+    directories: AtomicU32,
+    symlinks: AtomicU32,
+    failed: AtomicU32,
 }
 
 impl ApplyStats {
@@ -33,19 +36,19 @@ impl ApplyStats {
     }
 
     pub fn files(&self) -> usize {
-        self.files.load(Ordering::Relaxed)
+        self.files.load(Ordering::Relaxed) as usize
     }
 
     pub fn directories(&self) -> usize {
-        self.directories.load(Ordering::Relaxed)
+        self.directories.load(Ordering::Relaxed) as usize
     }
 
     pub fn symlinks(&self) -> usize {
-        self.symlinks.load(Ordering::Relaxed)
+        self.symlinks.load(Ordering::Relaxed) as usize
     }
 
     pub fn failed(&self) -> usize {
-        self.failed.load(Ordering::Relaxed)
+        self.failed.load(Ordering::Relaxed) as usize
     }
 
     pub fn total(&self) -> usize {
@@ -54,12 +57,14 @@ impl ApplyStats {
 }
 
 /// Thread-safe statistics for diff operations
+///
+/// Uses AtomicU32 instead of AtomicUsize to save memory (4 bytes vs 8 bytes on 64-bit systems).
 #[derive(Debug, Default)]
 pub struct DiffStats {
-    added: AtomicUsize,
-    modified: AtomicUsize,
-    unchanged: AtomicUsize,
-    errors: AtomicUsize,
+    added: AtomicU32,
+    modified: AtomicU32,
+    unchanged: AtomicU32,
+    errors: AtomicU32,
 }
 
 impl DiffStats {
@@ -84,19 +89,19 @@ impl DiffStats {
     }
 
     pub fn added(&self) -> usize {
-        self.added.load(Ordering::Relaxed)
+        self.added.load(Ordering::Relaxed) as usize
     }
 
     pub fn modified(&self) -> usize {
-        self.modified.load(Ordering::Relaxed)
+        self.modified.load(Ordering::Relaxed) as usize
     }
 
     pub fn unchanged(&self) -> usize {
-        self.unchanged.load(Ordering::Relaxed)
+        self.unchanged.load(Ordering::Relaxed) as usize
     }
 
     pub fn errors(&self) -> usize {
-        self.errors.load(Ordering::Relaxed)
+        self.errors.load(Ordering::Relaxed) as usize
     }
 
     pub fn total(&self) -> usize {
@@ -105,12 +110,14 @@ impl DiffStats {
 }
 
 /// Thread-safe statistics for status operations
+///
+/// Uses AtomicU32 instead of AtomicUsize to save memory (4 bytes vs 8 bytes on 64-bit systems).
 #[derive(Debug, Default)]
 pub struct StatusStats {
-    total: AtomicUsize,
-    modified: AtomicUsize,
-    added: AtomicUsize,
-    removed: AtomicUsize,
+    total: AtomicU32,
+    modified: AtomicU32,
+    added: AtomicU32,
+    removed: AtomicU32,
 }
 
 impl StatusStats {
@@ -135,18 +142,18 @@ impl StatusStats {
     }
 
     pub fn total(&self) -> usize {
-        self.total.load(Ordering::Relaxed)
+        self.total.load(Ordering::Relaxed) as usize
     }
 
     pub fn modified(&self) -> usize {
-        self.modified.load(Ordering::Relaxed)
+        self.modified.load(Ordering::Relaxed) as usize
     }
 
     pub fn added(&self) -> usize {
-        self.added.load(Ordering::Relaxed)
+        self.added.load(Ordering::Relaxed) as usize
     }
 
     pub fn removed(&self) -> usize {
-        self.removed.load(Ordering::Relaxed)
+        self.removed.load(Ordering::Relaxed) as usize
     }
 }

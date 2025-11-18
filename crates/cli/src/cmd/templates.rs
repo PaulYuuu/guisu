@@ -150,9 +150,7 @@ pub fn run_show(
 
     // Merge variables: first from .guisu/variables/, then from config (config overrides)
     let mut all_variables = guisu_variables;
-    for (key, value) in &config.variables {
-        all_variables.insert(key.clone(), value.clone());
-    }
+    all_variables.extend(config.variables.iter().map(|(k, v)| (k.clone(), v.clone())));
 
     // Create template context
     let context = create_template_context(config, source_dir, dest_dir, all_variables)?;
@@ -185,16 +183,13 @@ fn create_template_context(
     dest_dir: &Path,
     variables: indexmap::IndexMap<String, serde_json::Value>,
 ) -> Result<TemplateContext> {
-    let dotfiles_dir_str = config
-        .dotfiles_dir(source_dir)
-        .to_string_lossy()
-        .to_string();
-    let root_entry_str = config.general.root_entry.to_string_lossy().to_string();
+    let dotfiles_dir_str = crate::path_to_string(&config.dotfiles_dir(source_dir));
+    let root_entry_str = crate::path_to_string(&config.general.root_entry);
 
     let context = TemplateContext::new()
         .with_guisu_info(
             dotfiles_dir_str,
-            dest_dir.to_string_lossy().to_string(),
+            crate::path_to_string(dest_dir),
             root_entry_str,
         )
         .with_variables(variables);

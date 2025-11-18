@@ -43,7 +43,8 @@ pub struct DiffCommand {
 }
 
 impl Command for DiffCommand {
-    fn execute(&self, context: &RuntimeContext) -> Result<()> {
+    type Output = ();
+    fn execute(&self, context: &RuntimeContext) -> crate::error::Result<()> {
         run_impl(
             context.source_dir(),
             context.dest_dir().as_path(),
@@ -52,6 +53,7 @@ impl Command for DiffCommand {
             self.interactive,
             &context.config,
         )
+        .map_err(Into::into)
     }
 }
 
@@ -104,9 +106,7 @@ fn run_impl(
 
     // Merge variables: guisu variables + config variables (config overrides)
     let mut all_variables = guisu_variables;
-    for (key, value) in &config.variables {
-        all_variables.insert(key.clone(), value.clone());
-    }
+    all_variables.extend(config.variables.iter().map(|(k, v)| (k.clone(), v.clone())));
 
     // Create template engine with identities, template directory, and bitwarden provider
     let template_engine =

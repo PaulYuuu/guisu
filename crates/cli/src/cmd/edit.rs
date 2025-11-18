@@ -35,7 +35,8 @@ pub struct EditCommand {
 }
 
 impl Command for EditCommand {
-    fn execute(&self, context: &RuntimeContext) -> Result<()> {
+    type Output = ();
+    fn execute(&self, context: &RuntimeContext) -> crate::error::Result<()> {
         run_impl(
             context.source_dir(),
             context.dest_dir().as_path(),
@@ -43,6 +44,7 @@ impl Command for EditCommand {
             self.apply,
             &context.config,
         )
+        .map_err(Into::into)
     }
 }
 

@@ -540,9 +540,9 @@ fn create_template_engine(source_dir: &Path, config: &Config) -> Result<impl Tem
 
     // Create template context with guisu info
     let context = TemplateContext::new().with_guisu_info(
-        source_dir.display().to_string(),
-        dst_dir.display().to_string(),
-        config.general.root_entry.display().to_string(),
+        crate::path_to_string(source_dir),
+        crate::path_to_string(&dst_dir),
+        crate::path_to_string(&config.general.root_entry),
     );
 
     // Return a closure that captures both engine and context

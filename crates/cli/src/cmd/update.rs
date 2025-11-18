@@ -26,7 +26,8 @@ pub struct UpdateCommand {
 }
 
 impl Command for UpdateCommand {
-    fn execute(&self, context: &RuntimeContext) -> Result<()> {
+    type Output = ();
+    fn execute(&self, context: &RuntimeContext) -> crate::error::Result<()> {
         run_impl(
             context.source_dir(),
             context.dest_dir().as_path(),
@@ -34,6 +35,7 @@ impl Command for UpdateCommand {
             self.rebase,
             &context.config,
         )
+        .map_err(Into::into)
     }
 }
 

@@ -649,6 +649,7 @@ impl PersistentState for RedbPersistentState {
 }
 
 /// Compute SHA256 hash of data
+#[inline]
 pub fn hash_data(data: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(data);

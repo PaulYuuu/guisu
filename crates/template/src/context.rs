@@ -103,9 +103,21 @@ impl TemplateContext {
         }
     }
 
-    /// Create a context with custom variables
+    /// Create a context with custom variables (takes ownership)
+    ///
+    /// For cases where you already have an owned `IndexMap`, this moves it without cloning.
+    /// If you need to borrow the variables, use `with_variables_ref` instead.
     pub fn with_variables(mut self, variables: IndexMap<String, serde_json::Value>) -> Self {
         self.variables = variables;
+        self
+    }
+
+    /// Create a context with custom variables (borrows and clones)
+    ///
+    /// This is a convenience method that accepts a reference and clones it internally.
+    /// Use this when you need to preserve the original `IndexMap`.
+    pub fn with_variables_ref(mut self, variables: &IndexMap<String, serde_json::Value>) -> Self {
+        self.variables = variables.clone();
         self
     }
 

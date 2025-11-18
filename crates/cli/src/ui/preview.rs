@@ -3,7 +3,7 @@
 use similar::{ChangeTag, TextDiff};
 
 /// Summary of changes between two files
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ChangeSummary {
     pub lines_added: usize,
     pub lines_removed: usize,
@@ -48,13 +48,13 @@ impl ChangeSummary {
 }
 
 /// Preview of changes with limited lines
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ChangePreview {
     pub lines: Vec<PreviewLine>,
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PreviewLine {
     pub tag: PreviewTag,
     pub content: String,

@@ -94,7 +94,7 @@ impl FileStatus {
 }
 
 /// Complete file information for display
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct FileInfo {
     path: String,
     status: FileStatus,
@@ -124,7 +124,8 @@ pub struct StatusCommand {
 }
 
 impl Command for StatusCommand {
-    fn execute(&self, context: &RuntimeContext) -> Result<()> {
+    type Output = ();
+    fn execute(&self, context: &RuntimeContext) -> crate::error::Result<()> {
         let output_format = if self.tree {
             OutputFormat::Tree
         } else {
@@ -138,6 +139,7 @@ impl Command for StatusCommand {
             self.all,
             output_format,
         )
+        .map_err(Into::into)
     }
 }
 
@@ -195,9 +197,7 @@ fn run_impl(
 
     // Merge variables: guisu variables + config variables (config overrides)
     let mut all_variables = guisu_variables;
-    for (key, value) in &config.variables {
-        all_variables.insert(key.clone(), value.clone());
-    }
+    all_variables.extend(config.variables.iter().map(|(k, v)| (k.clone(), v.clone())));
 
     // Create template engine with identities, template directory, and bitwarden provider
     let template_engine =

@@ -4,9 +4,8 @@
 //! It provides a uniform interface for command execution, making it easier to
 //! test, extend, and maintain commands.
 
-use anyhow::Result;
-
 use crate::common::RuntimeContext;
+use crate::error::Result;
 
 /// Trait for all guisu commands
 ///
@@ -14,12 +13,15 @@ use crate::common::RuntimeContext;
 /// this trait. The `execute` method receives a `RuntimeContext` containing
 /// shared state like configuration and resolved paths.
 ///
+/// Commands can specify their return type via the `Output` associated type.
+/// Most commands return `()`, but some may return values (e.g., init returns `Option<PathBuf>`).
+///
 /// # Example
 ///
 /// ```rust,ignore
 /// use crate::command::Command;
 /// use crate::common::RuntimeContext;
-/// use anyhow::Result;
+/// use crate::error::Result;
 /// use clap::Args;
 ///
 /// #[derive(Debug, Args)]
@@ -29,6 +31,8 @@ use crate::common::RuntimeContext;
 /// }
 ///
 /// impl Command for MyCommand {
+///     type Output = ();
+///
 ///     fn execute(&self, context: &RuntimeContext) -> Result<()> {
 ///         // Access config: context.config
 ///         // Access paths: context.source_dir(), context.dest_dir(), context.dotfiles_dir()
@@ -37,6 +41,11 @@ use crate::common::RuntimeContext;
 /// }
 /// ```
 pub trait Command {
+    /// The type returned by this command
+    ///
+    /// Most commands return `()`, but some may return values.
+    type Output;
+
     /// Execute the command with the given runtime context
     ///
     /// # Arguments
@@ -45,11 +54,11 @@ pub trait Command {
     ///
     /// # Returns
     ///
-    /// Returns `Ok(())` on success or an error describing what went wrong.
+    /// Returns `Ok(Output)` on success or a `CommandError` describing what went wrong.
     ///
     /// # Errors
     ///
-    /// Returns an error if the command fails to execute. Error messages should
+    /// Returns a `CommandError` if the command fails to execute. Error messages should
     /// be descriptive enough for the user to understand what went wrong.
-    fn execute(&self, context: &RuntimeContext) -> Result<()>;
+    fn execute(&self, context: &RuntimeContext) -> Result<Self::Output>;
 }

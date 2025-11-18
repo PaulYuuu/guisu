@@ -6,6 +6,7 @@
 pub mod cmd;
 pub mod command;
 pub mod common;
+pub mod error;
 pub mod logging;
 pub mod stats;
 pub mod ui;
@@ -385,8 +386,8 @@ pub fn run(cli: Cli) -> Result<()> {
     // For all other commands, load config now
     let config = load_config_with_template_support(cli.config.as_deref(), &source_dir)?;
 
-    // Create RuntimeContext for commands
-    let context = RuntimeContext::new(config.clone(), &source_dir, &dest_dir)?;
+    // Create RuntimeContext for commands (config is moved, no clone needed)
+    let context = RuntimeContext::new(config, &source_dir, &dest_dir)?;
 
     // Execute the command
     match cli.command {
@@ -519,7 +520,7 @@ pub fn run(cli: Cli) -> Result<()> {
 // Common utility functions
 // ============================================================================
 
-/// Build filter paths from user-provided file arguments
+/// Build filter paths from user-provided file arguments (crate-internal use only)
 ///
 /// This function converts file paths (which may be relative, absolute, or use ~)
 /// into RelPath entries that can be used to filter source/target states.
@@ -538,59 +539,74 @@ pub fn run(cli: Cli) -> Result<()> {
 /// Returns an error if:
 /// - A file path cannot be canonicalized
 /// - A file path is not under the destination directory
-pub fn build_filter_paths(
+pub(crate) fn build_filter_paths(
     files: &[std::path::PathBuf],
     dest_abs: &guisu_core::path::AbsPath,
 ) -> Result<Vec<guisu_core::path::RelPath>> {
-    use anyhow::Context;
+    files
+        .iter()
+        .map(|file_path| {
+            // Expand tilde and resolve to absolute path
+            let expanded_path = expand_tilde(file_path);
+            let file_abs = resolve_absolute_path(&expanded_path)?;
 
-    let mut rel_paths = Vec::new();
+            // Convert to relative path under dest_dir
+            // Use map_err to avoid format! allocation unless error actually occurs
+            file_abs.strip_prefix(dest_abs).map_err(|_| {
+                anyhow::anyhow!(
+                    "File {} is not under destination directory {}",
+                    file_abs.as_path().display(),
+                    dest_abs.as_path().display()
+                )
+            })
+        })
+        .collect()
+}
 
-    for file_path in files {
-        // Expand tilde in path
-        let expanded_path = if file_path.starts_with("~") {
-            if let Some(home) = dirs::home_dir() {
-                let path_str = file_path.to_string_lossy();
-                let without_tilde = path_str
-                    .strip_prefix("~/")
-                    .or(path_str.strip_prefix("~"))
-                    .unwrap_or(&path_str);
-                home.join(without_tilde)
-            } else {
-                file_path.clone()
-            }
-        } else {
-            file_path.clone()
-        };
+/// Convert a Path to a String efficiently (crate-internal use only)
+///
+/// This avoids the common `.to_string_lossy().to_string()` double conversion pattern.
+#[inline]
+pub(crate) fn path_to_string(path: &std::path::Path) -> String {
+    path.to_string_lossy().into_owned()
+}
 
-        // Get absolute path
-        let file_abs = if expanded_path.exists() {
-            guisu_core::path::AbsPath::new(
-                std::fs::canonicalize(&expanded_path).with_context(|| {
-                    format!("Failed to resolve path: {}", expanded_path.display())
-                })?,
-            )?
-        } else {
-            // File doesn't exist yet, construct absolute path manually
-            let abs_path = if expanded_path.is_absolute() {
-                expanded_path
-            } else {
-                std::env::current_dir()?.join(&expanded_path)
-            };
-            guisu_core::path::AbsPath::new(abs_path)?
-        };
-
-        let rel = file_abs.strip_prefix(dest_abs).with_context(|| {
-            format!(
-                "File {} is not under destination directory {}",
-                file_abs.as_path().display(),
-                dest_abs.as_path().display()
-            )
-        })?;
-        rel_paths.push(rel);
+/// Expand tilde (~) in a path to the home directory
+fn expand_tilde(path: &std::path::Path) -> std::path::PathBuf {
+    // Early return for common case (no tilde) - avoids string conversion
+    if !path.as_os_str().as_encoded_bytes().starts_with(b"~") {
+        return path.to_path_buf();
     }
 
-    Ok(rel_paths)
+    let Some(home) = dirs::home_dir() else {
+        return path.to_path_buf();
+    };
+
+    // Only convert to string if starts with ~
+    match path.to_str() {
+        Some("~") => home,
+        Some(s) if s.starts_with("~/") => home.join(&s[2..]),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Resolve a path to an absolute path
+///
+/// If the path exists, canonicalize it. Otherwise, construct an absolute path.
+fn resolve_absolute_path(path: &std::path::Path) -> Result<guisu_core::path::AbsPath> {
+    use anyhow::Context;
+
+    if path.exists() {
+        Ok(guisu_core::path::AbsPath::new(
+            std::fs::canonicalize(path)
+                .with_context(|| format!("Failed to resolve path: {}", path.display()))?,
+        )?)
+    } else if path.is_absolute() {
+        Ok(guisu_core::path::AbsPath::new(path.to_path_buf())?)
+    } else {
+        let abs_path = std::env::current_dir()?.join(path);
+        Ok(guisu_core::path::AbsPath::new(abs_path)?)
+    }
 }
 
 /// Load configuration with support for template files (.guisu.toml.j2)
@@ -607,7 +623,7 @@ pub fn build_filter_paths(
 /// # Returns
 ///
 /// A loaded and configured Config instance with all variables merged.
-pub fn load_config_with_template_support(
+pub(crate) fn load_config_with_template_support(
     _config_path: Option<&std::path::Path>,
     source_dir: &std::path::Path,
 ) -> Result<guisu_config::Config> {
@@ -632,11 +648,8 @@ pub fn load_config_with_template_support(
 
         // Create context with only system info
         let context = guisu_template::TemplateContext::new().with_guisu_info(
-            source_dir.to_string_lossy().to_string(),
-            dirs::home_dir()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string(),
+            path_to_string(source_dir),
+            path_to_string(&dirs::home_dir().unwrap_or_default()),
             "home".to_string(),
         );
 
@@ -688,7 +701,7 @@ pub fn load_config_with_template_support(
     ))
 }
 
-/// Create a template engine with common configuration
+/// Create a template engine with common configuration (crate-internal use only)
 ///
 /// This helper function centralizes the template engine initialization logic
 /// used across multiple commands (apply, cat, diff, status, templates).
@@ -705,7 +718,7 @@ pub fn load_config_with_template_support(
 /// - Age identities for inline decryption
 /// - Template directory (if .guisu/templates exists)
 /// - Bitwarden provider configuration
-pub fn create_template_engine(
+pub(crate) fn create_template_engine(
     source_dir: &std::path::Path,
     identities: std::sync::Arc<Vec<guisu_crypto::Identity>>,
     config: &guisu_config::Config,
@@ -721,40 +734,4 @@ pub fn create_template_engine(
         },
         &config.bitwarden.provider,
     )
-}
-
-/// Helper function to create IO errors with path context
-///
-/// This reduces boilerplate when wrapping IO errors with path information.
-///
-/// # Arguments
-///
-/// * `path` - The path that caused the error
-/// * `operation` - Description of the operation (e.g., "read config file", "write file")
-/// * `error` - The underlying IO error
-///
-/// # Returns
-///
-/// A formatted error message with path context
-///
-/// # Examples
-///
-/// ```no_run
-/// # use std::fs;
-/// # use std::path::Path;
-/// # use anyhow::anyhow;
-/// # fn path_io_error(path: &Path, op: &str, e: std::io::Error) -> anyhow::Error {
-/// #     anyhow!("Failed to {} '{}': {}", op, path.display(), e)
-/// # }
-/// let path = Path::new("config.toml");
-/// let content = fs::read_to_string(path)
-///     .map_err(|e| path_io_error(path, "read config file", e))?;
-/// # Ok::<(), anyhow::Error>(())
-/// ```
-pub fn path_io_error(
-    path: &std::path::Path,
-    operation: &str,
-    error: std::io::Error,
-) -> anyhow::Error {
-    anyhow::anyhow!("Failed to {} '{}': {}", operation, path.display(), error)
 }

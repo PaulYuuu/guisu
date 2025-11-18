@@ -163,6 +163,71 @@ impl AbsPath {
     pub fn file_name(&self) -> Option<&str> {
         self.0.file_name().and_then(|s| s.to_str())
     }
+
+    /// Check if the path exists on the filesystem
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use guisu_core::path::AbsPath;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let path = AbsPath::new("/home/user".into())?;
+    /// if path.exists() {
+    ///     println!("Path exists!");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn exists(&self) -> bool {
+        self.0.exists()
+    }
+
+    /// Check if the path points to a directory
+    pub fn is_dir(&self) -> bool {
+        self.0.is_dir()
+    }
+
+    /// Check if the path points to a file
+    pub fn is_file(&self) -> bool {
+        self.0.is_file()
+    }
+
+    /// Check if the path points to a symlink
+    pub fn is_symlink(&self) -> bool {
+        self.0.is_symlink()
+    }
+
+    /// Get metadata for the path
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file does not exist or metadata cannot be read.
+    pub fn metadata(&self) -> std::io::Result<std::fs::Metadata> {
+        std::fs::metadata(&self.0)
+    }
+
+    /// Read a directory, returning an iterator over entries
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path is not a directory or cannot be read.
+    pub fn read_dir(&self) -> std::io::Result<std::fs::ReadDir> {
+        std::fs::read_dir(&self.0)
+    }
+
+    /// Canonicalize the path, resolving symlinks and relative components
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path does not exist or cannot be canonicalized.
+    pub fn canonicalize(&self) -> Result<Self> {
+        std::fs::canonicalize(&self.0)
+            .map(AbsPath)
+            .map_err(|_| Error::PathNotAbsolute {
+                path: self.0.clone(),
+            })
+    }
 }
 
 /// A relative path (no leading slash)
@@ -308,6 +373,25 @@ impl SourceRelPath {
     /// Convert to a regular `RelPath` (preserves the encoded attributes)
     pub fn to_rel_path(&self) -> RelPath {
         RelPath(self.0.clone())
+    }
+}
+
+// Implement AsRef<Path> for easy interop with std::path
+impl AsRef<Path> for AbsPath {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for RelPath {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for SourceRelPath {
+    fn as_ref(&self) -> &Path {
+        &self.0
     }
 }
 
