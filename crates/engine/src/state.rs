@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::{LazyLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 use walkdir::WalkDir;
@@ -515,6 +515,13 @@ const _: () = {
     let _ = assert_sync::<RedbPersistentState>;
 };
 
+/// Cache for dynamic bucket names to prevent memory leaks
+///
+/// This cache ensures that each unique bucket name is only leaked once,
+/// rather than on every call to table_def_with_storage.
+static BUCKET_CACHE: LazyLock<RwLock<HashMap<String, &'static str>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
 impl RedbPersistentState {
     /// Create or open a persistent state database
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
@@ -532,27 +539,45 @@ impl RedbPersistentState {
 
     /// Create table definition, avoiding String allocation for known buckets
     ///
-    /// Returns a tuple of (String, TableDefinition) where String is only populated
-    /// for unknown buckets (to satisfy 'static lifetime requirement).
+    /// For known buckets, uses static strings. For unknown buckets, caches
+    /// leaked strings to prevent repeated memory leaks.
     #[inline]
     fn table_def_with_storage(
         bucket: &str,
-    ) -> (
-        Option<String>,
-        TableDefinition<'_, &'static [u8], &'static [u8]>,
-    ) {
+    ) -> TableDefinition<'static, &'static [u8], &'static [u8]> {
         // For known buckets, use static strings to avoid allocation
         match bucket {
-            ENTRY_STATE_BUCKET => (None, TableDefinition::new(ENTRY_STATE_BUCKET)),
-            SCRIPT_STATE_BUCKET => (None, TableDefinition::new(SCRIPT_STATE_BUCKET)),
-            CONFIG_STATE_BUCKET => (None, TableDefinition::new(CONFIG_STATE_BUCKET)),
-            PACKAGE_STATE_BUCKET => (None, TableDefinition::new(PACKAGE_STATE_BUCKET)),
-            HOOK_STATE_BUCKET => (None, TableDefinition::new(HOOK_STATE_BUCKET)),
-            // For unknown buckets, allocate String and leak to satisfy 'static
+            ENTRY_STATE_BUCKET => TableDefinition::new(ENTRY_STATE_BUCKET),
+            SCRIPT_STATE_BUCKET => TableDefinition::new(SCRIPT_STATE_BUCKET),
+            CONFIG_STATE_BUCKET => TableDefinition::new(CONFIG_STATE_BUCKET),
+            PACKAGE_STATE_BUCKET => TableDefinition::new(PACKAGE_STATE_BUCKET),
+            HOOK_STATE_BUCKET => TableDefinition::new(HOOK_STATE_BUCKET),
+            // For unknown buckets, check cache first to avoid repeated leaks
             _ => {
-                let bucket_string = bucket.to_string();
-                let leaked: &'static str = Box::leak(bucket_string.clone().into_boxed_str());
-                (Some(bucket_string), TableDefinition::new(leaked))
+                // Check cache with read lock first (fast path)
+                {
+                    let cache = BUCKET_CACHE
+                        .read()
+                        .expect("BUCKET_CACHE lock should not be poisoned");
+                    if let Some(&leaked) = cache.get(bucket) {
+                        return TableDefinition::new(leaked);
+                    }
+                }
+
+                // Not in cache, acquire write lock and leak it
+                let mut cache = BUCKET_CACHE
+                    .write()
+                    .expect("BUCKET_CACHE lock should not be poisoned");
+
+                // Double-check in case another thread added it while we waited
+                if let Some(&leaked) = cache.get(bucket) {
+                    return TableDefinition::new(leaked);
+                }
+
+                // Leak the string and cache it
+                let leaked: &'static str = Box::leak(bucket.to_string().into_boxed_str());
+                cache.insert(bucket.to_string(), leaked);
+                TableDefinition::new(leaked)
             }
         }
     }
@@ -564,7 +589,7 @@ impl PersistentState for RedbPersistentState {
             .db
             .begin_read()
             .map_err(|e| crate::Error::State(format!("Failed to begin read transaction: {}", e)))?;
-        let (_storage, table_def) = Self::table_def_with_storage(bucket);
+        let table_def = Self::table_def_with_storage(bucket);
 
         let table = match read_txn.open_table(table_def) {
             Ok(t) => t,
@@ -583,7 +608,7 @@ impl PersistentState for RedbPersistentState {
             crate::Error::State(format!("Failed to begin write transaction: {}", e))
         })?;
         {
-            let (_storage, table_def) = Self::table_def_with_storage(bucket);
+            let table_def = Self::table_def_with_storage(bucket);
             let mut table = write_txn
                 .open_table(table_def)
                 .map_err(|e| crate::Error::State(format!("Failed to open table: {}", e)))?;
@@ -602,7 +627,7 @@ impl PersistentState for RedbPersistentState {
             crate::Error::State(format!("Failed to begin write transaction: {}", e))
         })?;
         {
-            let (_storage, table_def) = Self::table_def_with_storage(bucket);
+            let table_def = Self::table_def_with_storage(bucket);
             let mut table = write_txn
                 .open_table(table_def)
                 .map_err(|e| crate::Error::State(format!("Failed to open table: {}", e)))?;
@@ -620,7 +645,7 @@ impl PersistentState for RedbPersistentState {
         let write_txn = self.db.begin_write().map_err(|e| {
             crate::Error::State(format!("Failed to begin write transaction: {}", e))
         })?;
-        let (_storage, table_def) = Self::table_def_with_storage(bucket);
+        let table_def = Self::table_def_with_storage(bucket);
         write_txn
             .delete_table(table_def)
             .map_err(|e| crate::Error::State(format!("Failed to delete table: {}", e)))?;
@@ -638,7 +663,7 @@ impl PersistentState for RedbPersistentState {
             .db
             .begin_read()
             .map_err(|e| crate::Error::State(format!("Failed to begin read transaction: {}", e)))?;
-        let (_storage, table_def) = Self::table_def_with_storage(bucket);
+        let table_def = Self::table_def_with_storage(bucket);
 
         let table = match read_txn.open_table(table_def) {
             Ok(t) => t,
