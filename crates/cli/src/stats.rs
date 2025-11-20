@@ -54,6 +54,65 @@ impl ApplyStats {
     pub fn total(&self) -> usize {
         self.files() + self.directories() + self.symlinks()
     }
+
+    /// Create a snapshot of current stats
+    ///
+    /// This is needed because ApplyStats uses atomics and cannot be cloned directly
+    pub fn snapshot(&self) -> Self {
+        Self {
+            files: AtomicU32::new(self.files.load(Ordering::Relaxed)),
+            directories: AtomicU32::new(self.directories.load(Ordering::Relaxed)),
+            symlinks: AtomicU32::new(self.symlinks.load(Ordering::Relaxed)),
+            failed: AtomicU32::new(self.failed.load(Ordering::Relaxed)),
+        }
+    }
+
+    pub fn print_summary(&self, dry_run: bool) {
+        use owo_colors::OwoColorize;
+
+        let total = self.total();
+        let failed = self.failed();
+        let files = self.files();
+        let directories = self.directories();
+        let symlinks = self.symlinks();
+
+        if dry_run {
+            println!(
+                "{} {} would be applied",
+                "●".bright_green(),
+                total.to_string().bright_white().bold()
+            );
+        } else if failed > 0 {
+            println!(
+                "{} {} | {} {}",
+                "●".bright_green(),
+                total.to_string().bright_green().bold(),
+                "●".bright_red(),
+                failed.to_string().bright_red().bold(),
+            );
+        } else {
+            println!(
+                "{} {} applied",
+                "●".bright_green(),
+                total.to_string().bright_green().bold()
+            );
+        }
+
+        // Show breakdown if more than just files
+        if directories > 0 || symlinks > 0 {
+            let mut parts = Vec::new();
+            if files > 0 {
+                parts.push(format!("{} files", files));
+            }
+            if directories > 0 {
+                parts.push(format!("{} directories", directories));
+            }
+            if symlinks > 0 {
+                parts.push(format!("{} symlinks", symlinks));
+            }
+            println!("  {}", parts.join(", ").dimmed());
+        }
+    }
 }
 
 /// Thread-safe statistics for diff operations

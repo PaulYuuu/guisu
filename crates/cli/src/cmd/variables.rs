@@ -18,7 +18,7 @@ use crate::common::RuntimeContext;
 /// Variables command arguments
 #[derive(Debug, Args)]
 pub struct VariablesCommand {
-    /// Output in JSON format (default: pretty format)
+    /// Output in JSON format
     #[arg(long)]
     pub json: bool,
 
@@ -92,6 +92,8 @@ struct SystemVariables {
 struct GuisuVariables {
     #[serde(rename = "srcDir")]
     src_dir: String,
+    #[serde(rename = "workingTree")]
+    working_tree: String,
     #[serde(rename = "dstDir")]
     dst_dir: String,
     #[serde(rename = "rootEntry", skip_serializing_if = "Option::is_none")]
@@ -132,8 +134,13 @@ fn run_impl(source_dir: &Path, config: &Config, json: bool, filter: VariableFilt
         // Get the full dotfiles directory (including rootEntry if configured)
         let dotfiles_dir = config.dotfiles_dir(source_dir);
 
+        // Get git working tree
+        let working_tree = guisu_engine::git::find_working_tree(source_dir)
+            .unwrap_or_else(|| source_dir.to_path_buf());
+
         Some(GuisuVariables {
             src_dir: crate::path_to_string(&dotfiles_dir),
+            working_tree: crate::path_to_string(&working_tree),
             dst_dir: dest_dir,
             root_entry: Some(crate::path_to_string(&config.general.root_entry)),
         })
@@ -251,6 +258,10 @@ fn output_pretty(data: &VariableData) {
             serde_json::Value::String(guisu.src_dir.clone()),
         ));
         all_vars.push((
+            "guisu.workingTree".to_string(),
+            serde_json::Value::String(guisu.working_tree.clone()),
+        ));
+        all_vars.push((
             "guisu.dstDir".to_string(),
             serde_json::Value::String(guisu.dst_dir.clone()),
         ));
@@ -269,45 +280,43 @@ fn output_pretty(data: &VariableData) {
     // Calculate maximum key length
     let max_key_len = all_vars.iter().map(|(k, _)| k.len()).max().unwrap_or(20);
 
-    // Now display with proper alignment
-    let mut system_idx = 0;
+    // Group variables by prefix
+    let system_vars: Vec<_> = all_vars
+        .iter()
+        .filter(|(k, _)| k.starts_with("system."))
+        .collect();
+    let guisu_vars: Vec<_> = all_vars
+        .iter()
+        .filter(|(k, _)| k.starts_with("guisu."))
+        .collect();
+    let user_vars: Vec<_> = all_vars
+        .iter()
+        .filter(|(k, _)| !k.starts_with("system.") && !k.starts_with("guisu."))
+        .collect();
 
     // Display system variables
-    if let Some(system) = &data.system {
+    if !system_vars.is_empty() {
         println!("\n{}", "System variables:".bright_cyan().bold());
         println!("{}", "─".repeat(60).dimmed());
-
-        // Count: os, osFamily, arch, hostname, username, uid, gid, group, homeDir = 9
-        // Plus optional: distro, distroId, distroVersion
-        let system_count = 9
-            + (!system.distro.is_empty() as usize)
-            + (!system.distro_id.is_empty() as usize)
-            + (!system.distro_version.is_empty() as usize);
-
-        for (key, value) in &all_vars[system_idx..system_idx + system_count] {
+        for (key, value) in system_vars {
             print_variable_aligned(key, value, max_key_len);
         }
-        system_idx += system_count;
     }
 
     // Display guisu variables
-    if let Some(guisu) = &data.guisu {
+    if !guisu_vars.is_empty() {
         println!("\n{}", "Guisu variables:".bright_cyan().bold());
         println!("{}", "─".repeat(60).dimmed());
-
-        let guisu_count = 2 + (guisu.root_entry.is_some() as usize);
-        for (key, value) in &all_vars[system_idx..system_idx + guisu_count] {
+        for (key, value) in guisu_vars {
             print_variable_aligned(key, value, max_key_len);
         }
-        system_idx += guisu_count;
     }
 
     // Display user variables
-    if !data.variables.is_empty() {
+    if !user_vars.is_empty() {
         println!("\n{}", "User variables:".bright_cyan().bold());
         println!("{}", "─".repeat(60).dimmed());
-
-        for (key, value) in &all_vars[system_idx..] {
+        for (key, value) in user_vars {
             print_variable_aligned(key, value, max_key_len);
         }
     }

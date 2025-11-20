@@ -26,4 +26,4 @@ pub mod state;
 pub use config::{Hook, HookCollections, HookMode, HookStage};
 pub use executor::{HookRunner, HookRunnerBuilder, NoOpRenderer, TemplateRenderer};
 pub use loader::HookLoader;
-pub use state::HookState;
+pub use state::HookConfigState;

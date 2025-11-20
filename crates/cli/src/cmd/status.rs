@@ -234,10 +234,13 @@ fn run_impl(
     // Build target state (processes templates and decrypts files)
     // Process files one by one to handle errors gracefully
     // Create template context with system variables and guisu info
+    let working_tree = guisu_engine::git::find_working_tree(source_dir)
+        .unwrap_or_else(|| source_dir.to_path_buf());
     let template_context = guisu_template::TemplateContext::new()
         .with_variables(all_variables)
         .with_guisu_info(
             source_abs.to_string(),
+            working_tree.display().to_string(),
             dest_abs.to_string(),
             config.general.root_entry.display().to_string(),
         );

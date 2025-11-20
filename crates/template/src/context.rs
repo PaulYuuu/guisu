@@ -30,9 +30,13 @@ pub struct TemplateContext {
 /// Guisu-specific runtime information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuisuInfo {
-    /// Source directory path
+    /// Source directory path (includes root_entry)
     #[serde(rename = "srcDir")]
     pub src_dir: String,
+
+    /// Git working tree directory (repository root)
+    #[serde(rename = "workingTree")]
+    pub working_tree: String,
 
     /// Destination directory path
     #[serde(rename = "dstDir")]
@@ -122,9 +126,16 @@ impl TemplateContext {
     }
 
     /// Set guisu-specific information (source and destination directories, rootEntry)
-    pub fn with_guisu_info(mut self, src_dir: String, dst_dir: String, root_entry: String) -> Self {
+    pub fn with_guisu_info(
+        mut self,
+        src_dir: String,
+        working_tree: String,
+        dst_dir: String,
+        root_entry: String,
+    ) -> Self {
         self.guisu = Some(GuisuInfo {
             src_dir,
+            working_tree,
             dst_dir,
             root_entry,
             config: None,
@@ -136,12 +147,14 @@ impl TemplateContext {
     pub fn with_guisu_info_and_config(
         mut self,
         src_dir: String,
+        working_tree: String,
         dst_dir: String,
         root_entry: String,
         config: ConfigInfo,
     ) -> Self {
         self.guisu = Some(GuisuInfo {
             src_dir,
+            working_tree,
             dst_dir,
             root_entry,
             config: Some(config),
@@ -152,6 +165,44 @@ impl TemplateContext {
     /// Add a custom variable
     pub fn add_variable(&mut self, key: String, value: serde_json::Value) {
         self.variables.insert(key, value);
+    }
+
+    /// Load variables from .guisu/variables/ directory and merge with config variables
+    ///
+    /// This method:
+    /// 1. Loads platform-specific variables from .guisu/variables/{platform}/
+    /// 2. Loads common variables from .guisu/variables/
+    /// 3. Merges with config.variables (config overrides file-based variables)
+    ///
+    /// # Arguments
+    ///
+    /// * `source_dir` - Path to the source directory (containing .guisu/)
+    /// * `config` - Configuration containing user-defined variables
+    ///
+    /// # Returns
+    ///
+    /// Self with all variables loaded and merged
+    pub fn with_loaded_variables(
+        mut self,
+        source_dir: &std::path::Path,
+        config: &guisu_config::Config,
+    ) -> Result<Self, guisu_config::Error> {
+        let guisu_dir = source_dir.join(".guisu");
+        let platform_name = guisu_core::platform::CURRENT_PLATFORM.os;
+
+        // Load variables from .guisu/variables/ directory
+        let guisu_variables = if guisu_dir.exists() {
+            guisu_config::variables::load_variables(&guisu_dir, platform_name)?
+        } else {
+            IndexMap::new()
+        };
+
+        // Merge variables: .guisu/variables/ first, then config (config overrides)
+        let mut all_variables = guisu_variables;
+        all_variables.extend(config.variables.iter().map(|(k, v)| (k.clone(), v.clone())));
+
+        self.variables = all_variables;
+        Ok(self)
     }
 
     /// Get an environment variable

@@ -127,6 +127,9 @@ impl HookLoader {
             if let Ok(metadata) = fs::metadata(path) {
                 let permissions = metadata.permissions();
                 if permissions.mode() & 0o111 != 0 {
+                    // Read script content for diffing
+                    let script_content = fs::read_to_string(path).ok();
+
                     // File is executable - create hook
                     let hook = Hook {
                         name: file_name.to_string(),
@@ -134,6 +137,7 @@ impl HookLoader {
                         platforms: vec![],
                         cmd: Some(path.to_string_lossy().to_string()),
                         script: None,
+                        script_content,
                         env: Default::default(),
                         failfast: true,
                         mode: HookMode::default(),
@@ -254,6 +258,18 @@ impl HookLoader {
             })?;
 
             hook.script = Some(script_rel.display().to_string());
+
+            // Read and store script content for diffing
+            if final_script_abs.exists() {
+                if let Ok(content) = fs::read_to_string(&final_script_abs) {
+                    hook.script_content = Some(content);
+                } else {
+                    tracing::warn!(
+                        "Failed to read script content for diffing: {}",
+                        final_script_abs.display()
+                    );
+                }
+            }
         }
 
         Ok(())

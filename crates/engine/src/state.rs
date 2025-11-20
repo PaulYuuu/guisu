@@ -65,6 +65,9 @@ pub struct HookState {
     /// Maps hook name to SHA256 hash of its content (cmd or script)
     #[serde(default)]
     pub onchange_hashes: std::collections::HashMap<String, Vec<u8>>,
+    /// Snapshot of hooks from last execution (for diff display)
+    #[serde(default)]
+    pub last_collections: Option<crate::hooks::config::HookCollections>,
 }
 
 impl HookState {
@@ -75,6 +78,7 @@ impl HookState {
             content_hash: None,
             once_executed: std::collections::HashSet::new(),
             onchange_hashes: std::collections::HashMap::new(),
+            last_collections: None,
         }
     }
 
@@ -109,9 +113,22 @@ impl HookState {
     ///
     /// This computes a hash of all files in the hooks directory and updates
     /// the last_executed timestamp.
+    /// Optionally saves the current hook collections for diff display.
     pub fn update(&mut self, hooks_dir: &Path) -> Result<()> {
         self.content_hash = Some(Self::compute_directory_hash(hooks_dir)?);
         self.last_executed = Some(std::time::SystemTime::now());
+        Ok(())
+    }
+
+    /// Update state and save current hook collections
+    pub fn update_with_collections(
+        &mut self,
+        hooks_dir: &Path,
+        collections: crate::hooks::config::HookCollections,
+    ) -> Result<()> {
+        self.content_hash = Some(Self::compute_directory_hash(hooks_dir)?);
+        self.last_executed = Some(std::time::SystemTime::now());
+        self.last_collections = Some(collections);
         Ok(())
     }
 

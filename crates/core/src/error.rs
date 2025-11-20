@@ -113,12 +113,20 @@ pub enum Error {
 
     // ========== Template and Encryption Errors ==========
     /// Template rendering error
-    #[error("Template rendering failed for {path}: {message}")]
-    TemplateRender { path: String, message: String },
+    #[error("Template rendering failed for {path}: {source}")]
+    TemplateRender {
+        path: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     /// Decryption error
-    #[error("Decryption failed for {path}: {message}")]
-    Decryption { path: String, message: String },
+    #[error("Decryption failed for {path}: {source}")]
+    Decryption {
+        path: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     /// Inline decryption error (for template content)
     #[error("Inline decryption failed: {message}")]

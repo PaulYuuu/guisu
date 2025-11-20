@@ -96,6 +96,9 @@ fn run_impl(
     // Load age identities for decryption
     let identities = std::sync::Arc::new(config.age_identities().unwrap_or_default());
 
+    // Track if we've already shown a decryption error message
+    let shown_decryption_error = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // Load variables from .guisu/variables/ directory
     let guisu_variables = if guisu_dir.exists() {
         guisu_config::variables::load_variables(&guisu_dir, platform_name)
@@ -135,10 +138,13 @@ fn run_impl(
     // Build target state (processes templates and decrypts files)
     // Only process files that we're going to diff to avoid template errors in unrelated files
     // Create template context with system variables and guisu info
+    let working_tree = guisu_engine::git::find_working_tree(source_dir)
+        .unwrap_or_else(|| source_dir.to_path_buf());
     let template_context = guisu_template::TemplateContext::new()
         .with_variables(all_variables)
         .with_guisu_info(
             source_abs.to_string(),
+            working_tree.display().to_string(),
             dest_abs.to_string(),
             config.general.root_entry.display().to_string(),
         );
@@ -190,11 +196,58 @@ fn run_impl(
                         });
                     }
                     Err(e) => {
-                        warn!(
-                            "Failed to process {}: {}",
-                            target_path.as_path().display(),
-                            e
-                        );
+                        // Only show detailed error message once for decryption failures
+                        let error_msg = e.to_string();
+                        if error_msg.contains("Decryption failed") {
+                            if !shown_decryption_error
+                                .swap(true, std::sync::atomic::Ordering::Relaxed)
+                            {
+                                // First decryption error - check if it's a missing identity file
+                                if identities.is_empty() {
+                                    if let Some(ref identity_path) = config.age.identity {
+                                        eprintln!(
+                                            "{} Decryption failed - {:?}: no such file or directory",
+                                            "Error:".red().bold(),
+                                            identity_path
+                                        );
+                                    } else if let Some(ref identities_paths) = config.age.identities
+                                    {
+                                        if let Some(first_path) = identities_paths.first() {
+                                            eprintln!(
+                                                "{} Decryption failed - {:?}: no such file or directory",
+                                                "Error:".red().bold(),
+                                                first_path
+                                            );
+                                        } else {
+                                            eprintln!(
+                                                "{} No age identity configured",
+                                                "Error:".red().bold()
+                                            );
+                                        }
+                                    } else {
+                                        eprintln!(
+                                            "{} No age identity configured",
+                                            "Error:".red().bold()
+                                        );
+                                    }
+                                } else {
+                                    // Show first decryption error
+                                    warn!(
+                                        "Decryption failed for {}: {}",
+                                        target_path.as_path().display(),
+                                        e
+                                    );
+                                }
+                            }
+                            // Subsequent decryption errors are silently counted
+                        } else {
+                            // Non-decryption errors are still shown
+                            warn!(
+                                "Failed to process {}: {}",
+                                target_path.as_path().display(),
+                                e
+                            );
+                        }
                     }
                 }
             }
@@ -358,6 +411,9 @@ fn run_impl(
         return Ok(());
     }
 
+    // Check and display hooks status first
+    print_hooks_status(source_dir, config)?;
+
     // Join all diff outputs
     let diff_output = diff_outputs.join("\n");
 
@@ -370,12 +426,9 @@ fn run_impl(
         }
     }
 
-    // Print statistics
+    // Print statistics at the end
     println!();
     print_stats(&stats);
-
-    // Check and display hooks status
-    print_hooks_status(source_dir)?;
 
     Ok(())
 }
@@ -655,8 +708,9 @@ fn print_stats(stats: &DiffStats) {
     let added = stats.added();
     let modified = stats.modified();
     let unchanged = stats.unchanged();
+    let errors = stats.errors();
 
-    if added == 0 && modified == 0 {
+    if added == 0 && modified == 0 && errors == 0 {
         return;
     }
 
@@ -682,10 +736,366 @@ fn print_stats(stats: &DiffStats) {
             if unchanged == 1 { "file" } else { "files" }
         );
     }
+    if errors > 0 {
+        println!(
+            "  {} {} with errors (check warnings above)",
+            errors.to_string().red(),
+            if errors == 1 { "file" } else { "files" }
+        );
+
+        // Show unified help message for decryption errors
+        println!("\n{}", "Common fixes for decryption errors:".yellow());
+        println!("  1. Ensure you're using the correct age identity");
+        println!("  2. Check if files were encrypted with a different key");
+        println!("  3. Re-encrypt if needed:  guisu edit <file>");
+    }
+}
+
+/// Render hook template content
+fn render_hook_template(source_dir: &Path, content: &str, config: &Config) -> Result<String> {
+    use guisu_template::TemplateContext;
+    use std::sync::Arc;
+
+    // Load age identities for encryption support in templates
+    let identities = Arc::new(config.age_identities().unwrap_or_else(|_| Vec::new()));
+
+    // Create template engine with bitwarden provider support
+    let engine = crate::create_template_engine(source_dir, identities, config);
+
+    // Get destination directory
+    let dst_dir = config
+        .general
+        .dst_dir
+        .clone()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("~"));
+
+    // Create template context with guisu info and all variables
+    let working_tree = guisu_engine::git::find_working_tree(source_dir)
+        .unwrap_or_else(|| source_dir.to_path_buf());
+    let context = TemplateContext::new()
+        .with_guisu_info(
+            crate::path_to_string(source_dir),
+            crate::path_to_string(&working_tree),
+            crate::path_to_string(&dst_dir),
+            crate::path_to_string(&config.general.root_entry),
+        )
+        .with_loaded_variables(source_dir, config)
+        .map_err(|e| anyhow::anyhow!("Failed to load variables: {}", e))?;
+
+    // Render template
+    engine
+        .render_str(content, &context)
+        .map_err(|e| anyhow::anyhow!("Template rendering error: {}", e))
+}
+
+/// Print hook diff with content changes
+fn print_hook_diff(
+    source_dir: &Path,
+    current: &guisu_engine::hooks::Hook,
+    previous: Option<&guisu_engine::hooks::Hook>,
+    stage: &str,
+    platform: &str,
+    config: &Config,
+) -> Result<()> {
+    use owo_colors::OwoColorize;
+
+    let is_active = current.should_run_on(platform);
+
+    match previous {
+        None => {
+            // New hook (added) - show full content
+            println!();
+            println!("  {} hook: {}", stage, current.name.green());
+
+            if let Some(ref cmd) = current.cmd {
+                println!("    {} cmd:", "+".bold());
+                for line in cmd.lines() {
+                    println!("      + {}", line.green());
+                }
+            } else if let Some(ref script) = current.script {
+                // Display script path without .j2 suffix
+                let display_script = script.strip_suffix(".j2").unwrap_or(script);
+                println!("    {} script: {}", "+".bold(), display_script);
+
+                // Use stored script content or read from file
+                let raw_content = if let Some(ref stored_content) = current.script_content {
+                    Some(stored_content.clone())
+                } else {
+                    // Fallback: read from file (script path is relative to source_dir)
+                    let script_path = source_dir.join(script);
+                    std::fs::read_to_string(&script_path).ok()
+                };
+
+                if let Some(raw_content) = raw_content {
+                    // Render template if it's a .j2 file
+                    let content = if script.ends_with(".j2") {
+                        match render_hook_template(source_dir, &raw_content, config) {
+                            Ok(rendered) => rendered,
+                            Err(e) => {
+                                tracing::warn!("Failed to render hook template: {}", e);
+                                raw_content // Fallback to raw content
+                            }
+                        }
+                    } else {
+                        raw_content
+                    };
+
+                    for line in content.lines() {
+                        println!("      + {}", line.green());
+                    }
+                }
+            }
+        }
+        Some(prev) => {
+            // Modified hook - show unified diff
+            println!();
+            println!("  {} hook: {}", stage, current.name.yellow());
+
+            // Compare cmd
+            if current.cmd != prev.cmd {
+                match (&prev.cmd, &current.cmd) {
+                    (Some(old_cmd), Some(new_cmd)) => {
+                        println!("    {} cmd changed:", "~".yellow().bold());
+                        let diff_output = generate_text_diff(old_cmd, new_cmd)?;
+                        for line in diff_output.lines() {
+                            println!("      {}", line);
+                        }
+                    }
+                    (Some(old_cmd), None) => {
+                        println!("    {} cmd removed:", "-".red().bold());
+                        for line in old_cmd.lines() {
+                            println!("      - {}", line.red());
+                        }
+                    }
+                    (None, Some(new_cmd)) => {
+                        println!("    {} cmd added:", "+".green().bold());
+                        for line in new_cmd.lines() {
+                            println!("      + {}", line.green());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Compare script
+            if current.script != prev.script {
+                match (&prev.script, &current.script) {
+                    (Some(old_script), Some(new_script)) => {
+                        if old_script != new_script {
+                            // Different script files - show both contents
+                            let display_old = old_script.strip_suffix(".j2").unwrap_or(old_script);
+                            let display_new = new_script.strip_suffix(".j2").unwrap_or(new_script);
+                            println!(
+                                "    {} script: {} -> {}",
+                                "~".yellow().bold(),
+                                display_old.red(),
+                                display_new.green()
+                            );
+
+                            // Try to show content diff if available
+                            if let (Some(old_content), Some(new_content)) =
+                                (&prev.script_content, &current.script_content)
+                            {
+                                // Render templates if needed
+                                let old_rendered = if old_script.ends_with(".j2") {
+                                    render_hook_template(source_dir, old_content, config)
+                                        .unwrap_or_else(|_| old_content.clone())
+                                } else {
+                                    old_content.clone()
+                                };
+                                let new_rendered = if new_script.ends_with(".j2") {
+                                    render_hook_template(source_dir, new_content, config)
+                                        .unwrap_or_else(|_| new_content.clone())
+                                } else {
+                                    new_content.clone()
+                                };
+
+                                let diff_output = generate_text_diff(&old_rendered, &new_rendered)?;
+                                for line in diff_output.lines() {
+                                    println!("      {}", line);
+                                }
+                            }
+                        }
+                    }
+                    (Some(old_script), None) => {
+                        let display_old = old_script.strip_suffix(".j2").unwrap_or(old_script);
+                        println!(
+                            "    {} script removed: {}",
+                            "-".red().bold(),
+                            display_old.red()
+                        );
+                        if let Some(old_content) = &prev.script_content {
+                            // Render if template
+                            let rendered = if old_script.ends_with(".j2") {
+                                render_hook_template(source_dir, old_content, config)
+                                    .unwrap_or_else(|_| old_content.clone())
+                            } else {
+                                old_content.clone()
+                            };
+                            for line in rendered.lines() {
+                                println!("      - {}", line.red());
+                            }
+                        }
+                    }
+                    (None, Some(new_script)) => {
+                        let display_new = new_script.strip_suffix(".j2").unwrap_or(new_script);
+                        println!(
+                            "    {} script added: {}",
+                            "+".green().bold(),
+                            display_new.green()
+                        );
+
+                        if let Some(new_content) = &current.script_content {
+                            // Render if template
+                            let rendered = if new_script.ends_with(".j2") {
+                                render_hook_template(source_dir, new_content, config)
+                                    .unwrap_or_else(|_| new_content.clone())
+                            } else {
+                                new_content.clone()
+                            };
+                            for line in rendered.lines() {
+                                println!("      + {}", line.green());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            } else if current.script.is_some() {
+                // Same script path - check if content changed
+                if let (Some(old_content), Some(new_content)) =
+                    (&prev.script_content, &current.script_content)
+                    && old_content != new_content
+                {
+                    let script = current.script.as_ref().unwrap();
+                    let display_script = script.strip_suffix(".j2").unwrap_or(script);
+                    println!(
+                        "    {} script content changed: {}",
+                        "~".yellow().bold(),
+                        display_script
+                    );
+
+                    // Render templates before diffing
+                    let old_rendered = if script.ends_with(".j2") {
+                        render_hook_template(source_dir, old_content, config)
+                            .unwrap_or_else(|_| old_content.clone())
+                    } else {
+                        old_content.clone()
+                    };
+                    let new_rendered = if script.ends_with(".j2") {
+                        render_hook_template(source_dir, new_content, config)
+                            .unwrap_or_else(|_| new_content.clone())
+                    } else {
+                        new_content.clone()
+                    };
+
+                    let diff_output = generate_text_diff(&old_rendered, &new_rendered)?;
+                    for line in diff_output.lines() {
+                        println!("      {}", line);
+                    }
+                }
+            }
+
+            // Show other changes
+            if current.order != prev.order {
+                println!(
+                    "    {} order: {} -> {}",
+                    "~".yellow(),
+                    prev.order.to_string().red(),
+                    current.order.to_string().green()
+                );
+            }
+            if current.mode != prev.mode {
+                println!(
+                    "    {} mode: {:?} -> {:?}",
+                    "~".yellow(),
+                    format!("{:?}", prev.mode).red(),
+                    format!("{:?}", current.mode).green()
+                );
+            }
+        }
+    }
+
+    if !is_active {
+        println!("    {} (skipped on this platform)", "ℹ".dimmed());
+    }
+
+    Ok(())
+}
+
+/// Generate unified diff for text content
+fn generate_text_diff(old: &str, new: &str) -> Result<String> {
+    use similar::{ChangeTag, TextDiff};
+
+    let diff = TextDiff::from_lines(old, new);
+    let mut output = String::new();
+
+    for change in diff.iter_all_changes() {
+        let (sign, line_colored) = match change.tag() {
+            ChangeTag::Delete => ("-", format!("{}", change.value().red())),
+            ChangeTag::Insert => ("+", format!("{}", change.value().green())),
+            ChangeTag::Equal => (" ", change.value().to_string()),
+        };
+
+        output.push_str(&format!("{} {}", sign, line_colored));
+        if !change.value().ends_with('\n') {
+            output.push('\n');
+        }
+    }
+
+    Ok(output)
+}
+
+/// Print removed hook with content
+fn print_removed_hook(
+    source_dir: &Path,
+    hook: &guisu_engine::hooks::Hook,
+    stage: &str,
+    platform: &str,
+    config: &Config,
+) -> Result<()> {
+    use owo_colors::OwoColorize;
+
+    let is_active = hook.should_run_on(platform);
+
+    println!();
+    println!("  {} hook: {}", stage, hook.name.red());
+
+    if let Some(ref cmd) = hook.cmd {
+        println!("    {} cmd:", "-".red().bold());
+        for line in cmd.lines() {
+            println!("      {} {}", "-".red(), line.red());
+        }
+    } else if let Some(ref script) = hook.script {
+        let display_script = script.strip_suffix(".j2").unwrap_or(script);
+        println!("    {} script: {}", "-".red().bold(), display_script.red());
+
+        // Use stored script content if available
+        if let Some(ref content) = hook.script_content {
+            // Render template if needed
+            let rendered = if script.ends_with(".j2") {
+                render_hook_template(source_dir, content, config)
+                    .unwrap_or_else(|_| content.clone())
+            } else {
+                content.clone()
+            };
+
+            for line in rendered.lines() {
+                println!("      {} {}", "-".red(), line.red());
+            }
+        }
+    }
+
+    if !is_active {
+        println!("    {} (skipped on this platform)", "ℹ".dimmed());
+    }
+
+    Ok(())
 }
 
 /// Check and print hooks status
-fn print_hooks_status(source_dir: &Path) -> Result<()> {
+/// Returns true if any hooks were displayed
+fn print_hooks_status(source_dir: &Path, config: &Config) -> Result<bool> {
     use guisu_engine::database;
     use guisu_engine::hooks::HookLoader;
     use guisu_engine::state::{HookStatePersistence, RedbPersistentState};
@@ -694,49 +1104,165 @@ fn print_hooks_status(source_dir: &Path) -> Result<()> {
 
     // Check if hooks directory exists
     if !hooks_dir.exists() {
-        return Ok(());
+        return Ok(false);
     }
 
     // Load hooks
     let loader = HookLoader::new(source_dir);
     let collections = match loader.load() {
         Ok(c) => c,
-        Err(_) => return Ok(()), // Silently skip if hooks fail to load
+        Err(e) => {
+            tracing::debug!("Failed to load hooks: {}", e);
+            return Ok(false);
+        }
     };
 
     if collections.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     // Load state from database
     let db_path = match database::get_db_path() {
         Ok(p) => p,
-        Err(_) => return Ok(()), // Silently skip if can't get db path
+        Err(e) => {
+            tracing::debug!("Failed to get db path: {}", e);
+            return Ok(false);
+        }
     };
 
     let db = match RedbPersistentState::new(&db_path) {
         Ok(d) => d,
-        Err(_) => return Ok(()), // Silently skip if can't open db
+        Err(e) => {
+            tracing::debug!("Failed to open db: {}", e);
+            return Ok(false);
+        }
     };
 
     let persistence = HookStatePersistence::new(&db);
     let state = match persistence.load() {
         Ok(s) => s,
-        Err(_) => return Ok(()), // Silently skip if can't load state
+        Err(e) => {
+            tracing::debug!("Failed to load state: {}", e);
+            return Ok(false);
+        }
     };
 
-    let has_changed = state.has_changed(&hooks_dir)?;
+    let has_changed = match state.has_changed(&hooks_dir) {
+        Ok(changed) => changed,
+        Err(e) => {
+            tracing::debug!("Failed to check if hooks changed: {}", e);
+            return Ok(false);
+        }
+    };
 
     // Only show message if hooks have changed
     if has_changed {
+        use guisu_core::platform::CURRENT_PLATFORM;
+        use std::collections::HashSet;
+
+        // Compare with last collections if available
+        if let Some(ref last) = state.last_collections {
+            let platform = CURRENT_PLATFORM.os;
+
+            // Pre hooks comparison
+            if !collections.pre.is_empty() || !last.pre.is_empty() {
+                let last_names: HashSet<_> = last.pre.iter().map(|h| h.name.as_str()).collect();
+                let current_names: HashSet<_> =
+                    collections.pre.iter().map(|h| h.name.as_str()).collect();
+
+                // New hooks
+                for hook in &collections.pre {
+                    if !last_names.contains(hook.name.as_str()) {
+                        print_hook_diff(source_dir, hook, None, "pre", platform, config)?;
+                    }
+                }
+
+                // Removed hooks
+                for hook in &last.pre {
+                    if !current_names.contains(hook.name.as_str()) {
+                        print_removed_hook(source_dir, hook, "pre", platform, config)?;
+                    }
+                }
+
+                // Modified hooks
+                for hook in &collections.pre {
+                    if let Some(last_hook) = last.pre.iter().find(|h| h.name == hook.name)
+                        && (hook.order != last_hook.order
+                            || hook.mode != last_hook.mode
+                            || hook.cmd != last_hook.cmd
+                            || hook.script != last_hook.script)
+                    {
+                        print_hook_diff(
+                            source_dir,
+                            hook,
+                            Some(last_hook),
+                            "pre",
+                            platform,
+                            config,
+                        )?;
+                    }
+                }
+            }
+
+            // Post hooks comparison
+            if !collections.post.is_empty() || !last.post.is_empty() {
+                let last_names: HashSet<_> = last.post.iter().map(|h| h.name.as_str()).collect();
+                let current_names: HashSet<_> =
+                    collections.post.iter().map(|h| h.name.as_str()).collect();
+
+                // New hooks
+                for hook in &collections.post {
+                    if !last_names.contains(hook.name.as_str()) {
+                        print_hook_diff(source_dir, hook, None, "post", platform, config)?;
+                    }
+                }
+
+                // Removed hooks
+                for hook in &last.post {
+                    if !current_names.contains(hook.name.as_str()) {
+                        print_removed_hook(source_dir, hook, "post", platform, config)?;
+                    }
+                }
+
+                // Modified hooks
+                for hook in &collections.post {
+                    if let Some(last_hook) = last.post.iter().find(|h| h.name == hook.name)
+                        && (hook.order != last_hook.order
+                            || hook.mode != last_hook.mode
+                            || hook.cmd != last_hook.cmd
+                            || hook.script != last_hook.script)
+                    {
+                        print_hook_diff(
+                            source_dir,
+                            hook,
+                            Some(last_hook),
+                            "post",
+                            platform,
+                            config,
+                        )?;
+                    }
+                }
+            }
+        } else {
+            // No last collections, show all current hooks as new
+            let platform = CURRENT_PLATFORM.os;
+
+            // Show all pre hooks as new (added)
+            for hook in &collections.pre {
+                print_hook_diff(source_dir, hook, None, "pre", platform, config)?;
+            }
+
+            // Show all post hooks as new (added)
+            for hook in &collections.post {
+                print_hook_diff(source_dir, hook, None, "post", platform, config)?;
+            }
+        }
+
+        // Add blank line after hooks
         println!();
-        println!(
-            "{} {}",
-            "Hooks:".bold(),
-            "Hooks have changed since last execution".yellow()
-        );
-        println!("  Run {} to execute hooks", "guisu hooks run".cyan());
+
+        return Ok(true);
     }
 
-    Ok(())
+    Ok(false)
 }

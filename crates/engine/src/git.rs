@@ -358,3 +358,21 @@ fn count_new_commits(repo: &git2::Repository, new_commit: &git2::AnnotatedCommit
 pub fn create_provider(_use_builtin: &guisu_config::config::AutoBool) -> Box<dyn GitProvider> {
     Box::new(Git2Provider::new())
 }
+
+/// Find git working tree root starting from the given path
+///
+/// Searches upward from the given path to find a .git directory or file.
+/// Returns the working tree root path if found, None otherwise.
+pub fn find_working_tree(start_path: &Path) -> Option<std::path::PathBuf> {
+    use git2::Repository;
+
+    // Try to open repository from the given path
+    if let Ok(repo) = Repository::discover(start_path) {
+        // Get the working directory (not the .git directory)
+        if let Some(workdir) = repo.workdir() {
+            return Some(workdir.to_path_buf());
+        }
+    }
+
+    None
+}

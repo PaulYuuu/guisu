@@ -70,8 +70,8 @@ fn get_last_written_hash(entry: &TargetEntry) -> Option<Vec<u8>> {
 }
 
 impl Command for ApplyCommand {
-    type Output = ();
-    fn execute(&self, context: &RuntimeContext) -> crate::error::Result<()> {
+    type Output = ApplyStats;
+    fn execute(&self, context: &RuntimeContext) -> crate::error::Result<ApplyStats> {
         // Parse entry type filters
         let include_types: Result<Vec<EntryType>> =
             self.include.iter().map(|s| s.parse()).collect();
@@ -173,14 +173,14 @@ impl Command for ApplyCommand {
         };
 
         if let Some(spinner) = spinner {
-            spinner.finish_with_message(format!("Found {} entries", source_state.len()));
+            spinner.finish_and_clear();
         }
 
         if source_state.is_empty() {
             if !is_single_file {
                 info!("No files to apply");
             }
-            return Ok(());
+            return Ok(ApplyStats::new());
         }
 
         // Use the full source state - we'll filter later
@@ -195,10 +195,12 @@ impl Command for ApplyCommand {
             None
         };
         // Create template context with system variables and guisu info
+        let working_tree = context.working_tree();
         let template_context = guisu_template::TemplateContext::new()
             .with_variables(all_variables)
             .with_guisu_info(
                 source_abs.to_string(),
+                working_tree.display().to_string(),
                 dest_abs.to_string(),
                 config.general.root_entry.display().to_string(),
             );
@@ -256,7 +258,7 @@ impl Command for ApplyCommand {
 
         if entries_to_apply.is_empty() {
             info!("No matching files to apply");
-            return Ok(());
+            return Ok(ApplyStats::new());
         }
 
         // Open database for state tracking (only if not dry run)
@@ -347,7 +349,7 @@ impl Command for ApplyCommand {
                                 }
                                 ConflictAction::Quit => {
                                     info!("Apply operation cancelled by user");
-                                    return Ok(());
+                                    return Ok(ApplyStats::new());
                                 }
                                 // Merge and Edit are handled internally by prompt_action and return Override when done
                                 // Diff continues the prompt loop internally
@@ -576,18 +578,15 @@ impl Command for ApplyCommand {
             }
         }
 
-        // Print summary (skip for single file mode)
-        if !is_single_file {
-            println!();
-            stats.print_summary(self.dry_run);
-        }
+        // Return stats instead of printing here
+        // The caller (lib.rs) will print the summary after hooks complete
 
         let failed_count = stats.failed();
         if failed_count > 0 {
             return Err(anyhow::anyhow!("Failed to apply {} entries", failed_count).into());
         }
 
-        Ok(())
+        Ok(stats.snapshot())
     }
 }
 
@@ -895,51 +894,6 @@ impl ApplyStats {
     fn record_dry_run(&self, entry: &TargetEntry) {
         // Same as success for counting purposes
         self.record_success(entry);
-    }
-
-    fn print_summary(&self, dry_run: bool) {
-        let total = self.total();
-        let failed = self.failed();
-        let files = self.files();
-        let directories = self.directories();
-        let symlinks = self.symlinks();
-
-        if dry_run {
-            println!(
-                "{} {} would be applied",
-                "●".bright_green(),
-                total.to_string().bright_white().bold()
-            );
-        } else if failed > 0 {
-            println!(
-                "{} {} | {} {}",
-                "●".bright_green(),
-                total.to_string().bright_green().bold(),
-                "●".bright_red(),
-                failed.to_string().bright_red().bold(),
-            );
-        } else {
-            println!(
-                "{} {} applied",
-                "●".bright_green(),
-                total.to_string().bright_green().bold()
-            );
-        }
-
-        // Show breakdown if more than just files
-        if directories > 0 || symlinks > 0 {
-            let mut parts = Vec::new();
-            if files > 0 {
-                parts.push(format!("{} files", files));
-            }
-            if directories > 0 {
-                parts.push(format!("{} directories", directories));
-            }
-            if symlinks > 0 {
-                parts.push(format!("{} symlinks", symlinks));
-            }
-            println!("  {}", parts.join(", ").dimmed());
-        }
     }
 }
 

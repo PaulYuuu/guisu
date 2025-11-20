@@ -108,10 +108,10 @@ pub fn run_hooks(
     // Create template renderer
     let renderer = create_template_engine(source_dir, config)?;
 
-    // Create hook runner with builder pattern (recommended API)
+    // Create hook runner with builder pattern
+    // For `hooks run`, always run hooks regardless of state (once/onchange)
     let runner = HookRunner::builder(&collections, source_dir)
         .template_renderer(renderer)
-        .persistent_state(state.once_executed.clone(), state.onchange_hashes.clone())
         .build();
 
     // Run hooks in stages
@@ -305,7 +305,6 @@ pub fn run_show(source_dir: &Path, config: &Config, hook_name: &str) -> Result<(
     }
 
     let collections = loader.load().context("Failed to load hooks")?;
-    let platform = CURRENT_PLATFORM.os;
 
     // Search for the hook in both pre and post collections
     let hook = collections
@@ -343,23 +342,6 @@ pub fn run_show(source_dir: &Path, config: &Config, hook_name: &str) -> Result<(
             );
         }
 
-        // Check if should run on current platform
-        if hook.should_run_on(platform) {
-            println!(
-                "{} {} {}",
-                "Status:".bold(),
-                StatusIcon::Success.get(use_nerd_fonts),
-                "Will run on this platform".green()
-            );
-        } else {
-            println!(
-                "{} {} {}",
-                "Status:".bold(),
-                StatusIcon::Warning.get(use_nerd_fonts),
-                "Skipped on this platform".dimmed()
-            );
-        }
-
         // Command or script
         if let Some(ref cmd) = hook.cmd {
             println!("{} {}", "Command:".bold(), cmd);
@@ -373,9 +355,42 @@ pub fn run_show(source_dir: &Path, config: &Config, hook_name: &str) -> Result<(
             if script_path.exists()
                 && let Ok(content) = std::fs::read_to_string(&script_path)
             {
+                // Check if this is a template file (.j2 extension)
+                let is_template = script_path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext == "j2")
+                    .unwrap_or(false);
+
+                let display_content = if is_template {
+                    // Render the template
+                    match create_template_engine(source_dir, config) {
+                        Ok(renderer) => match renderer.render(&content) {
+                            Ok(rendered) => rendered,
+                            Err(e) => {
+                                format!(
+                                    "Template rendering failed: {}\n\nRaw template:\n{}",
+                                    e, content
+                                )
+                            }
+                        },
+                        Err(e) => {
+                            format!(
+                                "Failed to create template engine: {}\n\nRaw template:\n{}",
+                                e, content
+                            )
+                        }
+                    }
+                } else {
+                    content
+                };
+
                 println!("\n{}", "Script content:".bold());
+                if is_template {
+                    println!("{}", "(rendered from template)".dimmed());
+                }
                 println!("{}", "─".repeat(60).dimmed());
-                println!("{}", content.dimmed());
+                println!("{}", display_content.dimmed());
                 println!("{}", "─".repeat(60).dimmed());
             }
         }
@@ -437,19 +452,82 @@ pub fn handle_hooks_pre(source_dir: &Path, config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "{} Running pre-apply hooks...",
-        StatusIcon::Hook.get(use_nerd_fonts)
-    );
+    // Load persistent state for hook execution tracking first
+    let db_path = database::get_db_path()?;
+    let db = RedbPersistentState::new(&db_path).context("Failed to open database")?;
+    let persistence = HookStatePersistence::new(&db);
+    let mut state = persistence.load()?;
+
+    // Show which hooks will run
+    let platform = guisu_core::platform::CURRENT_PLATFORM.os;
+    let active_hooks: Vec<_> = collections
+        .pre
+        .iter()
+        .filter(|h| {
+            // Check platform compatibility
+            if !h.should_run_on(platform) {
+                return false;
+            }
+
+            // Check if hook will actually execute based on mode
+            use guisu_engine::hooks::config::HookMode;
+            match h.mode {
+                HookMode::Always => true,
+                HookMode::Once => !state.once_executed.contains(&h.name),
+                HookMode::OnChange => {
+                    // Check if content hash changed
+                    use sha2::{Digest, Sha256};
+                    let content = h.get_content();
+                    let mut hasher = Sha256::new();
+                    hasher.update(content.as_bytes());
+                    let current_hash = hasher.finalize().to_vec();
+
+                    state
+                        .onchange_hashes
+                        .get(&h.name)
+                        .map(|stored_hash| stored_hash != &current_hash)
+                        .unwrap_or(true) // Execute if no previous hash
+                }
+            }
+        })
+        .collect();
+
+    if active_hooks.is_empty() {
+        return Ok(());
+    }
+
+    // Display hooks being run
+    for hook in &active_hooks {
+        println!(
+            "{} Running hook: {}",
+            StatusIcon::Hook.get(use_nerd_fonts),
+            hook.name.cyan()
+        );
+    }
 
     // Create template renderer
     let renderer = create_template_engine(source_dir, config)?;
 
     // Create hook runner with builder pattern and run pre hooks
+    // Pass persistent state to respect mode=once and mode=onchange
     let runner = HookRunner::builder(&collections, source_dir)
         .template_renderer(renderer)
+        .persistent_state(state.once_executed.clone(), state.onchange_hashes.clone())
         .build();
     runner.run_stage(HookStage::Pre)?;
+
+    // Get newly executed hooks and merge with state
+    for hook_name in runner.get_once_executed() {
+        state.mark_executed_once(hook_name);
+    }
+    for (hook_name, content_hash) in runner.get_onchange_hashes() {
+        state.update_onchange_hash(hook_name, content_hash);
+    }
+
+    // Update state in database
+    let hooks_dir = source_dir.join(".guisu/hooks");
+    state.update_with_collections(&hooks_dir, collections)?;
+    persistence.save(&state)?;
 
     println!(
         "{} {}",
@@ -479,28 +557,81 @@ pub fn handle_hooks_post(source_dir: &Path, config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "{} Running post-apply hooks...",
-        StatusIcon::Hook.get(use_nerd_fonts)
-    );
+    // Load persistent state for hook execution tracking first
+    let db_path = database::get_db_path()?;
+    let db = RedbPersistentState::new(&db_path).context("Failed to open database")?;
+    let persistence = HookStatePersistence::new(&db);
+    let mut state = persistence.load()?;
+
+    // Show which hooks will run
+    let platform = guisu_core::platform::CURRENT_PLATFORM.os;
+    let active_hooks: Vec<_> = collections
+        .post
+        .iter()
+        .filter(|h| {
+            // Check platform compatibility
+            if !h.should_run_on(platform) {
+                return false;
+            }
+
+            // Check if hook will actually execute based on mode
+            use guisu_engine::hooks::config::HookMode;
+            match h.mode {
+                HookMode::Always => true,
+                HookMode::Once => !state.once_executed.contains(&h.name),
+                HookMode::OnChange => {
+                    // Check if content hash changed
+                    use sha2::{Digest, Sha256};
+                    let content = h.get_content();
+                    let mut hasher = Sha256::new();
+                    hasher.update(content.as_bytes());
+                    let current_hash = hasher.finalize().to_vec();
+
+                    state
+                        .onchange_hashes
+                        .get(&h.name)
+                        .map(|stored_hash| stored_hash != &current_hash)
+                        .unwrap_or(true) // Execute if no previous hash
+                }
+            }
+        })
+        .collect();
+
+    if active_hooks.is_empty() {
+        return Ok(());
+    }
+
+    // Display hooks being run
+    for hook in &active_hooks {
+        println!(
+            "{} Running hook: {}",
+            StatusIcon::Hook.get(use_nerd_fonts),
+            hook.name.cyan()
+        );
+    }
 
     // Create template renderer
     let renderer = create_template_engine(source_dir, config)?;
 
     // Create hook runner with builder pattern and run post hooks
+    // Pass persistent state to respect mode=once and mode=onchange
     let runner = HookRunner::builder(&collections, source_dir)
         .template_renderer(renderer)
+        .persistent_state(state.once_executed.clone(), state.onchange_hashes.clone())
         .build();
     runner.run_stage(HookStage::Post)?;
 
-    // Update state in database
-    let db_path = database::get_db_path()?;
-    let db = RedbPersistentState::new(&db_path).context("Failed to open database")?;
-    let persistence = HookStatePersistence::new(&db);
+    // Get newly executed hooks and merge with state
+    for hook_name in runner.get_once_executed() {
+        state.mark_executed_once(hook_name);
+    }
+    for (hook_name, content_hash) in runner.get_onchange_hashes() {
+        state.update_onchange_hash(hook_name, content_hash);
+    }
 
+    // Update state in database
     let hooks_dir = source_dir.join(".guisu/hooks");
-    let mut state = persistence.load()?;
-    state.update(&hooks_dir)?;
+    state.update_with_collections(&hooks_dir, collections)?;
     persistence.save(&state)?;
 
     println!(
@@ -514,21 +645,14 @@ pub fn handle_hooks_post(source_dir: &Path, config: &Config) -> Result<()> {
 
 /// Create a template renderer closure for hooks
 fn create_template_engine(source_dir: &Path, config: &Config) -> Result<impl TemplateRenderer> {
-    use guisu_template::{TemplateContext, TemplateEngine};
+    use guisu_template::TemplateContext;
+    use std::sync::Arc;
 
     // Load age identities for encryption support in templates
-    let identities = config.age_identities().unwrap_or_else(|_| Vec::new());
+    let identities = Arc::new(config.age_identities().unwrap_or_else(|_| Vec::new()));
 
-    // Get template directory path
-    let template_dir = source_dir.join(".guisu/templates");
-    let template_dir = if template_dir.exists() {
-        Some(template_dir)
-    } else {
-        None
-    };
-
-    // Create template engine with identities and template directory
-    let engine = TemplateEngine::with_identities_and_template_dir(identities, template_dir);
+    // Create template engine with bitwarden provider support
+    let engine = crate::create_template_engine(source_dir, identities, config);
 
     // Get destination directory (use home_dir as default if not configured)
     let dst_dir = config
@@ -538,12 +662,18 @@ fn create_template_engine(source_dir: &Path, config: &Config) -> Result<impl Tem
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("~"));
 
-    // Create template context with guisu info
-    let context = TemplateContext::new().with_guisu_info(
-        crate::path_to_string(source_dir),
-        crate::path_to_string(&dst_dir),
-        crate::path_to_string(&config.general.root_entry),
-    );
+    // Create template context with guisu info and all variables
+    let working_tree = guisu_engine::git::find_working_tree(source_dir)
+        .unwrap_or_else(|| source_dir.to_path_buf());
+    let context = TemplateContext::new()
+        .with_guisu_info(
+            crate::path_to_string(source_dir),
+            crate::path_to_string(&working_tree),
+            crate::path_to_string(&dst_dir),
+            crate::path_to_string(&config.general.root_entry),
+        )
+        .with_loaded_variables(source_dir, config)
+        .map_err(|e| anyhow::anyhow!("Failed to load variables: {}", e))?;
 
     // Return a closure that captures both engine and context
     // No Box needed - the closure implements TemplateRenderer directly

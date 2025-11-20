@@ -16,7 +16,7 @@ use subtle::ConstantTimeEq;
 /// This tracks changes to hook configuration files, not execution state.
 /// For execution state (mode=once, mode=onchange), see engine/state.rs HookState.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HookState {
+pub struct HookConfigState {
     /// SHA256 hash of the configuration file content
     pub config_hash: Vec<u8>,
 
@@ -24,7 +24,7 @@ pub struct HookState {
     pub last_executed: SystemTime,
 }
 
-impl Default for HookState {
+impl Default for HookConfigState {
     fn default() -> Self {
         Self {
             config_hash: Vec::new(),
@@ -33,7 +33,7 @@ impl Default for HookState {
     }
 }
 
-impl HookState {
+impl HookConfigState {
     /// Create a new state with config hash
     pub fn new(config_path: &Path) -> Result<Self> {
         let config_hash = Self::compute_config_hash(config_path)?;

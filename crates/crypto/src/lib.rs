@@ -150,19 +150,7 @@ pub enum Error {
     InvalidRecipient { recipient: String, reason: String },
 
     /// Decryption failed due to wrong key
-    #[error(
-        "Decryption failed - wrong key or corrupted data\n\
-         \n\
-         This usually means:\n\
-         - The identity/key used for decryption doesn't match the encryption key\n\
-         - The encrypted file is corrupted\n\
-         \n\
-         To fix this:\n\
-         1. Ensure you're using the correct identity\n\
-         2. Check if the file was encrypted with a different key\n\
-         3. Verify file integrity:      guisu verify\n\
-         4. Re-encrypt if needed:       guisu edit <file>"
-    )]
+    #[error("Decryption failed - wrong key or corrupted data")]
     WrongKey,
 
     /// Decryption failed for other reasons

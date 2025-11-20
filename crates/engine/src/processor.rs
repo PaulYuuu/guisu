@@ -85,42 +85,12 @@ where
         attrs: &FileAttributes,
         context: &serde_json::Value,
     ) -> Result<Vec<u8>> {
-        // 1. Read source file
-        let mut content = fs::read(source_path.as_path()).map_err(|e| Error::FileRead {
+        let content = fs::read(source_path.as_path()).map_err(|e| Error::FileRead {
             path: source_path.as_path().to_path_buf(),
             source: e,
         })?;
 
-        // 2. Decrypt if encrypted (.age extension)
-        if attrs.is_encrypted() {
-            content = self
-                .decryptor
-                .decrypt(&content)
-                .map_err(|e| Error::Decryption {
-                    path: source_path.to_string(),
-                    message: e.to_string(),
-                })?;
-        }
-
-        // 3. Render template if templated (.j2 extension)
-        if attrs.is_template() {
-            let text = String::from_utf8(content).map_err(|e| Error::InvalidUtf8 {
-                path: source_path.to_string(),
-                source: e,
-            })?;
-
-            let rendered =
-                self.renderer
-                    .render(&text, context)
-                    .map_err(|e| Error::TemplateRender {
-                        path: source_path.to_string(),
-                        message: e.to_string(),
-                    })?;
-
-            content = rendered.into_bytes();
-        }
-
-        Ok(content)
+        self.process_content(content, attrs, context, &source_path.to_string())
     }
 
     /// Process file content directly (without reading from disk)
@@ -139,7 +109,7 @@ where
                 .decrypt(&content)
                 .map_err(|e| Error::Decryption {
                     path: path_for_errors.to_string(),
-                    message: e.to_string(),
+                    source: Box::new(e),
                 })?;
         }
 
@@ -154,7 +124,7 @@ where
                     .render(&text, context)
                     .map_err(|e| Error::TemplateRender {
                         path: path_for_errors.to_string(),
-                        message: e.to_string(),
+                        source: Box::new(e),
                     })?;
 
             content = rendered.into_bytes();

@@ -411,11 +411,19 @@ pub fn run(cli: Cli) -> Result<()> {
                 println!("Continuing with file application...\n");
             }
 
-            // Execute apply command
-            apply_cmd.execute(&context)?;
+            // Execute apply command and get stats
+            let is_single_file = apply_cmd.files.len() == 1;
+            let dry_run = apply_cmd.dry_run;
+            let stats = apply_cmd.execute(&context)?;
+
+            // Close database before running post hooks
+            // This allows post hooks to open the database without conflicts
+            if !dry_run && let Err(e) = guisu_engine::database::close_db() {
+                tracing::warn!("Failed to close database: {}", e);
+            }
 
             // Handle post-apply hooks (unless it's a dry run)
-            if !apply_cmd.dry_run
+            if !dry_run
                 && let Err(e) = cmd::hooks::handle_hooks_post(context.source_dir(), &context.config)
             {
                 tracing::warn!("Post-apply hooks failed: {}", e);
@@ -424,6 +432,12 @@ pub fn run(cli: Cli) -> Result<()> {
                     "Warning".yellow(),
                     e
                 );
+            }
+
+            // Print summary after hooks complete (skip for single file mode)
+            if !is_single_file {
+                println!();
+                stats.print_summary(dry_run);
             }
         }
         Commands::Diff(diff_cmd) => {
@@ -647,8 +661,11 @@ pub(crate) fn load_config_with_template_support(
         let engine = guisu_template::TemplateEngine::new();
 
         // Create context with only system info
+        let working_tree = guisu_engine::git::find_working_tree(source_dir)
+            .unwrap_or_else(|| source_dir.to_path_buf());
         let context = guisu_template::TemplateContext::new().with_guisu_info(
             path_to_string(source_dir),
+            path_to_string(&working_tree),
             path_to_string(&dirs::home_dir().unwrap_or_default()),
             "home".to_string(),
         );

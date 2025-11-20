@@ -8,7 +8,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 /// Collections of hooks for different stages
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct HookCollections {
     /// Hooks to run before applying dotfiles
     #[serde(default)]
@@ -32,7 +32,7 @@ impl HookCollections {
 }
 
 /// A single hook definition
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct Hook {
     /// Name of the hook (for logging and identification)
     pub name: String,
@@ -53,8 +53,13 @@ pub struct Hook {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub script: Option<String>,
 
+    /// Script file content (for diffing, not loaded from TOML)
+    #[serde(skip)]
+    pub script_content: Option<String>,
+
     /// Environment variables to set
     #[serde(default)]
+    #[bincode(with_serde)]
     pub env: IndexMap<String, String>,
 
     /// Fail fast on error (default: true)
@@ -218,7 +223,18 @@ impl HookStage {
 ///
 /// Controls when a hook should be executed based on its execution history
 /// and content changes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Default,
+    bincode::Encode,
+    bincode::Decode,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum HookMode {
     /// Always run the hook (default behavior)

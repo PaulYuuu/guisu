@@ -171,8 +171,11 @@ fn cat_file(
 
         let dotfiles_dir_str = crate::path_to_string(&config.dotfiles_dir(source_dir));
         let root_entry_str = crate::path_to_string(&config.general.root_entry);
+        let working_tree = guisu_engine::git::find_working_tree(source_dir)
+            .unwrap_or_else(|| source_dir.to_path_buf());
         let mut context = TemplateContext::new().with_guisu_info(
             dotfiles_dir_str,
+            crate::path_to_string(&working_tree),
             crate::path_to_string(dest_dir),
             root_entry_str.clone(),
         );

@@ -124,4 +124,13 @@ impl RuntimeContext {
             })
             .as_ref()
     }
+
+    /// Get the git working tree path (repository root)
+    ///
+    /// Attempts to find the git repository root from source_dir.
+    /// Falls back to source_dir if no git repository is found.
+    pub fn working_tree(&self) -> PathBuf {
+        guisu_engine::git::find_working_tree(self.source_dir())
+            .unwrap_or_else(|| self.source_dir().to_path_buf())
+    }
 }

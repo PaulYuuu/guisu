@@ -235,7 +235,7 @@ where
             return Ok(());
         }
 
-        tracing::info!(hook_count = hooks.len(), "Running hooks for stage");
+        tracing::debug!(hook_count = hooks.len(), "Running hooks for stage");
 
         // Get current platform
         let platform = CURRENT_PLATFORM.os;
@@ -300,7 +300,7 @@ where
                     let _guard = span.enter();
 
                     let start = std::time::Instant::now();
-                    tracing::info!("Starting hook execution");
+                    tracing::debug!("Starting hook execution");
 
                     // Execute hook
                     let result = self.execute_hook(hook);
@@ -308,7 +308,7 @@ where
                     let elapsed = start.elapsed();
                     match &result {
                         Ok(_) => {
-                            tracing::info!(
+                            tracing::debug!(
                                 elapsed_ms = elapsed.as_millis(),
                                 "Hook completed successfully"
                             );
@@ -463,11 +463,15 @@ where
             tracing::debug!("Timeout: {} seconds", timeout);
         }
 
-        // Build command
-        let cmd_builder = duct::cmd(program, args)
-            .dir(working_dir)
-            .full_env(env)
-            .stderr_to_stdout();
+        // Build command - inherits parent env by default
+        let mut cmd_builder = duct::cmd(program, args).dir(working_dir).stderr_to_stdout();
+
+        // Add custom environment variables (guisu-specific + hook-specific)
+        for (key, value) in env.iter() {
+            cmd_builder = cmd_builder.env(key, value);
+        }
+
+        let cmd_builder = cmd_builder;
 
         // Execute with or without timeout
         if timeout > 0 {
@@ -530,11 +534,17 @@ where
 
         tracing::debug!("Using interpreter: {} {:?}", interpreter, cmd_args);
 
-        // Build command
-        let cmd_builder = duct::cmd(&interpreter, &cmd_args)
+        // Build command - inherits parent env by default
+        let mut cmd_builder = duct::cmd(&interpreter, &cmd_args)
             .dir(working_dir)
-            .full_env(env)
             .stderr_to_stdout();
+
+        // Add custom environment variables (guisu-specific + hook-specific)
+        for (key, value) in env.iter() {
+            cmd_builder = cmd_builder.env(key, value);
+        }
+
+        let cmd_builder = cmd_builder;
 
         // Execute with or without timeout
         if timeout > 0 {
@@ -869,7 +879,12 @@ impl<'a> HookRunnerBuilder<'a, NoOpRenderer> {
     pub fn new(collections: &'a HookCollections, source_dir: &'a Path) -> Self {
         let mut env_vars = IndexMap::new();
 
-        // Set up default environment variables
+        // Inherit all environment variables from parent shell (like chezmoi does)
+        for (key, value) in std::env::vars() {
+            env_vars.insert(key, value);
+        }
+
+        // Override/add guisu-specific variables
         env_vars.insert("GUISU_SOURCE".to_string(), source_dir.display().to_string());
 
         if let Some(home) = dirs::home_dir() {
