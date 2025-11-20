@@ -215,9 +215,9 @@ impl HookState {
     }
 
     /// Serialize to bytes for database storage using bincode
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
         bincode::encode_to_vec(self, bincode::config::standard())
-            .expect("HookState serialization should never fail")
+            .map_err(|e| Error::State(format!("Failed to serialize HookState: {}", e)))
     }
 
     /// Deserialize from bytes using bincode
@@ -263,7 +263,7 @@ impl<'a, T: PersistentState> HookStatePersistence<'a, T> {
     pub fn save(&self, state: &HookState) -> Result<()> {
         const HOOK_STATE_KEY: &[u8] = b"hooks";
 
-        let bytes = state.to_bytes();
+        let bytes = state.to_bytes()?;
         self.db.set(HOOK_STATE_BUCKET, HOOK_STATE_KEY, &bytes)?;
         Ok(())
     }
@@ -715,9 +715,9 @@ impl EntryState {
     }
 
     /// Serialize to bytes using bincode
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
         bincode::encode_to_vec(self, bincode::config::standard())
-            .expect("EntryState serialization should never fail")
+            .map_err(|e| Error::State(format!("Failed to serialize EntryState: {}", e)))
     }
 
     /// Deserialize from bytes using bincode
@@ -743,9 +743,9 @@ impl ScriptState {
     }
 
     /// Serialize to bytes using bincode
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
         bincode::encode_to_vec(self, bincode::config::standard())
-            .expect("ScriptState serialization should never fail")
+            .map_err(|e| Error::State(format!("Failed to serialize ScriptState: {}", e)))
     }
 
     /// Deserialize from bytes using bincode

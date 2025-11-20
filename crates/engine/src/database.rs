@@ -106,7 +106,7 @@ pub fn save_entry_state(path: &str, content: &[u8], mode: Option<u32>) -> Result
 
     if let Some(db) = guard.as_ref() {
         let state = EntryState::new(content, mode);
-        db.set(ENTRY_STATE_BUCKET, path.as_bytes(), &state.to_bytes())
+        db.set(ENTRY_STATE_BUCKET, path.as_bytes(), &state.to_bytes()?)
             .map_err(|e| Error::State(format!("Failed to save state for {}: {}", path, e)))?;
     } else {
         return Err(Error::State("Database not opened".to_string()));
