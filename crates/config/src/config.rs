@@ -730,12 +730,13 @@ impl Config {
         // Check if any identities are configured
         if identity_paths.is_empty() {
             return Err(guisu_core::Error::Message(
-                "No identity file configured. Add to your config file (~/.config/guisu/config.toml):\n\n\
+                "No identity file configured. Add to your .guisu.toml:\n\n\
                  [age]\n\
                  identity = \"~/.config/guisu/key.txt\"\n\n\
                  Or use SSH key:\n\
                  identity = \"~/.ssh/id_ed25519\"\n\n\
-                 Generate age key with: guisu age generate".to_string()
+                 Generate age key with: guisu age generate"
+                    .to_string(),
             ));
         }
 

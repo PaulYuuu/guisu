@@ -82,7 +82,7 @@ pub enum Error {
         "No recipients provided for encryption\n\
          \n\
          To fix this:\n\
-         1. Add recipients to your config (~/.config/guisu/config.toml):\n\
+         1. Add recipients to your .guisu.toml:\n\
          \n\
          [age]\n\
          recipient = \"age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p\"\n\
@@ -99,7 +99,7 @@ pub enum Error {
          To fix this:\n\
          1. Generate a new identity:    guisu age generate\n\
          2. Or check the file path:     ls {path}\n\
-         3. Or configure in config:     ~/.config/guisu/config.toml\n\
+         3. Or configure in .guisu.toml:\n\
          \n\
          [age]\n\
          identity = \"{path}\""
@@ -192,7 +192,7 @@ pub enum Error {
          \n\
          To fix this:\n\
          1. Generate a new identity:  guisu age generate\n\
-         2. Or configure an existing identity in ~/.config/guisu/config.toml:\n\
+         2. Or configure an existing identity in .guisu.toml:\n\
          \n\
          [age]\n\
          identity = \"~/.ssh/id_ed25519\"  # Use SSH key\n\

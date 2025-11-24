@@ -1329,14 +1329,10 @@ mod tests {
         let temp = TempDir::new().expect("Failed to create temp dir");
         let source_dir = AbsPath::new(temp.path().to_path_buf()).expect("Invalid path");
 
-        // Create home directory (default root_entry)
-        std::fs::create_dir_all(temp.path().join("home")).expect("Failed to create home dir");
-
-        let config = test_config();
         let rel_path =
             guisu_core::path::RelPath::new("nonexistent.txt".into()).expect("Invalid rel path");
 
-        let result = check_file_exists_in_source(&source_dir, &rel_path, &config);
+        let result = check_file_exists_in_source(&source_dir, &rel_path);
 
         assert!(result.is_none());
     }
@@ -1346,14 +1342,12 @@ mod tests {
         let temp = TempDir::new().expect("Failed to create temp dir");
         let source_dir = AbsPath::new(temp.path().to_path_buf()).expect("Invalid path");
 
-        let file_path = temp.path().join("home").join("test.txt");
-        std::fs::create_dir_all(file_path.parent().unwrap()).expect("Failed to create parent");
+        let file_path = temp.path().join("test.txt");
         std::fs::write(&file_path, b"content").expect("Failed to write file");
 
-        let config = test_config();
         let rel_path = guisu_core::path::RelPath::new("test.txt".into()).expect("Invalid rel path");
 
-        let result = check_file_exists_in_source(&source_dir, &rel_path, &config);
+        let result = check_file_exists_in_source(&source_dir, &rel_path);
 
         assert!(result.is_some());
         assert!(result.unwrap().to_string_lossy().contains("test.txt"));
@@ -1364,14 +1358,12 @@ mod tests {
         let temp = TempDir::new().expect("Failed to create temp dir");
         let source_dir = AbsPath::new(temp.path().to_path_buf()).expect("Invalid path");
 
-        let file_path = temp.path().join("home").join("test.txt.j2");
-        std::fs::create_dir_all(file_path.parent().unwrap()).expect("Failed to create parent");
+        let file_path = temp.path().join("test.txt.j2");
         std::fs::write(&file_path, b"content").expect("Failed to write file");
 
-        let config = test_config();
         let rel_path = guisu_core::path::RelPath::new("test.txt".into()).expect("Invalid rel path");
 
-        let result = check_file_exists_in_source(&source_dir, &rel_path, &config);
+        let result = check_file_exists_in_source(&source_dir, &rel_path);
 
         assert!(result.is_some());
         assert!(result.unwrap().to_string_lossy().contains("test.txt.j2"));
@@ -1382,14 +1374,12 @@ mod tests {
         let temp = TempDir::new().expect("Failed to create temp dir");
         let source_dir = AbsPath::new(temp.path().to_path_buf()).expect("Invalid path");
 
-        let file_path = temp.path().join("home").join("test.txt.age");
-        std::fs::create_dir_all(file_path.parent().unwrap()).expect("Failed to create parent");
+        let file_path = temp.path().join("test.txt.age");
         std::fs::write(&file_path, b"encrypted").expect("Failed to write file");
 
-        let config = test_config();
         let rel_path = guisu_core::path::RelPath::new("test.txt".into()).expect("Invalid rel path");
 
-        let result = check_file_exists_in_source(&source_dir, &rel_path, &config);
+        let result = check_file_exists_in_source(&source_dir, &rel_path);
 
         assert!(result.is_some());
         assert!(result.unwrap().to_string_lossy().contains("test.txt.age"));
@@ -1400,14 +1390,12 @@ mod tests {
         let temp = TempDir::new().expect("Failed to create temp dir");
         let source_dir = AbsPath::new(temp.path().to_path_buf()).expect("Invalid path");
 
-        let file_path = temp.path().join("home").join("test.txt.j2.age");
-        std::fs::create_dir_all(file_path.parent().unwrap()).expect("Failed to create parent");
+        let file_path = temp.path().join("test.txt.j2.age");
         std::fs::write(&file_path, b"encrypted template").expect("Failed to write file");
 
-        let config = test_config();
         let rel_path = guisu_core::path::RelPath::new("test.txt".into()).expect("Invalid rel path");
 
-        let result = check_file_exists_in_source(&source_dir, &rel_path, &config);
+        let result = check_file_exists_in_source(&source_dir, &rel_path);
 
         assert!(result.is_some());
         assert!(
@@ -1424,17 +1412,15 @@ mod tests {
         let source_dir = AbsPath::new(temp.path().to_path_buf()).expect("Invalid path");
 
         // Create both plain and template versions
-        let plain_path = temp.path().join("home").join("test.txt");
-        let template_path = temp.path().join("home").join("test.txt.j2");
+        let plain_path = temp.path().join("test.txt");
+        let template_path = temp.path().join("test.txt.j2");
 
-        std::fs::create_dir_all(plain_path.parent().unwrap()).expect("Failed to create parent");
         std::fs::write(&plain_path, b"plain").expect("Failed to write plain");
         std::fs::write(&template_path, b"template").expect("Failed to write template");
 
-        let config = test_config();
         let rel_path = guisu_core::path::RelPath::new("test.txt".into()).expect("Invalid rel path");
 
-        let result = check_file_exists_in_source(&source_dir, &rel_path, &config);
+        let result = check_file_exists_in_source(&source_dir, &rel_path);
 
         assert!(result.is_some());
         let found_path = result.unwrap();

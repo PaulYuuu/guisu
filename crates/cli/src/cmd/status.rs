@@ -264,7 +264,6 @@ fn run_impl(
         SourceState::read(source_abs.to_owned()).context("Failed to read source state")?;
 
     if source_state.is_empty() {
-        println!("No files managed yet.");
         return Ok(());
     }
 

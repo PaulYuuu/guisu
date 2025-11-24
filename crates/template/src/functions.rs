@@ -1046,7 +1046,7 @@ pub fn encrypt(value: &str, identities: &Arc<Vec<Identity>>) -> Result<String, m
             \n\
             To fix this:\n\
             1. Generate a new identity:  guisu age generate\n\
-            2. Or configure an existing identity in ~/.config/guisu/config.toml:\n\
+            2. Or configure an existing identity in .guisu.toml:\n\
             \n\
             [age]\n\
             identity = \"~/.ssh/id_ed25519\"  # Use SSH key\n\

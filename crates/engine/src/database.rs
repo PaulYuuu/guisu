@@ -201,8 +201,8 @@ mod tests {
 
     /// Create an isolated test database in a temporary directory
     ///
-    /// Returns (temp_dir, database_instance)
-    /// The temp_dir must be kept alive for the duration of the test
+    /// Returns (`temp_dir`, `database_instance`)
+    /// The `temp_dir` must be kept alive for the duration of the test
     fn test_db_setup() -> (TempDir, RedbPersistentState) {
         let temp = TempDir::new().expect("Failed to create temp dir");
         let db_path = temp.path().join("test.db");

@@ -19,15 +19,3 @@ jobs:
 
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.1
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@1.91.0
-
-      - name: Run tests
-        run: cargo test --workspace --all-features

@@ -1,6 +1,6 @@
 //! Common utilities and types shared across CLI commands
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use guisu_config::Config;
 use guisu_core::path::AbsPath;
 use once_cell::sync::OnceCell;
@@ -32,8 +32,25 @@ impl ResolvedPaths {
     /// - Creating absolute path wrappers fails
     pub fn resolve(source_dir: &Path, dest_dir: &Path, config: &Config) -> Result<Self> {
         let dotfiles_dir = config.dotfiles_dir(source_dir);
-        let dotfiles_abs = AbsPath::new(fs::canonicalize(&dotfiles_dir)?)?;
-        let dest_abs = AbsPath::new(fs::canonicalize(dest_dir)?)?;
+
+        // If dotfiles_dir doesn't exist, use its absolute path without canonicalizing
+        // This matches chezmoi's behavior: when sourceDir doesn't exist, it simply
+        // treats it as having no managed files instead of erroring
+        let dotfiles_abs = if let Ok(canonical) = fs::canonicalize(&dotfiles_dir) {
+            AbsPath::new(canonical)?
+        } else {
+            // Directory doesn't exist, use absolute path
+            let abs_path = if dotfiles_dir.is_absolute() {
+                dotfiles_dir.clone()
+            } else {
+                std::env::current_dir()?.join(&dotfiles_dir)
+            };
+            AbsPath::new(abs_path)?
+        };
+
+        let dest_abs = AbsPath::new(fs::canonicalize(dest_dir).with_context(|| {
+            format!("Destination directory not found: {}", dest_dir.display())
+        })?)?;
 
         Ok(Self {
             source_dir: source_dir.to_path_buf(),

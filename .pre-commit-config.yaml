@@ -24,6 +24,13 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
+      - id: cargo-test
+        name: Cargo test
+        description: "Test Rust code."
+        entry: cargo test --workspace --all-features
+        language: system
+        types: [rust]
+        pass_filenames: false
   - repo: https://github.com/ComPWA/mirrors-taplo
     rev: v0.9.3
     hooks:
