@@ -6,11 +6,11 @@ use crate::state::{ENTRY_STATE_BUCKET, EntryState, PersistentState, RedbPersiste
 use guisu_config::dirs;
 use guisu_core::{Error, Result};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use tracing::warn;
 
 /// Global database instance
-static DB_INSTANCE: OnceLock<Arc<Mutex<Option<RedbPersistentState>>>> = OnceLock::new();
+static DB_INSTANCE: OnceLock<Arc<RwLock<Option<RedbPersistentState>>>> = OnceLock::new();
 
 /// Get the database path in XDG state directory
 ///
@@ -38,9 +38,9 @@ pub fn get_db_path() -> Result<PathBuf> {
 /// # Errors
 ///
 /// Returns an error if the database instance cannot be accessed
-pub fn get_db() -> Result<Arc<Mutex<Option<RedbPersistentState>>>> {
+pub fn get_db() -> Result<Arc<RwLock<Option<RedbPersistentState>>>> {
     Ok(Arc::clone(
-        DB_INSTANCE.get_or_init(|| Arc::new(Mutex::new(None))),
+        DB_INSTANCE.get_or_init(|| Arc::new(RwLock::new(None))),
     ))
 }
 
@@ -60,8 +60,8 @@ pub fn open_db() -> Result<()> {
     })?;
 
     let db_instance = get_db()?;
-    let mut guard = db_instance.lock().unwrap_or_else(|poisoned| {
-        warn!("Database lock was poisoned during open, attempting recovery");
+    let mut guard = db_instance.write().unwrap_or_else(|poisoned| {
+        warn!("Database write lock was poisoned during open, attempting recovery");
         let mut guard = poisoned.into_inner();
 
         // Validate existing database state if present
@@ -115,8 +115,8 @@ pub fn open_db() -> Result<()> {
 /// Returns an error if the state cannot be saved (e.g., database not opened, serialization failure, write error)
 pub fn save_entry_state(path: &str, content: &[u8], mode: Option<u32>) -> Result<()> {
     let db_instance = get_db()?;
-    let guard = db_instance.lock().unwrap_or_else(|poisoned| {
-        warn!("Database lock was poisoned during save, recovering");
+    let guard = db_instance.write().unwrap_or_else(|poisoned| {
+        warn!("Database write lock was poisoned during save, recovering");
         poisoned.into_inner()
     });
 
@@ -138,8 +138,8 @@ pub fn save_entry_state(path: &str, content: &[u8], mode: Option<u32>) -> Result
 /// Returns an error if the state cannot be retrieved (e.g., database not opened, deserialization failure, read error)
 pub fn get_entry_state(path: &str) -> Result<Option<EntryState>> {
     let db_instance = get_db()?;
-    let guard = db_instance.lock().unwrap_or_else(|poisoned| {
-        warn!("Database lock was poisoned during get, recovering");
+    let guard = db_instance.read().unwrap_or_else(|poisoned| {
+        warn!("Database read lock was poisoned during get, recovering");
         poisoned.into_inner()
     });
 
@@ -161,8 +161,8 @@ pub fn get_entry_state(path: &str) -> Result<Option<EntryState>> {
 /// Returns an error if the state cannot be deleted (e.g., database not opened, write error)
 pub fn delete_entry_state(path: &str) -> Result<()> {
     let db_instance = get_db()?;
-    let guard = db_instance.lock().unwrap_or_else(|poisoned| {
-        warn!("Database lock was poisoned during delete, recovering");
+    let guard = db_instance.write().unwrap_or_else(|poisoned| {
+        warn!("Database write lock was poisoned during delete, recovering");
         poisoned.into_inner()
     });
 
@@ -181,8 +181,8 @@ pub fn delete_entry_state(path: &str) -> Result<()> {
 /// Returns an error if the database cannot be closed properly (e.g., outstanding transactions, I/O error)
 pub fn close_db() -> Result<()> {
     let db_instance = get_db()?;
-    let mut guard = db_instance.lock().unwrap_or_else(|poisoned| {
-        warn!("Database lock was poisoned during close, recovering");
+    let mut guard = db_instance.write().unwrap_or_else(|poisoned| {
+        warn!("Database write lock was poisoned during close, recovering");
         poisoned.into_inner()
     });
 
