@@ -197,6 +197,18 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
     use super::*;
     use serial_test::serial;
+    use tempfile::TempDir;
+
+    /// Create an isolated test database in a temporary directory
+    ///
+    /// Returns (temp_dir, database_instance)
+    /// The temp_dir must be kept alive for the duration of the test
+    fn test_db_setup() -> (TempDir, RedbPersistentState) {
+        let temp = TempDir::new().expect("Failed to create temp dir");
+        let db_path = temp.path().join("test.db");
+        let db = RedbPersistentState::new(&db_path).expect("Failed to create test db");
+        (temp, db)
+    }
 
     #[test]
     #[serial]
@@ -219,100 +231,97 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_save_and_get_entry_state() {
-        // Clean up any existing database
-        let _ = close_db();
-
-        // Open database
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         // Save entry
         let content = b"test content";
-        save_entry_state("test/file.txt", content, Some(0o644)).expect("Failed to save");
+        let state = EntryState::new(content, Some(0o644));
+        db.set(
+            ENTRY_STATE_BUCKET,
+            b"test/file.txt",
+            &state.to_bytes().unwrap(),
+        )
+        .expect("Failed to save");
 
         // Get entry back
-        let retrieved = get_entry_state("test/file.txt")
+        let bytes = db
+            .get(ENTRY_STATE_BUCKET, b"test/file.txt")
             .expect("Failed to get")
             .expect("Entry not found");
 
+        let retrieved = EntryState::from_bytes(&bytes).expect("Failed to deserialize");
         assert_eq!(retrieved.mode, Some(0o644));
-
-        // Clean up
-        let _ = close_db();
     }
 
     #[test]
-    #[serial]
     fn test_save_without_mode() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         let content = b"content";
-        save_entry_state("file.txt", content, None).expect("Failed to save");
+        let state = EntryState::new(content, None);
+        db.set(ENTRY_STATE_BUCKET, b"file.txt", &state.to_bytes().unwrap())
+            .expect("Failed to save");
 
-        let retrieved = get_entry_state("file.txt")
+        let bytes = db
+            .get(ENTRY_STATE_BUCKET, b"file.txt")
             .expect("Failed to get")
             .expect("Entry not found");
 
+        let retrieved = EntryState::from_bytes(&bytes).expect("Failed to deserialize");
         assert_eq!(retrieved.mode, None);
-
-        let _ = close_db();
     }
 
     #[test]
-    #[serial]
     fn test_get_nonexistent_entry() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
-        let result = get_entry_state("nonexistent/file").expect("Failed to get");
+        let result = db
+            .get(ENTRY_STATE_BUCKET, b"nonexistent/file")
+            .expect("Failed to get");
 
         assert!(result.is_none());
-
-        let _ = close_db();
     }
 
     #[test]
-    #[serial]
     fn test_delete_entry_state() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         // Save entry
-        save_entry_state("to_delete.txt", b"content", None).expect("Failed to save");
+        let state = EntryState::new(b"content", None);
+        db.set(
+            ENTRY_STATE_BUCKET,
+            b"to_delete.txt",
+            &state.to_bytes().unwrap(),
+        )
+        .expect("Failed to save");
 
         // Verify it exists
         assert!(
-            get_entry_state("to_delete.txt")
+            db.get(ENTRY_STATE_BUCKET, b"to_delete.txt")
                 .expect("Failed to get")
                 .is_some()
         );
 
         // Delete it
-        delete_entry_state("to_delete.txt").expect("Failed to delete");
+        db.delete(ENTRY_STATE_BUCKET, b"to_delete.txt")
+            .expect("Failed to delete");
 
         // Verify it's gone
         assert!(
-            get_entry_state("to_delete.txt")
+            db.get(ENTRY_STATE_BUCKET, b"to_delete.txt")
                 .expect("Failed to get")
                 .is_none()
         );
-
-        let _ = close_db();
     }
 
     #[test]
-    #[serial]
     fn test_delete_nonexistent_entry() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         // Deleting non-existent entry should not error
-        let result = delete_entry_state("nonexistent");
+        let result = db.delete(ENTRY_STATE_BUCKET, b"nonexistent");
         assert!(result.is_ok());
-
-        let _ = close_db();
     }
 
     #[test]
@@ -336,51 +345,57 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_multiple_saves_same_path() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         // Save first version
-        save_entry_state("file.txt", b"version 1", Some(0o644)).expect("Failed to save v1");
+        let state1 = EntryState::new(b"version 1", Some(0o644));
+        db.set(ENTRY_STATE_BUCKET, b"file.txt", &state1.to_bytes().unwrap())
+            .expect("Failed to save v1");
 
         // Save second version (should overwrite)
-        save_entry_state("file.txt", b"version 2", Some(0o600)).expect("Failed to save v2");
+        let state2 = EntryState::new(b"version 2", Some(0o600));
+        db.set(ENTRY_STATE_BUCKET, b"file.txt", &state2.to_bytes().unwrap())
+            .expect("Failed to save v2");
 
         // Get should return latest version
-        let retrieved = get_entry_state("file.txt")
+        let bytes = db
+            .get(ENTRY_STATE_BUCKET, b"file.txt")
             .expect("Failed to get")
             .expect("Entry not found");
 
+        let retrieved = EntryState::from_bytes(&bytes).expect("Failed to deserialize");
         assert_eq!(retrieved.mode, Some(0o600));
-
-        let _ = close_db();
     }
 
     #[test]
-    #[serial]
     fn test_save_multiple_entries() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         // Save multiple entries
         for i in 0..10 {
             let path = format!("file{i}.txt");
             let content = format!("content {i}");
-            save_entry_state(&path, content.as_bytes(), Some(0o644)).expect("Failed to save");
+            let state = EntryState::new(content.as_bytes(), Some(0o644));
+            db.set(
+                ENTRY_STATE_BUCKET,
+                path.as_bytes(),
+                &state.to_bytes().unwrap(),
+            )
+            .expect("Failed to save");
         }
 
         // Verify all can be retrieved
         for i in 0..10 {
             let path = format!("file{i}.txt");
-            let result = get_entry_state(&path)
+            let bytes = db
+                .get(ENTRY_STATE_BUCKET, path.as_bytes())
                 .expect("Failed to get")
                 .expect("Entry not found");
 
+            let result = EntryState::from_bytes(&bytes).expect("Failed to deserialize");
             assert_eq!(result.mode, Some(0o644));
         }
-
-        let _ = close_db();
     }
 
     #[test]
@@ -405,10 +420,8 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_path_with_special_characters() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         let paths = vec![
             "file with spaces.txt",
@@ -419,14 +432,19 @@ mod tests {
         ];
 
         for path in paths {
-            save_entry_state(path, b"content", None)
-                .unwrap_or_else(|_| panic!("Failed to save {path}"));
+            let state = EntryState::new(b"content", None);
+            db.set(
+                ENTRY_STATE_BUCKET,
+                path.as_bytes(),
+                &state.to_bytes().unwrap(),
+            )
+            .unwrap_or_else(|_| panic!("Failed to save {path}"));
 
-            let result = get_entry_state(path).unwrap_or_else(|_| panic!("Failed to get {path}"));
+            let result = db
+                .get(ENTRY_STATE_BUCKET, path.as_bytes())
+                .unwrap_or_else(|_| panic!("Failed to get {path}"));
             assert!(result.is_some(), "Entry not found: {path}");
         }
-
-        let _ = close_db();
     }
 
     #[test]
@@ -440,78 +458,93 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_content_hash_changes() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         // Save with content A
-        save_entry_state("file.txt", b"content A", None).expect("Failed to save A");
-        let hash_a = get_entry_state("file.txt")
+        let state_a = EntryState::new(b"content A", None);
+        db.set(
+            ENTRY_STATE_BUCKET,
+            b"file.txt",
+            &state_a.to_bytes().unwrap(),
+        )
+        .expect("Failed to save A");
+        let bytes_a = db
+            .get(ENTRY_STATE_BUCKET, b"file.txt")
             .expect("Failed to get A")
-            .expect("Entry not found")
+            .expect("Entry not found");
+        let hash_a = EntryState::from_bytes(&bytes_a)
+            .expect("Failed to deserialize")
             .content_hash;
 
         // Save with different content B
-        save_entry_state("file.txt", b"content B", None).expect("Failed to save B");
-        let hash_b = get_entry_state("file.txt")
+        let state_b = EntryState::new(b"content B", None);
+        db.set(
+            ENTRY_STATE_BUCKET,
+            b"file.txt",
+            &state_b.to_bytes().unwrap(),
+        )
+        .expect("Failed to save B");
+        let bytes_b = db
+            .get(ENTRY_STATE_BUCKET, b"file.txt")
             .expect("Failed to get B")
-            .expect("Entry not found")
+            .expect("Entry not found");
+        let hash_b = EntryState::from_bytes(&bytes_b)
+            .expect("Failed to deserialize")
             .content_hash;
 
         // Hashes should be different
         assert_ne!(hash_a, hash_b);
-
-        let _ = close_db();
     }
 
     #[test]
-    #[serial]
     fn test_empty_content() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         // Save empty content
-        save_entry_state("empty.txt", b"", Some(0o644)).expect("Failed to save empty content");
+        let state = EntryState::new(b"", Some(0o644));
+        db.set(ENTRY_STATE_BUCKET, b"empty.txt", &state.to_bytes().unwrap())
+            .expect("Failed to save empty content");
 
-        let retrieved = get_entry_state("empty.txt")
+        let bytes = db
+            .get(ENTRY_STATE_BUCKET, b"empty.txt")
             .expect("Failed to get")
             .expect("Entry not found");
 
+        let retrieved = EntryState::from_bytes(&bytes).expect("Failed to deserialize");
         assert_eq!(retrieved.mode, Some(0o644));
         // Empty content should have a hash (even if it's the hash of empty bytes)
         assert!(!retrieved.content_hash.is_empty());
-
-        let _ = close_db();
     }
 
     #[test]
-    #[serial]
     fn test_large_content() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         // Create large content (1MB)
         let large_content = vec![b'X'; 1024 * 1024];
 
-        save_entry_state("large_file.bin", &large_content, None)
-            .expect("Failed to save large content");
+        let state = EntryState::new(&large_content, None);
+        db.set(
+            ENTRY_STATE_BUCKET,
+            b"large_file.bin",
+            &state.to_bytes().unwrap(),
+        )
+        .expect("Failed to save large content");
 
-        let retrieved = get_entry_state("large_file.bin")
+        let bytes = db
+            .get(ENTRY_STATE_BUCKET, b"large_file.bin")
             .expect("Failed to get")
             .expect("Entry not found");
 
+        let retrieved = EntryState::from_bytes(&bytes).expect("Failed to deserialize");
         // Hash should be computed correctly
         assert!(!retrieved.content_hash.is_empty());
-
-        let _ = close_db();
     }
 
     #[test]
-    #[serial]
     fn test_unicode_in_path() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         let unicode_paths = vec![
             "файл.txt",     // Russian
@@ -521,90 +554,115 @@ mod tests {
         ];
 
         for path in unicode_paths {
-            save_entry_state(path, b"content", None)
-                .unwrap_or_else(|_| panic!("Failed to save {path}"));
+            let state = EntryState::new(b"content", None);
+            db.set(
+                ENTRY_STATE_BUCKET,
+                path.as_bytes(),
+                &state.to_bytes().unwrap(),
+            )
+            .unwrap_or_else(|_| panic!("Failed to save {path}"));
 
-            let result = get_entry_state(path).unwrap_or_else(|_| panic!("Failed to get {path}"));
+            let result = db
+                .get(ENTRY_STATE_BUCKET, path.as_bytes())
+                .unwrap_or_else(|_| panic!("Failed to get {path}"));
             assert!(result.is_some(), "Entry not found: {path}");
         }
-
-        let _ = close_db();
     }
 
     #[test]
-    #[serial]
     fn test_delete_and_recreate() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         // Save, delete, and recreate entry
-        save_entry_state("file.txt", b"version 1", Some(0o644)).expect("Failed to save");
+        let state1 = EntryState::new(b"version 1", Some(0o644));
+        db.set(ENTRY_STATE_BUCKET, b"file.txt", &state1.to_bytes().unwrap())
+            .expect("Failed to save");
 
-        delete_entry_state("file.txt").expect("Failed to delete");
+        db.delete(ENTRY_STATE_BUCKET, b"file.txt")
+            .expect("Failed to delete");
 
         // Recreate with different content
-        save_entry_state("file.txt", b"version 2", Some(0o600)).expect("Failed to recreate");
+        let state2 = EntryState::new(b"version 2", Some(0o600));
+        db.set(ENTRY_STATE_BUCKET, b"file.txt", &state2.to_bytes().unwrap())
+            .expect("Failed to recreate");
 
-        let retrieved = get_entry_state("file.txt")
+        let bytes = db
+            .get(ENTRY_STATE_BUCKET, b"file.txt")
             .expect("Failed to get")
             .expect("Entry not found");
 
+        let retrieved = EntryState::from_bytes(&bytes).expect("Failed to deserialize");
         assert_eq!(retrieved.mode, Some(0o600));
-
-        let _ = close_db();
     }
 
     #[test]
-    #[serial]
     fn test_binary_content() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         // Binary content with all byte values
         let binary: Vec<u8> = (0u8..=255).collect();
 
-        save_entry_state("binary.dat", &binary, None).expect("Failed to save binary");
+        let state = EntryState::new(&binary, None);
+        db.set(
+            ENTRY_STATE_BUCKET,
+            b"binary.dat",
+            &state.to_bytes().unwrap(),
+        )
+        .expect("Failed to save binary");
 
-        let retrieved = get_entry_state("binary.dat").expect("Failed to get");
+        let retrieved = db
+            .get(ENTRY_STATE_BUCKET, b"binary.dat")
+            .expect("Failed to get");
 
         assert!(retrieved.is_some());
-
-        let _ = close_db();
     }
 
     #[test]
-    #[serial]
     fn test_same_content_same_hash() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         // Save same content twice with different paths
         let content = b"identical content";
 
-        save_entry_state("file1.txt", content, None).expect("Failed to save file1");
-        save_entry_state("file2.txt", content, None).expect("Failed to save file2");
+        let state1 = EntryState::new(content, None);
+        db.set(
+            ENTRY_STATE_BUCKET,
+            b"file1.txt",
+            &state1.to_bytes().unwrap(),
+        )
+        .expect("Failed to save file1");
 
-        let hash1 = get_entry_state("file1.txt")
+        let state2 = EntryState::new(content, None);
+        db.set(
+            ENTRY_STATE_BUCKET,
+            b"file2.txt",
+            &state2.to_bytes().unwrap(),
+        )
+        .expect("Failed to save file2");
+
+        let bytes1 = db
+            .get(ENTRY_STATE_BUCKET, b"file1.txt")
             .expect("Failed to get file1")
-            .expect("Entry not found")
+            .expect("Entry not found");
+        let hash1 = EntryState::from_bytes(&bytes1)
+            .expect("Failed to deserialize")
             .content_hash;
 
-        let hash2 = get_entry_state("file2.txt")
+        let bytes2 = db
+            .get(ENTRY_STATE_BUCKET, b"file2.txt")
             .expect("Failed to get file2")
-            .expect("Entry not found")
+            .expect("Entry not found");
+        let hash2 = EntryState::from_bytes(&bytes2)
+            .expect("Failed to deserialize")
             .content_hash;
 
         // Same content should produce same hash
         assert_eq!(hash1, hash2);
-
-        let _ = close_db();
     }
 
     #[test]
-    #[serial]
     fn test_mode_values() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         let mode_values = [
             0o000, // No permissions
@@ -616,16 +674,22 @@ mod tests {
 
         for (i, mode) in mode_values.iter().enumerate() {
             let path = format!("file_mode_{i}.txt");
-            save_entry_state(&path, b"content", Some(*mode)).expect("Failed to save");
+            let state = EntryState::new(b"content", Some(*mode));
+            db.set(
+                ENTRY_STATE_BUCKET,
+                path.as_bytes(),
+                &state.to_bytes().unwrap(),
+            )
+            .expect("Failed to save");
 
-            let retrieved = get_entry_state(&path)
+            let bytes = db
+                .get(ENTRY_STATE_BUCKET, path.as_bytes())
                 .expect("Failed to get")
                 .expect("Entry not found");
 
+            let retrieved = EntryState::from_bytes(&bytes).expect("Failed to deserialize");
             assert_eq!(retrieved.mode, Some(*mode));
         }
-
-        let _ = close_db();
     }
 
     #[test]
@@ -666,54 +730,74 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_save_get_delete_cycle() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
-        let path = "cycle.txt";
+        let path = b"cycle.txt";
 
         // Initial save
-        save_entry_state(path, b"content1", Some(0o644)).expect("Failed to save 1");
-        assert!(get_entry_state(path).expect("Get 1 failed").is_some());
+        let state1 = EntryState::new(b"content1", Some(0o644));
+        db.set(ENTRY_STATE_BUCKET, path, &state1.to_bytes().unwrap())
+            .expect("Failed to save 1");
+        assert!(
+            db.get(ENTRY_STATE_BUCKET, path)
+                .expect("Get 1 failed")
+                .is_some()
+        );
 
         // Delete
-        delete_entry_state(path).expect("Delete 1 failed");
-        assert!(get_entry_state(path).expect("Get 2 failed").is_none());
+        db.delete(ENTRY_STATE_BUCKET, path)
+            .expect("Delete 1 failed");
+        assert!(
+            db.get(ENTRY_STATE_BUCKET, path)
+                .expect("Get 2 failed")
+                .is_none()
+        );
 
         // Save again
-        save_entry_state(path, b"content2", Some(0o600)).expect("Failed to save 2");
-        assert!(get_entry_state(path).expect("Get 3 failed").is_some());
+        let state2 = EntryState::new(b"content2", Some(0o600));
+        db.set(ENTRY_STATE_BUCKET, path, &state2.to_bytes().unwrap())
+            .expect("Failed to save 2");
+        assert!(
+            db.get(ENTRY_STATE_BUCKET, path)
+                .expect("Get 3 failed")
+                .is_some()
+        );
 
         // Delete again
-        delete_entry_state(path).expect("Delete 2 failed");
-        assert!(get_entry_state(path).expect("Get 4 failed").is_none());
-
-        let _ = close_db();
+        db.delete(ENTRY_STATE_BUCKET, path)
+            .expect("Delete 2 failed");
+        assert!(
+            db.get(ENTRY_STATE_BUCKET, path)
+                .expect("Get 4 failed")
+                .is_none()
+        );
     }
 
     #[test]
-    #[serial]
     fn test_very_long_path() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         // Create a very long path (but not exceeding filesystem limits)
         let long_path = "a/".repeat(100) + "file.txt";
 
-        save_entry_state(&long_path, b"content", None).expect("Failed to save long path");
+        let state = EntryState::new(b"content", None);
+        db.set(
+            ENTRY_STATE_BUCKET,
+            long_path.as_bytes(),
+            &state.to_bytes().unwrap(),
+        )
+        .expect("Failed to save long path");
 
-        let retrieved = get_entry_state(&long_path).expect("Failed to get long path");
+        let retrieved = db
+            .get(ENTRY_STATE_BUCKET, long_path.as_bytes())
+            .expect("Failed to get long path");
         assert!(retrieved.is_some());
-
-        let _ = close_db();
     }
 
     #[test]
-    #[serial]
     fn test_path_with_dots() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         let paths = vec![
             ".hidden",
@@ -724,63 +808,74 @@ mod tests {
         ];
 
         for path in paths {
-            save_entry_state(path, b"content", None)
-                .unwrap_or_else(|_| panic!("Failed to save {path}"));
+            let state = EntryState::new(b"content", None);
+            db.set(
+                ENTRY_STATE_BUCKET,
+                path.as_bytes(),
+                &state.to_bytes().unwrap(),
+            )
+            .unwrap_or_else(|_| panic!("Failed to save {path}"));
 
-            let result = get_entry_state(path).unwrap_or_else(|_| panic!("Failed to get {path}"));
+            let result = db
+                .get(ENTRY_STATE_BUCKET, path.as_bytes())
+                .unwrap_or_else(|_| panic!("Failed to get {path}"));
             assert!(result.is_some(), "Entry not found: {path}");
         }
-
-        let _ = close_db();
     }
 
     #[test]
-    #[serial]
     fn test_overwrite_with_different_mode() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
-        let path = "file.txt";
+        let path = b"file.txt";
 
         // Save with mode 0o644
-        save_entry_state(path, b"content1", Some(0o644)).expect("Failed to save");
+        let state1 = EntryState::new(b"content1", Some(0o644));
+        db.set(ENTRY_STATE_BUCKET, path, &state1.to_bytes().unwrap())
+            .expect("Failed to save");
 
-        let state1 = get_entry_state(path)
+        let bytes1 = db
+            .get(ENTRY_STATE_BUCKET, path)
             .expect("Failed to get")
             .expect("Entry not found");
-        assert_eq!(state1.mode, Some(0o644));
+        let retrieved1 = EntryState::from_bytes(&bytes1).expect("Failed to deserialize");
+        assert_eq!(retrieved1.mode, Some(0o644));
 
         // Overwrite with mode 0o755
-        save_entry_state(path, b"content2", Some(0o755)).expect("Failed to overwrite");
+        let state2 = EntryState::new(b"content2", Some(0o755));
+        db.set(ENTRY_STATE_BUCKET, path, &state2.to_bytes().unwrap())
+            .expect("Failed to overwrite");
 
-        let state2 = get_entry_state(path)
+        let bytes2 = db
+            .get(ENTRY_STATE_BUCKET, path)
             .expect("Failed to get after overwrite")
             .expect("Entry not found");
-        assert_eq!(state2.mode, Some(0o755));
-
-        let _ = close_db();
+        let retrieved2 = EntryState::from_bytes(&bytes2).expect("Failed to deserialize");
+        assert_eq!(retrieved2.mode, Some(0o755));
     }
 
     #[test]
-    #[serial]
     fn test_overwrite_with_none_mode() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
-        let path = "file.txt";
+        let path = b"file.txt";
 
         // Save with mode
-        save_entry_state(path, b"content1", Some(0o644)).expect("Failed to save");
+        let state1 = EntryState::new(b"content1", Some(0o644));
+        db.set(ENTRY_STATE_BUCKET, path, &state1.to_bytes().unwrap())
+            .expect("Failed to save");
 
         // Overwrite with None mode
-        save_entry_state(path, b"content2", None).expect("Failed to overwrite");
+        let state2 = EntryState::new(b"content2", None);
+        db.set(ENTRY_STATE_BUCKET, path, &state2.to_bytes().unwrap())
+            .expect("Failed to overwrite");
 
-        let state = get_entry_state(path)
+        let bytes = db
+            .get(ENTRY_STATE_BUCKET, path)
             .expect("Failed to get")
             .expect("Entry not found");
+        let state = EntryState::from_bytes(&bytes).expect("Failed to deserialize");
         assert_eq!(state.mode, None);
-
-        let _ = close_db();
     }
 
     #[test]
@@ -794,90 +889,114 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_multiple_deletes_same_path() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
-        let path = "file.txt";
+        let path = b"file.txt";
 
-        save_entry_state(path, b"content", None).expect("Failed to save");
+        let state = EntryState::new(b"content", None);
+        db.set(ENTRY_STATE_BUCKET, path, &state.to_bytes().unwrap())
+            .expect("Failed to save");
 
         // First delete
-        delete_entry_state(path).expect("First delete failed");
-        assert!(get_entry_state(path).expect("Get failed").is_none());
+        db.delete(ENTRY_STATE_BUCKET, path)
+            .expect("First delete failed");
+        assert!(
+            db.get(ENTRY_STATE_BUCKET, path)
+                .expect("Get failed")
+                .is_none()
+        );
 
         // Second delete (should not error)
-        delete_entry_state(path).expect("Second delete failed");
-        assert!(get_entry_state(path).expect("Get failed").is_none());
-
-        let _ = close_db();
+        db.delete(ENTRY_STATE_BUCKET, path)
+            .expect("Second delete failed");
+        assert!(
+            db.get(ENTRY_STATE_BUCKET, path)
+                .expect("Get failed")
+                .is_none()
+        );
     }
 
     #[test]
-    #[serial]
     fn test_save_many_entries() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
         // Save 100 entries
         for i in 0..100 {
             let path = format!("file_{i}.txt");
-            save_entry_state(&path, format!("content {i}").as_bytes(), Some(0o644))
-                .unwrap_or_else(|_| panic!("Failed to save {i}"));
+            let content = format!("content {i}");
+            let state = EntryState::new(content.as_bytes(), Some(0o644));
+            db.set(
+                ENTRY_STATE_BUCKET,
+                path.as_bytes(),
+                &state.to_bytes().unwrap(),
+            )
+            .unwrap_or_else(|_| panic!("Failed to save {i}"));
         }
 
         // Verify all were saved
         for i in 0..100 {
             let path = format!("file_{i}.txt");
-            let result = get_entry_state(&path).unwrap_or_else(|_| panic!("Failed to get {i}"));
+            let result = db
+                .get(ENTRY_STATE_BUCKET, path.as_bytes())
+                .unwrap_or_else(|_| panic!("Failed to get {i}"));
             assert!(result.is_some(), "Entry {i} not found");
         }
-
-        let _ = close_db();
     }
 
     #[test]
-    #[serial]
     fn test_hash_changes_on_content_change_only() {
-        let _ = close_db();
-        open_db().expect("Failed to open db");
+        let (_temp, db) = test_db_setup();
 
-        let path = "file.txt";
+        let path = b"file.txt";
 
         // Save with mode 0o644
-        save_entry_state(path, b"content", Some(0o644)).expect("Failed to save");
-        let hash1 = get_entry_state(path)
+        let state1 = EntryState::new(b"content", Some(0o644));
+        db.set(ENTRY_STATE_BUCKET, path, &state1.to_bytes().unwrap())
+            .expect("Failed to save");
+        let bytes1 = db
+            .get(ENTRY_STATE_BUCKET, path)
             .expect("Failed to get")
-            .expect("Entry not found")
+            .expect("Entry not found");
+        let hash1 = EntryState::from_bytes(&bytes1)
+            .expect("Failed to deserialize")
             .content_hash;
 
         // Save with different mode but same content
-        save_entry_state(path, b"content", Some(0o755)).expect("Failed to save");
-        let hash2 = get_entry_state(path)
+        let state2 = EntryState::new(b"content", Some(0o755));
+        db.set(ENTRY_STATE_BUCKET, path, &state2.to_bytes().unwrap())
+            .expect("Failed to save");
+        let bytes2 = db
+            .get(ENTRY_STATE_BUCKET, path)
             .expect("Failed to get")
-            .expect("Entry not found")
+            .expect("Entry not found");
+        let hash2 = EntryState::from_bytes(&bytes2)
+            .expect("Failed to deserialize")
             .content_hash;
 
         // Hash should be same (only content matters)
         assert_eq!(hash1, hash2);
 
         // Save with different content
-        save_entry_state(path, b"different content", Some(0o755)).expect("Failed to save");
-        let hash3 = get_entry_state(path)
+        let state3 = EntryState::new(b"different content", Some(0o755));
+        db.set(ENTRY_STATE_BUCKET, path, &state3.to_bytes().unwrap())
+            .expect("Failed to save");
+        let bytes3 = db
+            .get(ENTRY_STATE_BUCKET, path)
             .expect("Failed to get")
-            .expect("Entry not found")
+            .expect("Entry not found");
+        let hash3 = EntryState::from_bytes(&bytes3)
+            .expect("Failed to deserialize")
             .content_hash;
 
         // Hash should be different
         assert_ne!(hash1, hash3);
-
-        let _ = close_db();
     }
 
     #[test]
-    #[serial]
     fn test_db_path_consistency() {
+        let (_temp, _db) = test_db_setup();
+
         let path1 = get_db_path().expect("Failed to get path 1");
         let path2 = get_db_path().expect("Failed to get path 2");
 
