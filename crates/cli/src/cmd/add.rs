@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use clap::Args;
 use guisu_core::path::AbsPath;
 use once_cell::sync::Lazy;
-use owo_colors::OwoColorize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::warn;
@@ -90,11 +89,6 @@ impl Command for AddCommand {
                     source_dir.display()
                 )
             })?;
-            println!(
-                "\n  {} {}",
-                "created".dimmed(),
-                source_dir.display().to_string().bright_cyan()
-            );
         }
 
         // Load metadata if create flag is used
@@ -116,14 +110,9 @@ impl Command for AddCommand {
             config,
         };
 
-        println!();
-        let mut total_files_added = 0;
-
         for file_path in &self.files {
-            let (rel_path, count) = add_file(&params, file_path)
+            let (rel_path, _count) = add_file(&params, file_path)
                 .with_context(|| format!("Failed to add file: {}", file_path.display()))?;
-
-            total_files_added += count;
 
             // Add to create-once list if requested
             if self.create {
@@ -136,18 +125,8 @@ impl Command for AddCommand {
             metadata
                 .save(source_dir)
                 .context("Failed to save metadata")?;
-            println!(
-                "  {} {}",
-                "✓".bright_green(),
-                "Updated .guisu/state.toml with create-once files".dimmed()
-            );
         }
 
-        println!(
-            "\n  {} {}\n",
-            "✓".bright_green(),
-            format!("Added {total_files_added} file(s)").bright_white()
-        );
         Ok(())
     }
 }
@@ -197,13 +176,7 @@ fn add_file(params: &AddParams, file_path: &Path) -> Result<(guisu_core::path::R
         add_directory(params, &file_abs, &rel_path)?
     } else if metadata.is_symlink() {
         // Add symlink
-        add_symlink(
-            params.source_dir,
-            &rel_path,
-            &file_abs,
-            params.force,
-            params.config,
-        )?;
+        add_symlink(params.source_dir, &rel_path, &file_abs, params.force)?;
         1
     } else {
         // Add regular file
@@ -287,7 +260,6 @@ fn build_source_file_path(
     rel_path: &guisu_core::path::RelPath,
     is_template: bool,
     encrypt: bool,
-    config: &guisu_config::Config,
 ) -> PathBuf {
     let rel_str = rel_path.as_path().to_string_lossy();
     let mut source_filename = rel_str.to_string();
@@ -300,11 +272,7 @@ fn build_source_file_path(
         source_filename.push_str(".age");
     }
 
-    // Apply root_entry (defaults to "home")
-    source_dir
-        .as_path()
-        .join(&config.general.root_entry)
-        .join(&source_filename)
+    source_dir.as_path().join(&source_filename)
 }
 
 /// Handle existing source file (check if re-adding with force flag)
@@ -314,9 +282,8 @@ fn handle_existing_source_file(
     is_template: bool,
     encrypt: bool,
     force: bool,
-    config: &guisu_config::Config,
 ) -> Result<()> {
-    if let Some(existing_file) = check_file_exists_in_source(source_dir, rel_path, config) {
+    if let Some(existing_file) = check_file_exists_in_source(source_dir, rel_path) {
         if force {
             // Force is true - handle re-adding with potentially different attributes
 
@@ -366,46 +333,6 @@ fn handle_existing_source_file(
     Ok(())
 }
 
-/// Get file display attributes (private, executable)
-fn get_file_display_attributes(file_abs: &AbsPath) -> Result<(bool, bool)> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let metadata = fs::metadata(file_abs.as_path())?;
-        let mode = metadata.permissions().mode() & 0o777;
-        let is_private = mode == 0o600 || mode == 0o700;
-        let is_executable = (mode & 0o100) != 0;
-        Ok((is_private, is_executable))
-    }
-
-    #[cfg(not(unix))]
-    {
-        Ok((false, false))
-    }
-}
-
-/// File display attributes for colored output
-#[derive(Copy, Clone)]
-enum FileDisplayType {
-    Encrypted,
-    Template,
-    Executable,
-    Private,
-    Regular,
-}
-
-/// Print added file with appropriate color based on file type
-fn print_added_file(rel_path: &guisu_core::path::RelPath, display_type: FileDisplayType) {
-    let target_str = rel_path.to_string();
-    match display_type {
-        FileDisplayType::Encrypted => println!("  → {}", target_str.bright_magenta()),
-        FileDisplayType::Template => println!("  → {}", target_str.bright_blue()),
-        FileDisplayType::Executable => println!("  → {}", target_str.bright_yellow()),
-        FileDisplayType::Private => println!("  → {}", target_str.bright_red()),
-        FileDisplayType::Regular => println!("  → {}", target_str.bright_green()),
-    }
-}
-
 fn add_regular_file(
     params: &AddParams,
     rel_path: &guisu_core::path::RelPath,
@@ -434,13 +361,8 @@ fn add_regular_file(
     }
 
     // Build source filename with V2 extensions
-    let source_file_path = build_source_file_path(
-        params.source_dir,
-        rel_path,
-        is_template,
-        params.encrypt,
-        params.config,
-    );
+    let source_file_path =
+        build_source_file_path(params.source_dir, rel_path, is_template, params.encrypt);
 
     // Check if file already exists in source (in any form)
     handle_existing_source_file(
@@ -449,7 +371,6 @@ fn add_regular_file(
         is_template,
         params.encrypt,
         params.force,
-        params.config,
     )?;
 
     // Create parent directory if needed
@@ -481,21 +402,6 @@ fn add_regular_file(
         })?;
     }
 
-    // Determine file attributes for display and print
-    let (is_private, is_executable) = get_file_display_attributes(file_abs)?;
-    let display_type = if params.encrypt {
-        FileDisplayType::Encrypted
-    } else if is_template {
-        FileDisplayType::Template
-    } else if is_executable {
-        FileDisplayType::Executable
-    } else if is_private {
-        FileDisplayType::Private
-    } else {
-        FileDisplayType::Regular
-    };
-    print_added_file(rel_path, display_type);
-
     Ok(())
 }
 
@@ -505,16 +411,9 @@ fn add_directory(
     dir_abs: &AbsPath,
     rel_path: &guisu_core::path::RelPath,
 ) -> Result<usize> {
-    // Create the directory in source (with root_entry if configured)
-    let source_dir_path = params
-        .source_dir
-        .as_path()
-        .join(&params.config.general.root_entry)
-        .join(rel_path.as_path());
+    let source_dir_path = params.source_dir.as_path().join(rel_path.as_path());
     fs::create_dir_all(&source_dir_path)
         .with_context(|| format!("Failed to create directory: {}", source_dir_path.display()))?;
-
-    println!("  → {}", rel_path.to_string().bright_cyan());
 
     let mut count = 0;
 
@@ -535,24 +434,12 @@ fn add_directory(
         let entry_rel = entry_abs.strip_prefix(params.dest_dir)?;
 
         if entry.file_type().is_dir() {
-            // Create directory in source (with root_entry)
-            let source_subdir = params
-                .source_dir
-                .as_path()
-                .join(&params.config.general.root_entry)
-                .join(entry_rel.as_path());
+            let source_subdir = params.source_dir.as_path().join(entry_rel.as_path());
             fs::create_dir_all(&source_subdir).with_context(|| {
                 format!("Failed to create directory: {}", source_subdir.display())
             })?;
-            println!("  → {}", entry_rel.to_string().bright_cyan());
         } else if entry.file_type().is_symlink() {
-            add_symlink(
-                params.source_dir,
-                &entry_rel,
-                &entry_abs,
-                params.force,
-                params.config,
-            )?;
+            add_symlink(params.source_dir, &entry_rel, &entry_abs, params.force)?;
             count += 1;
         } else {
             add_regular_file(params, &entry_rel, &entry_abs)?;
@@ -569,20 +456,15 @@ fn add_symlink(
     rel_path: &guisu_core::path::RelPath,
     link_abs: &AbsPath,
     force: bool,
-    config: &Config,
 ) -> Result<()> {
     // Read the symlink target
     let link_target = fs::read_link(link_abs.as_path())
         .with_context(|| format!("Failed to read symlink: {}", link_abs.as_path().display()))?;
 
-    // Apply root_entry
-    let source_link_path = source_dir
-        .as_path()
-        .join(&config.general.root_entry)
-        .join(rel_path.as_path());
+    let source_link_path = source_dir.as_path().join(rel_path.as_path());
 
     // Check if symlink already exists in source (in any form)
-    if let Some(existing_file) = check_file_exists_in_source(source_dir, rel_path, config) {
+    if let Some(existing_file) = check_file_exists_in_source(source_dir, rel_path) {
         if force {
             // Force is true - remove the existing symlink to overwrite it
             fs::remove_file(&existing_file).with_context(|| {
@@ -617,12 +499,6 @@ fn add_symlink(
         symlink_file(&link_target, &source_link_path)
             .with_context(|| format!("Failed to create symlink: {}", source_link_path.display()))?;
     }
-
-    println!(
-        "  → {} → {}",
-        rel_path.to_string().bright_magenta(),
-        link_target.display().to_string().dimmed()
-    );
 
     Ok(())
 }
@@ -1061,7 +937,6 @@ fn extract_variables(value: &serde_json::Value, prefix: &str) -> Vec<TemplateVar
 fn check_file_exists_in_source(
     source_dir: &AbsPath,
     rel_path: &guisu_core::path::RelPath,
-    config: &Config,
 ) -> Option<PathBuf> {
     let rel_str = rel_path.as_path().to_string_lossy();
 
@@ -1074,10 +949,7 @@ fn check_file_exists_in_source(
     ];
 
     for variant in &variants {
-        let source_file_path = source_dir
-            .as_path()
-            .join(&config.general.root_entry)
-            .join(variant);
+        let source_file_path = source_dir.as_path().join(variant);
 
         if source_file_path.exists() {
             return Some(source_file_path);
