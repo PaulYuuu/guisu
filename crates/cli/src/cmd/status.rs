@@ -7,7 +7,7 @@ use clap::Args;
 use guisu_core::path::{AbsPath, RelPath};
 use guisu_engine::adapters::crypto::CryptoDecryptorAdapter;
 use guisu_engine::adapters::template::TemplateRendererAdapter;
-use guisu_engine::entry::{EntryKind, SourceEntry, TargetEntry};
+use guisu_engine::entry::TargetEntry;
 use guisu_engine::processor::ContentProcessor;
 use guisu_engine::state::{DestinationState, SourceState, TargetState};
 use guisu_engine::system::RealSystem;
@@ -20,9 +20,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::debug;
 
-use crate::cmd::conflict::{ThreeWayComparisonResult, compare_three_way};
 use crate::command::Command;
 use crate::common::RuntimeContext;
+use crate::conflict::{ThreeWayComparisonResult, compare_three_way};
 use crate::ui::icons::{FileIconInfo, icon_for_file};
 use guisu_config::Config;
 use lscolors::{LsColors, Style};
@@ -31,7 +31,9 @@ use nu_ansi_term::Style as AnsiStyle;
 /// Output format for status command
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OutputFormat {
+    /// Simple list format
     Simple,
+    /// Tree structure format
     Tree,
 }
 
@@ -42,7 +44,7 @@ impl std::str::FromStr for OutputFormat {
         match s.to_lowercase().as_str() {
             "simple" => Ok(OutputFormat::Simple),
             "tree" => Ok(OutputFormat::Tree),
-            _ => anyhow::bail!("Invalid output format: {}. Use 'simple' or 'tree'", s),
+            _ => anyhow::bail!("Invalid output format: {s}. Use 'simple' or 'tree'"),
         }
     }
 }
@@ -82,7 +84,7 @@ impl FileStatus {
         }
     }
 
-    fn color_str(&self, text: &str) -> String {
+    fn color_str(self, text: &str) -> String {
         match self {
             FileStatus::Latent => text.bright_green().to_string(), // 绿色：待部署
             FileStatus::Behind => text.bright_yellow().to_string(), // 黄色：需要更新
@@ -143,6 +145,91 @@ impl Command for StatusCommand {
     }
 }
 
+/// Build target state from source state for status command
+fn build_status_target_state(
+    source_state: &SourceState,
+    processor: &ContentProcessor<CryptoDecryptorAdapter, TemplateRendererAdapter>,
+    template_ctx_value: &serde_json::Value,
+    filter_paths: Option<&Vec<RelPath>>,
+    identities: &[guisu_crypto::Identity],
+) -> TargetState {
+    use guisu_engine::entry::SourceEntry;
+
+    let mut target_state = TargetState::new();
+
+    for source_entry in source_state.entries() {
+        let target_path = source_entry.target_path();
+
+        // If filtering, skip entries not in the filter
+        if let Some(filter) = filter_paths
+            && !filter.iter().any(|p| p == target_path)
+        {
+            continue;
+        }
+
+        // Process this entry manually to handle errors gracefully
+        match source_entry {
+            SourceEntry::File {
+                source_path,
+                target_path,
+                attributes,
+            } => {
+                let abs_source_path = source_state.source_file_path(source_path);
+                match processor.process_file(&abs_source_path, attributes, template_ctx_value) {
+                    Ok(mut content) => {
+                        // Decrypt inline age: values (sops-like behavior)
+                        if !identities.is_empty()
+                            && let Ok(content_str) = String::from_utf8(content.clone())
+                            && content_str.contains("age:")
+                            && let Ok(decrypted) =
+                                guisu_crypto::decrypt_file_content(&content_str, identities)
+                        {
+                            content = decrypted.into_bytes();
+                        }
+
+                        let mode = attributes.mode();
+                        target_state.add(TargetEntry::File {
+                            path: target_path.clone(),
+                            content,
+                            mode,
+                        });
+                    }
+                    Err(e) => {
+                        debug!(
+                            "Warning: Failed to process {}: {}",
+                            target_path.as_path().display(),
+                            e
+                        );
+                    }
+                }
+            }
+            SourceEntry::Directory {
+                source_path: _,
+                target_path,
+                attributes,
+            } => {
+                let mode = attributes.mode();
+                target_state.add(TargetEntry::Directory {
+                    path: target_path.clone(),
+                    mode,
+                });
+            }
+            SourceEntry::Symlink {
+                source_path: _,
+                target_path,
+                link_target,
+            } => {
+                target_state.add(TargetEntry::Symlink {
+                    path: target_path.clone(),
+                    target: link_target.clone(),
+                });
+            }
+        }
+    }
+
+    target_state
+}
+
 /// Run the status command implementation
 fn run_impl(
     source_dir: &Path,
@@ -200,8 +287,7 @@ fn run_impl(
     all_variables.extend(config.variables.iter().map(|(k, v)| (k.clone(), v.clone())));
 
     // Create template engine with identities, template directory, and bitwarden provider
-    let template_engine =
-        crate::create_template_engine(source_dir, Arc::clone(&identities), config);
+    let template_engine = crate::create_template_engine(source_dir, &identities, config);
 
     // Create content processor with real decryptor and renderer
     // Use Arc to share identity without unnecessary cloning
@@ -215,7 +301,9 @@ fn run_impl(
     let processor = ContentProcessor::new(decryptor, renderer);
 
     // Build filter paths if specific files were requested
-    let filter_paths = if !files.is_empty() {
+    let filter_paths = if files.is_empty() {
+        None
+    } else {
         let paths = crate::build_filter_paths(files, dest_abs)?;
         // Check if any files match
         let has_matches = source_state
@@ -227,8 +315,6 @@ fn run_impl(
             return Ok(());
         }
         Some(paths)
-    } else {
-        None
     };
 
     // Build target state (processes templates and decrypts files)
@@ -244,81 +330,16 @@ fn run_impl(
             dest_abs.to_string(),
             config.general.root_entry.display().to_string(),
         );
-    let context =
+    let template_ctx_value =
         serde_json::to_value(&template_context).context("Failed to serialize template context")?;
-    let mut target_state = TargetState::new();
 
-    for source_entry in source_state.entries() {
-        let target_path = source_entry.target_path();
-
-        // If filtering, skip entries not in the filter
-        if let Some(ref filter) = filter_paths
-            && !filter.iter().any(|p| p == target_path)
-        {
-            continue;
-        }
-
-        // Process this entry manually to handle errors gracefully
-        use guisu_engine::entry::SourceEntry;
-        match source_entry {
-            SourceEntry::File {
-                source_path,
-                target_path,
-                attributes,
-            } => {
-                let abs_source_path = source_state.source_file_path(source_path);
-                match processor.process_file(&abs_source_path, attributes, &context) {
-                    Ok(mut content) => {
-                        // Decrypt inline age: values (sops-like behavior)
-                        if !identities.is_empty()
-                            && let Ok(content_str) = String::from_utf8(content.clone())
-                            && content_str.contains("age:")
-                            && let Ok(decrypted) =
-                                guisu_crypto::decrypt_file_content(&content_str, &identities)
-                        {
-                            content = decrypted.into_bytes();
-                        }
-
-                        let mode = attributes.mode();
-                        target_state.add(TargetEntry::File {
-                            path: target_path.clone(),
-                            content,
-                            mode,
-                        });
-                    }
-                    Err(e) => {
-                        // Skip files with processing errors (e.g., template syntax errors)
-                        debug!(
-                            "Warning: Failed to process {}: {}",
-                            target_path.as_path().display(),
-                            e
-                        );
-                    }
-                }
-            }
-            SourceEntry::Directory {
-                source_path: _,
-                target_path,
-                attributes,
-            } => {
-                let mode = attributes.mode();
-                target_state.add(TargetEntry::Directory {
-                    path: target_path.clone(),
-                    mode,
-                });
-            }
-            SourceEntry::Symlink {
-                source_path: _,
-                target_path,
-                link_target,
-            } => {
-                target_state.add(TargetEntry::Symlink {
-                    path: target_path.clone(),
-                    target: link_target.clone(),
-                });
-            }
-        }
-    }
+    let target_state = build_status_target_state(
+        &source_state,
+        &processor,
+        &template_ctx_value,
+        filter_paths.as_ref(),
+        &identities,
+    );
 
     // Read destination state
     let mut dest_state = DestinationState::new(dest_abs.to_owned());
@@ -334,7 +355,7 @@ fn run_impl(
         metadata: &metadata,
         filter_paths: filter_paths.as_ref(),
         ignore_matcher: &ignore_matcher,
-    })?;
+    });
 
     // Check if we're viewing a single file (don't show summary header)
     let is_single_file = !files.is_empty() && files.len() == 1;
@@ -346,10 +367,10 @@ fn run_impl(
     // Render output based on format
     match output_format {
         OutputFormat::Simple => {
-            render_simple(&file_infos, show_all, is_single_file, &lscolors, show_icons)
+            render_simple(&file_infos, show_all, is_single_file, &lscolors, show_icons);
         }
         OutputFormat::Tree => {
-            render_tree(&file_infos, show_all, is_single_file, &lscolors, show_icons)
+            render_tree(&file_infos, show_all, is_single_file, &lscolors, show_icons);
         }
     }
 
@@ -371,195 +392,234 @@ struct CollectParams<'a> {
     ignore_matcher: &'a guisu_config::IgnoreMatcher,
 }
 
+/// Get file type character from source entry
+fn get_entry_file_type(entry: &guisu_engine::entry::SourceEntry) -> char {
+    use guisu_engine::entry::SourceEntry;
+    match entry {
+        SourceEntry::File { .. } => 'F',
+        SourceEntry::Directory { .. } => 'D',
+        SourceEntry::Symlink { .. } => 'L',
+    }
+}
+
+/// Format path for display with ~/ prefix if under home directory
+fn format_display_path(dest_root: &AbsPath, target_path: &RelPath) -> String {
+    let full_dest_path = dest_root.join(target_path);
+    if let Some(home_dir) = dirs::home_dir() {
+        // If path is under home, show as ~/relative/path
+        if let Ok(rel_path) = full_dest_path.as_path().strip_prefix(&home_dir) {
+            format!("~/{}", rel_path.display())
+        } else {
+            full_dest_path.as_path().display().to_string()
+        }
+    } else {
+        full_dest_path.as_path().display().to_string()
+    }
+}
+
+/// Determine file status based on three-way comparison
+fn determine_entry_status(
+    target_entry: &TargetEntry,
+    dest_entry: &guisu_engine::entry::DestEntry,
+    path_str: &str,
+) -> FileStatus {
+    use guisu_engine::entry::TargetEntry;
+
+    // Get the base state from database (last applied state)
+    let base_state = guisu_engine::database::get_entry_state(path_str)
+        .ok()
+        .flatten();
+
+    match target_entry {
+        TargetEntry::File { content, mode, .. } => {
+            // Compute hashes for three-way comparison
+            use guisu_engine::state::hash_data;
+            let source_hash = hash_data(content);
+            let dest_hash = dest_entry.content.as_ref().map(|c| hash_data(c));
+
+            // Check mode matches
+            let mode_matches = if let Some(expected_mode) = mode {
+                dest_entry.mode == Some(*expected_mode)
+            } else {
+                true
+            };
+
+            // Use unified three-way comparison
+            let dest_hash_vec = dest_hash.unwrap_or_default();
+            let base_hash = base_state.as_ref().map(|s| s.content_hash.as_slice());
+
+            let comparison_result = compare_three_way(&source_hash, &dest_hash_vec, base_hash);
+
+            // Map comparison result to file status
+            match comparison_result {
+                ThreeWayComparisonResult::NoChange | ThreeWayComparisonResult::Converged => {
+                    if mode_matches {
+                        FileStatus::Steady
+                    } else {
+                        FileStatus::Behind // Mode changed
+                    }
+                }
+                ThreeWayComparisonResult::SourceChanged => FileStatus::Behind,
+                ThreeWayComparisonResult::DestinationChanged => FileStatus::Ahead,
+                ThreeWayComparisonResult::BothChanged => FileStatus::Conflict,
+            }
+        }
+        TargetEntry::Directory { mode, .. } => {
+            if let Some(expected_mode) = mode {
+                if dest_entry.mode == Some(*expected_mode) {
+                    FileStatus::Steady
+                } else {
+                    FileStatus::Behind
+                }
+            } else {
+                FileStatus::Steady
+            }
+        }
+        TargetEntry::Symlink { target, .. } => {
+            if dest_entry.link_target.as_ref() == Some(target) {
+                FileStatus::Steady
+            } else {
+                FileStatus::Behind
+            }
+        }
+        TargetEntry::Remove { .. } => {
+            // Remove entries should not be in status
+            FileStatus::Behind
+        }
+    }
+}
+
+/// Process a single entry for status display
+#[allow(clippy::too_many_arguments)]
+fn process_entry_for_status(
+    entry: &guisu_engine::entry::SourceEntry,
+    dest_state_mutex: &std::sync::Mutex<&mut DestinationState>,
+    target_state: &TargetState,
+    system: &RealSystem,
+    dest_root: &AbsPath,
+    metadata: &guisu_engine::state::Metadata,
+    filter_paths: Option<&Vec<RelPath>>,
+    ignore_matcher: &guisu_config::IgnoreMatcher,
+) -> Option<FileInfo> {
+    use guisu_engine::entry::EntryKind;
+
+    let target_path = entry.target_path();
+
+    // Skip if filtering and this file is not in the filter
+    if let Some(filter) = filter_paths
+        && !filter.iter().any(|p| p == target_path)
+    {
+        return None;
+    }
+
+    // Skip if file is ignored
+    if ignore_matcher.is_ignored(target_path.as_path()) {
+        return None;
+    }
+
+    let path_str = target_path.to_string();
+
+    // Read destination entry (thread-safe via mutex)
+    let dest_entry = {
+        let mut dest_state = dest_state_mutex
+            .lock()
+            .expect("Destination state mutex poisoned");
+        match dest_state
+            .read(target_path, system)
+            .context("Failed to read destination state")
+        {
+            Ok(entry) => entry.clone(), // Clone to release the lock quickly
+            Err(e) => {
+                debug!(
+                    "Failed to read destination state for {}: {}",
+                    target_path.as_path().display(),
+                    e
+                );
+                return None;
+            }
+        }
+    };
+
+    // Handle create-once files that already exist - show as Steady
+    if metadata.is_create_once(&path_str) && dest_entry.kind != EntryKind::Missing {
+        let file_type = get_entry_file_type(entry);
+        let display_path = format_display_path(dest_root, target_path);
+
+        return Some(FileInfo {
+            path: display_path,
+            status: FileStatus::Steady,
+            file_type,
+        });
+    }
+
+    // Determine file type
+    let file_type = get_entry_file_type(entry);
+
+    // Determine status based on three-way comparison (Base, Source, Destination)
+    let status = if dest_entry.kind == EntryKind::Missing {
+        // Destination doesn't exist → Latent
+        FileStatus::Latent
+    } else {
+        // Destination exists, do three-way comparison
+        // Use target_state which has processed content (decrypted + rendered)
+        let Some(target_entry) = target_state.get(target_path) else {
+            // Target entry not found (likely due to template processing error)
+            // Skip this file
+            debug!(
+                "Skipping {}: target entry not found in target state",
+                target_path.as_path().display()
+            );
+            return None;
+        };
+
+        determine_entry_status(target_entry, &dest_entry, &path_str)
+    };
+
+    // Format path for display
+    let display_path = format_display_path(dest_root, target_path);
+
+    Some(FileInfo {
+        path: display_path,
+        status,
+        file_type,
+    })
+}
+
 /// Collect file information from source and destination states
-fn collect_file_info(params: CollectParams) -> Result<Vec<FileInfo>> {
+fn collect_file_info(params: CollectParams) -> Vec<FileInfo> {
     use std::sync::Mutex;
+
+    // Destructure params to avoid partial move issues
+    let CollectParams {
+        source_state,
+        target_state,
+        dest_state,
+        system,
+        dest_root,
+        metadata,
+        filter_paths,
+        ignore_matcher,
+    } = params;
 
     // Wrap dest_state in a Mutex for thread-safe access during parallel processing
     // The cache mutations are serialized, but hash computation (CPU-intensive) is still parallel
-    let dest_state_mutex = Mutex::new(params.dest_state);
+    let dest_state_mutex = Mutex::new(dest_state);
 
     // Use parallel processing for file info collection
-    let files: Vec<FileInfo> = params
-        .source_state
+    let files: Vec<FileInfo> = source_state
         .entries()
         .par_bridge()
         .filter_map(|entry| {
-            let target_path = entry.target_path();
-
-            // Skip if filtering and this file is not in the filter
-            if let Some(filter) = params.filter_paths
-                && !filter.iter().any(|p| p == target_path)
-            {
-                return None;
-            }
-
-            // Skip if file is ignored
-            if params.ignore_matcher.is_ignored(target_path.as_path()) {
-                return None;
-            }
-
-            let path_str = target_path.to_string();
-
-            // Read destination entry (thread-safe via mutex)
-            let dest_entry = {
-                let mut dest_state = dest_state_mutex.lock().unwrap();
-                match dest_state
-                    .read(target_path, params.system)
-                    .context("Failed to read destination state")
-                {
-                    Ok(entry) => entry.clone(), // Clone to release the lock quickly
-                    Err(e) => {
-                        debug!(
-                            "Failed to read destination state for {}: {}",
-                            target_path.as_path().display(),
-                            e
-                        );
-                        return None;
-                    }
-                }
-            };
-
-            // Handle create-once files that already exist - show as Steady
-            if params.metadata.is_create_once(&path_str) && dest_entry.kind != EntryKind::Missing {
-                // Determine file type
-                let file_type = match entry {
-                    SourceEntry::File { .. } => 'F',
-                    SourceEntry::Directory { .. } => 'D',
-                    SourceEntry::Symlink { .. } => 'L',
-                };
-
-                // Build full destination path and format for display (same as normal files)
-                let full_dest_path = params.dest_root.join(target_path);
-                let display_path = if let Some(home_dir) = dirs::home_dir() {
-                    // If path is under home, show as ~/relative/path
-                    if let Ok(rel_path) = full_dest_path.as_path().strip_prefix(&home_dir) {
-                        format!("~/{}", rel_path.display())
-                    } else {
-                        full_dest_path.as_path().display().to_string()
-                    }
-                } else {
-                    full_dest_path.as_path().display().to_string()
-                };
-
-                return Some(FileInfo {
-                    path: display_path,
-                    status: FileStatus::Steady,
-                    file_type,
-                });
-            }
-
-            // Determine file type
-            let file_type = match entry {
-                SourceEntry::File { .. } => 'F',
-                SourceEntry::Directory { .. } => 'D',
-                SourceEntry::Symlink { .. } => 'L',
-            };
-
-            // Determine status based on three-way comparison (Base, Source, Destination)
-            let status = if dest_entry.kind == EntryKind::Missing {
-                // Destination doesn't exist → Latent
-                FileStatus::Latent
-            } else {
-                // Destination exists, do three-way comparison
-                // Use target_state which has processed content (decrypted + rendered)
-                let target_entry = match params.target_state.get(target_path) {
-                    Some(entry) => entry,
-                    None => {
-                        // Target entry not found (likely due to template processing error)
-                        // Skip this file
-                        debug!(
-                            "Skipping {}: target entry not found in target state",
-                            target_path.as_path().display()
-                        );
-                        return None;
-                    }
-                };
-
-                // Get the base state from database (last applied state)
-                let base_state = guisu_engine::database::get_entry_state(&path_str)
-                    .ok()
-                    .flatten();
-
-                match target_entry {
-                    TargetEntry::File { content, mode, .. } => {
-                        // Compute hashes for three-way comparison
-                        use guisu_engine::state::hash_data;
-                        let source_hash = hash_data(content);
-                        let dest_hash = dest_entry.content.as_ref().map(|c| hash_data(c));
-
-                        // Check mode matches
-                        let mode_matches = if let Some(expected_mode) = mode {
-                            dest_entry.mode == Some(*expected_mode)
-                        } else {
-                            true
-                        };
-
-                        // Use unified three-way comparison
-                        let dest_hash_vec = dest_hash.unwrap_or_default();
-                        let base_hash = base_state.as_ref().map(|s| s.content_hash.as_slice());
-
-                        let comparison_result =
-                            compare_three_way(&source_hash, &dest_hash_vec, base_hash);
-
-                        // Map comparison result to file status
-                        match comparison_result {
-                            ThreeWayComparisonResult::NoChange
-                            | ThreeWayComparisonResult::Converged => {
-                                if mode_matches {
-                                    FileStatus::Steady
-                                } else {
-                                    FileStatus::Behind // Mode changed
-                                }
-                            }
-                            ThreeWayComparisonResult::SourceChanged => FileStatus::Behind,
-                            ThreeWayComparisonResult::DestinationChanged => FileStatus::Ahead,
-                            ThreeWayComparisonResult::BothChanged => FileStatus::Conflict,
-                        }
-                    }
-                    TargetEntry::Directory { mode, .. } => {
-                        if let Some(expected_mode) = mode {
-                            if dest_entry.mode == Some(*expected_mode) {
-                                FileStatus::Steady
-                            } else {
-                                FileStatus::Behind
-                            }
-                        } else {
-                            FileStatus::Steady
-                        }
-                    }
-                    TargetEntry::Symlink { target, .. } => {
-                        if dest_entry.link_target.as_ref() == Some(target) {
-                            FileStatus::Steady
-                        } else {
-                            FileStatus::Behind
-                        }
-                    }
-                    TargetEntry::Remove { .. } => {
-                        // Remove entries should not be in status
-                        FileStatus::Behind
-                    }
-                }
-            };
-
-            // Build full destination path and format for display
-            let full_dest_path = params.dest_root.join(target_path);
-            let display_path = if let Some(home_dir) = dirs::home_dir() {
-                // If path is under home, show as ~/relative/path
-                if let Ok(rel_path) = full_dest_path.as_path().strip_prefix(&home_dir) {
-                    format!("~/{}", rel_path.display())
-                } else {
-                    full_dest_path.as_path().display().to_string()
-                }
-            } else {
-                full_dest_path.as_path().display().to_string()
-            };
-
-            Some(FileInfo {
-                path: display_path,
-                status,
-                file_type,
-            })
+            process_entry_for_status(
+                entry,
+                &dest_state_mutex,
+                target_state,
+                system,
+                dest_root,
+                metadata,
+                filter_paths,
+                ignore_matcher,
+            )
         })
         .collect();
 
@@ -568,7 +628,7 @@ fn collect_file_info(params: CollectParams) -> Result<Vec<FileInfo>> {
     let mut files = files;
     files.sort_by(|a, b| a.path.cmp(&b.path));
 
-    Ok(files)
+    files
 }
 
 /// Format status line with counts and labels
@@ -586,6 +646,43 @@ fn format_status_line(items: &[(usize, FileStatus)]) -> String {
         .join(&format!(" {} ", "|".dimmed()))
 }
 
+/// Filter and sort files by status (exclude directories)
+fn filter_files_by_status(files: &[FileInfo], status: FileStatus) -> Vec<&FileInfo> {
+    let mut filtered: Vec<_> = files
+        .iter()
+        .filter(|f| f.status == status && f.file_type != 'D')
+        .collect();
+    filtered.sort_by(|a, b| a.path.cmp(&b.path));
+    filtered
+}
+
+/// Display a list of files with icons and colors
+fn display_file_list(files: &[&FileInfo], lscolors: &LsColors, use_nerd_fonts: bool, dimmed: bool) {
+    for file in files {
+        let icon = get_file_icon_for_info(file, use_nerd_fonts);
+        let mut file_style = get_file_style(file, lscolors);
+        if dimmed {
+            file_style = file_style.dimmed();
+        }
+
+        if dimmed {
+            println!(
+                "  {}  {} {}",
+                file.status_str(),
+                file_style.paint(icon),
+                file_style.paint(&file.path),
+            );
+        } else {
+            println!(
+                "  {}  {} {}",
+                file.status_str().bold(),
+                file_style.paint(icon),
+                file_style.paint(&file.path),
+            );
+        }
+    }
+}
+
 /// Render simple format (default)
 fn render_simple(
     files: &[FileInfo],
@@ -595,35 +692,11 @@ fn render_simple(
     use_nerd_fonts: bool,
 ) {
     // Group files by status (exclude directories from display)
-    let mut latent: Vec<_> = files
-        .iter()
-        .filter(|f| f.status == FileStatus::Latent && f.file_type != 'D')
-        .collect();
-    latent.sort_by(|a, b| a.path.cmp(&b.path));
-
-    let mut behind: Vec<_> = files
-        .iter()
-        .filter(|f| f.status == FileStatus::Behind && f.file_type != 'D')
-        .collect();
-    behind.sort_by(|a, b| a.path.cmp(&b.path));
-
-    let mut ahead: Vec<_> = files
-        .iter()
-        .filter(|f| f.status == FileStatus::Ahead && f.file_type != 'D')
-        .collect();
-    ahead.sort_by(|a, b| a.path.cmp(&b.path));
-
-    let mut conflict: Vec<_> = files
-        .iter()
-        .filter(|f| f.status == FileStatus::Conflict && f.file_type != 'D')
-        .collect();
-    conflict.sort_by(|a, b| a.path.cmp(&b.path));
-
-    let mut steady: Vec<_> = files
-        .iter()
-        .filter(|f| f.status == FileStatus::Steady && f.file_type != 'D')
-        .collect();
-    steady.sort_by(|a, b| a.path.cmp(&b.path));
+    let latent = filter_files_by_status(files, FileStatus::Latent);
+    let behind = filter_files_by_status(files, FileStatus::Behind);
+    let ahead = filter_files_by_status(files, FileStatus::Ahead);
+    let conflict = filter_files_by_status(files, FileStatus::Conflict);
+    let steady = filter_files_by_status(files, FileStatus::Steady);
 
     // Print header with status counts (inline abbreviations)
     // Skip header for single file view
@@ -655,65 +728,20 @@ fn render_simple(
     }
 
     // Show latent files (to deploy)
-    for file in &latent {
-        let icon = get_file_icon_for_info(file, use_nerd_fonts);
-        let file_style = get_file_style(file, lscolors);
-        println!(
-            "  {}  {} {}",
-            file.status_str().bold(),
-            file_style.paint(icon),
-            file_style.paint(&file.path),
-        );
-    }
+    display_file_list(&latent, lscolors, use_nerd_fonts, false);
 
     // Show ahead files (local changes)
-    for file in &ahead {
-        let icon = get_file_icon_for_info(file, use_nerd_fonts);
-        let file_style = get_file_style(file, lscolors);
-        println!(
-            "  {}  {} {}",
-            file.status_str().bold(),
-            file_style.paint(icon),
-            file_style.paint(&file.path),
-        );
-    }
+    display_file_list(&ahead, lscolors, use_nerd_fonts, false);
 
     // Show behind files (need update from source)
-    for file in &behind {
-        let icon = get_file_icon_for_info(file, use_nerd_fonts);
-        let file_style = get_file_style(file, lscolors);
-        println!(
-            "  {}  {} {}",
-            file.status_str().bold(),
-            file_style.paint(icon),
-            file_style.paint(&file.path),
-        );
-    }
+    display_file_list(&behind, lscolors, use_nerd_fonts, false);
 
     // Show conflict files
-    for file in &conflict {
-        let icon = get_file_icon_for_info(file, use_nerd_fonts);
-        let file_style = get_file_style(file, lscolors);
-        println!(
-            "  {}  {} {}",
-            file.status_str().bold(),
-            file_style.paint(icon),
-            file_style.paint(&file.path),
-        );
-    }
+    display_file_list(&conflict, lscolors, use_nerd_fonts, false);
 
     // Show steady files (if --all is specified OR viewing a single file)
     if show_all || is_single_file {
-        for file in &steady {
-            let icon = get_file_icon_for_info(file, use_nerd_fonts);
-            let file_style = get_file_style(file, lscolors).dimmed();
-            println!(
-                "  {}  {} {}",
-                file.status_str(),
-                file_style.paint(icon),
-                file_style.paint(&file.path),
-            );
-        }
+        display_file_list(&steady, lscolors, use_nerd_fonts, true);
     }
 
     if !is_single_file
@@ -779,7 +807,9 @@ fn build_tree<'a>(files: &[&'a FileInfo]) -> BTreeMap<String, TreeNode<'a>> {
                             children: BTreeMap::new(),
                         }) {
                         TreeNode::Directory { children } => children,
-                        _ => unreachable!(),
+                        TreeNode::File(_) => {
+                            unreachable!("Cannot navigate into a file as if it were a directory")
+                        }
                     };
             }
         }
@@ -830,7 +860,7 @@ fn render_tree_node(
                 render_tree_node(
                     child_node,
                     child_name,
-                    &format!("{}{}", prefix, new_prefix),
+                    &format!("{prefix}{new_prefix}"),
                     is_last_child,
                     lscolors,
                     use_nerd_fonts,
@@ -951,9 +981,8 @@ fn print_hooks_status(source_dir: &Path) -> Result<()> {
 
     // Load hooks
     let loader = HookLoader::new(source_dir);
-    let collections = match loader.load() {
-        Ok(c) => c,
-        Err(_) => return Ok(()), // Silently skip if hooks fail to load
+    let Ok(collections) = loader.load() else {
+        return Ok(()); // Silently skip if hooks fail to load
     };
 
     if collections.is_empty() {
@@ -961,20 +990,17 @@ fn print_hooks_status(source_dir: &Path) -> Result<()> {
     }
 
     // Load state from database
-    let db_path = match database::get_db_path() {
-        Ok(p) => p,
-        Err(_) => return Ok(()), // Silently skip if can't get db path
+    let Ok(db_path) = database::get_db_path() else {
+        return Ok(()); // Silently skip if can't get db path
     };
 
-    let db = match RedbPersistentState::new(&db_path) {
-        Ok(d) => d,
-        Err(_) => return Ok(()), // Silently skip if can't open db
+    let Ok(db) = RedbPersistentState::new(&db_path) else {
+        return Ok(()); // Silently skip if can't open db
     };
 
     let persistence = HookStatePersistence::new(&db);
-    let state = match persistence.load() {
-        Ok(s) => s,
-        Err(_) => return Ok(()), // Silently skip if can't load state
+    let Ok(state) = persistence.load() else {
+        return Ok(()); // Silently skip if can't load state
     };
 
     let has_changed = state.has_changed(&hooks_dir)?;
@@ -991,4 +1017,407 @@ fn print_hooks_status(source_dir: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+
+    // Tests for OutputFormat
+
+    #[test]
+    fn test_output_format_from_str_simple() {
+        assert_eq!(
+            "simple".parse::<OutputFormat>().unwrap(),
+            OutputFormat::Simple
+        );
+        assert_eq!(
+            "SIMPLE".parse::<OutputFormat>().unwrap(),
+            OutputFormat::Simple
+        );
+    }
+
+    #[test]
+    fn test_output_format_from_str_tree() {
+        assert_eq!("tree".parse::<OutputFormat>().unwrap(), OutputFormat::Tree);
+        assert_eq!("TREE".parse::<OutputFormat>().unwrap(), OutputFormat::Tree);
+    }
+
+    #[test]
+    fn test_output_format_from_str_invalid() {
+        let result = "invalid".parse::<OutputFormat>();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid output format")
+        );
+    }
+
+    #[test]
+    fn test_output_format_equality() {
+        assert_eq!(OutputFormat::Simple, OutputFormat::Simple);
+        assert_eq!(OutputFormat::Tree, OutputFormat::Tree);
+        assert_ne!(OutputFormat::Simple, OutputFormat::Tree);
+    }
+
+    #[test]
+    fn test_output_format_clone() {
+        let format = OutputFormat::Simple;
+        let cloned = format;
+        assert_eq!(format, cloned);
+    }
+
+    #[test]
+    fn test_output_format_copy() {
+        let format = OutputFormat::Tree;
+        let copied = format;
+        assert_eq!(format, OutputFormat::Tree);
+        assert_eq!(copied, OutputFormat::Tree);
+    }
+
+    // Tests for FileStatus
+
+    #[test]
+    fn test_file_status_label() {
+        assert_eq!(FileStatus::Latent.label(), "[L]");
+        assert_eq!(FileStatus::Ahead.label(), "[A]");
+        assert_eq!(FileStatus::Behind.label(), "[B]");
+        assert_eq!(FileStatus::Conflict.label(), "[C]");
+        assert_eq!(FileStatus::Steady.label(), "[S]");
+    }
+
+    #[test]
+    fn test_file_status_full_name() {
+        assert_eq!(FileStatus::Latent.full_name(), "[L]atent");
+        assert_eq!(FileStatus::Ahead.full_name(), "[A]head");
+        assert_eq!(FileStatus::Behind.full_name(), "[B]ehind");
+        assert_eq!(FileStatus::Conflict.full_name(), "[C]onflict");
+        assert_eq!(FileStatus::Steady.full_name(), "[S]teady");
+    }
+
+    #[test]
+    fn test_file_status_color_str() {
+        // Test that color_str returns a string containing the input text
+        // (actual ANSI codes are implementation details)
+        assert!(FileStatus::Latent.color_str("test").contains("test"));
+        assert!(FileStatus::Ahead.color_str("test").contains("test"));
+        assert!(FileStatus::Behind.color_str("test").contains("test"));
+        assert!(FileStatus::Conflict.color_str("test").contains("test"));
+        assert!(FileStatus::Steady.color_str("test").contains("test"));
+    }
+
+    #[test]
+    fn test_file_status_equality() {
+        assert_eq!(FileStatus::Latent, FileStatus::Latent);
+        assert_eq!(FileStatus::Ahead, FileStatus::Ahead);
+        assert_eq!(FileStatus::Behind, FileStatus::Behind);
+        assert_eq!(FileStatus::Conflict, FileStatus::Conflict);
+        assert_eq!(FileStatus::Steady, FileStatus::Steady);
+        assert_ne!(FileStatus::Latent, FileStatus::Ahead);
+    }
+
+    #[test]
+    fn test_file_status_clone() {
+        let status = FileStatus::Conflict;
+        let cloned = status;
+        assert_eq!(status, cloned);
+    }
+
+    #[test]
+    fn test_file_status_copy() {
+        let status = FileStatus::Behind;
+        let copied = status;
+        assert_eq!(status, FileStatus::Behind);
+        assert_eq!(copied, FileStatus::Behind);
+    }
+
+    // Tests for FileInfo
+
+    #[test]
+    fn test_file_info_status_str() {
+        let file = FileInfo {
+            path: "test.txt".to_string(),
+            status: FileStatus::Latent,
+            file_type: 'F',
+        };
+
+        let status_str = file.status_str();
+        // Should contain the label
+        assert!(status_str.contains("[L]"));
+    }
+
+    #[test]
+    fn test_file_info_debug() {
+        let file = FileInfo {
+            path: "test.txt".to_string(),
+            status: FileStatus::Ahead,
+            file_type: 'F',
+        };
+
+        let debug_str = format!("{file:?}");
+        assert!(debug_str.contains("FileInfo"));
+        assert!(debug_str.contains("test.txt"));
+    }
+
+    // Tests for format_status_line
+
+    #[test]
+    fn test_format_status_line_empty() {
+        let items: Vec<(usize, FileStatus)> = vec![];
+        let result = format_status_line(&items);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_format_status_line_single() {
+        let items = vec![(5, FileStatus::Latent)];
+        let result = format_status_line(&items);
+
+        // Should contain the count and status name
+        assert!(result.contains('5'));
+        assert!(result.contains("[L]atent"));
+    }
+
+    #[test]
+    fn test_format_status_line_multiple() {
+        let items = vec![
+            (3, FileStatus::Latent),
+            (2, FileStatus::Behind),
+            (1, FileStatus::Conflict),
+        ];
+        let result = format_status_line(&items);
+
+        // Should contain all counts and status names
+        assert!(result.contains('3'));
+        assert!(result.contains("[L]atent"));
+        assert!(result.contains('2'));
+        assert!(result.contains("[B]ehind"));
+        assert!(result.contains('1'));
+        assert!(result.contains("[C]onflict"));
+        // Should have separator
+        assert!(result.contains('|'));
+    }
+
+    #[test]
+    fn test_format_status_line_all_statuses() {
+        let items = vec![
+            (1, FileStatus::Latent),
+            (2, FileStatus::Ahead),
+            (3, FileStatus::Behind),
+            (4, FileStatus::Conflict),
+            (5, FileStatus::Steady),
+        ];
+        let result = format_status_line(&items);
+
+        assert!(result.contains('1'));
+        assert!(result.contains('2'));
+        assert!(result.contains('3'));
+        assert!(result.contains('4'));
+        assert!(result.contains('5'));
+    }
+
+    // Tests for build_tree
+
+    #[test]
+    fn test_build_tree_empty() {
+        let files: Vec<&FileInfo> = vec![];
+        let tree = build_tree(&files);
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn test_build_tree_single_file() {
+        let file = FileInfo {
+            path: "test.txt".to_string(),
+            status: FileStatus::Latent,
+            file_type: 'F',
+        };
+        let file_list = vec![&file];
+
+        let tree = build_tree(&file_list);
+        assert_eq!(tree.len(), 1);
+        assert!(tree.contains_key("test.txt"));
+
+        match tree.get("test.txt") {
+            Some(TreeNode::File(_)) => (),
+            _ => panic!("Expected File node"),
+        }
+    }
+
+    #[test]
+    fn test_build_tree_nested_files() {
+        let file1 = FileInfo {
+            path: "dir1/file1.txt".to_string(),
+            status: FileStatus::Latent,
+            file_type: 'F',
+        };
+        let file2 = FileInfo {
+            path: "dir1/file2.txt".to_string(),
+            status: FileStatus::Behind,
+            file_type: 'F',
+        };
+        let file_list = vec![&file1, &file2];
+
+        let tree = build_tree(&file_list);
+        assert_eq!(tree.len(), 1);
+        assert!(tree.contains_key("dir1"));
+
+        match tree.get("dir1") {
+            Some(TreeNode::Directory { children }) => {
+                assert_eq!(children.len(), 2);
+                assert!(children.contains_key("file1.txt"));
+                assert!(children.contains_key("file2.txt"));
+            }
+            _ => panic!("Expected Directory node"),
+        }
+    }
+
+    #[test]
+    fn test_build_tree_deep_nesting() {
+        let file = FileInfo {
+            path: "a/b/c/d/file.txt".to_string(),
+            status: FileStatus::Conflict,
+            file_type: 'F',
+        };
+        let file_list = vec![&file];
+
+        let tree = build_tree(&file_list);
+        assert_eq!(tree.len(), 1);
+        assert!(tree.contains_key("a"));
+
+        // Navigate down the tree
+        let mut current = &tree;
+        for dir in &["a", "b", "c", "d"] {
+            match current.get(*dir) {
+                Some(TreeNode::Directory { children }) => {
+                    current = children;
+                }
+                _ => panic!("Expected Directory node at {dir}"),
+            }
+        }
+
+        // Final level should have the file
+        assert!(current.contains_key("file.txt"));
+    }
+
+    #[test]
+    fn test_build_tree_multiple_roots() {
+        let file1 = FileInfo {
+            path: "dir1/file1.txt".to_string(),
+            status: FileStatus::Latent,
+            file_type: 'F',
+        };
+        let file2 = FileInfo {
+            path: "dir2/file2.txt".to_string(),
+            status: FileStatus::Behind,
+            file_type: 'F',
+        };
+        let file3 = FileInfo {
+            path: "file3.txt".to_string(),
+            status: FileStatus::Ahead,
+            file_type: 'F',
+        };
+        let file_list = vec![&file1, &file2, &file3];
+
+        let tree = build_tree(&file_list);
+        assert_eq!(tree.len(), 3);
+        assert!(tree.contains_key("dir1"));
+        assert!(tree.contains_key("dir2"));
+        assert!(tree.contains_key("file3.txt"));
+    }
+
+    #[test]
+    fn test_build_tree_mixed_depths() {
+        let file1 = FileInfo {
+            path: "a/b/deep.txt".to_string(),
+            status: FileStatus::Latent,
+            file_type: 'F',
+        };
+        let file2 = FileInfo {
+            path: "a/shallow.txt".to_string(),
+            status: FileStatus::Behind,
+            file_type: 'F',
+        };
+        let file_list = vec![&file1, &file2];
+
+        let tree = build_tree(&file_list);
+        assert_eq!(tree.len(), 1);
+
+        match tree.get("a") {
+            Some(TreeNode::Directory { children }) => {
+                assert_eq!(children.len(), 2);
+                assert!(children.contains_key("b"));
+                assert!(children.contains_key("shallow.txt"));
+            }
+            _ => panic!("Expected Directory node"),
+        }
+    }
+
+    // Tests for StatusCommand
+
+    #[test]
+    fn test_status_command_default() {
+        let cmd = StatusCommand {
+            files: vec![],
+            all: false,
+            tree: false,
+        };
+
+        assert!(cmd.files.is_empty());
+        assert!(!cmd.all);
+        assert!(!cmd.tree);
+    }
+
+    #[test]
+    fn test_status_command_with_files() {
+        let cmd = StatusCommand {
+            files: vec![PathBuf::from("file1.txt"), PathBuf::from("file2.txt")],
+            all: false,
+            tree: false,
+        };
+
+        assert_eq!(cmd.files.len(), 2);
+        assert_eq!(cmd.files[0], PathBuf::from("file1.txt"));
+        assert_eq!(cmd.files[1], PathBuf::from("file2.txt"));
+    }
+
+    #[test]
+    fn test_status_command_with_all_flag() {
+        let cmd = StatusCommand {
+            files: vec![],
+            all: true,
+            tree: false,
+        };
+
+        assert!(cmd.all);
+        assert!(!cmd.tree);
+    }
+
+    #[test]
+    fn test_status_command_with_tree_flag() {
+        let cmd = StatusCommand {
+            files: vec![],
+            all: false,
+            tree: true,
+        };
+
+        assert!(!cmd.all);
+        assert!(cmd.tree);
+    }
+
+    #[test]
+    fn test_status_command_all_flags() {
+        let cmd = StatusCommand {
+            files: vec![PathBuf::from("test.txt")],
+            all: true,
+            tree: true,
+        };
+
+        assert_eq!(cmd.files.len(), 1);
+        assert!(cmd.all);
+        assert!(cmd.tree);
+    }
 }

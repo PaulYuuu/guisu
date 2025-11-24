@@ -74,42 +74,49 @@ bitflags::bitflags! {
 
 impl FileAttributes {
     /// Create attributes with all flags set to false
+    #[must_use]
     pub fn new() -> Self {
         Self::empty()
     }
 
     /// Check if file should be hidden (start with a dot)
     #[inline]
+    #[must_use]
     pub fn is_dot(&self) -> bool {
         self.contains(Self::DOT)
     }
 
     /// Check if file should have restrictive permissions (private)
     #[inline]
+    #[must_use]
     pub fn is_private(&self) -> bool {
         self.contains(Self::PRIVATE)
     }
 
     /// Check if file should be read-only
     #[inline]
+    #[must_use]
     pub fn is_readonly(&self) -> bool {
         self.contains(Self::READONLY)
     }
 
     /// Check if file should be executable
     #[inline]
+    #[must_use]
     pub fn is_executable(&self) -> bool {
         self.contains(Self::EXECUTABLE)
     }
 
     /// Check if file should be processed as a template
     #[inline]
+    #[must_use]
     pub fn is_template(&self) -> bool {
         self.contains(Self::TEMPLATE)
     }
 
     /// Check if file is encrypted
     #[inline]
+    #[must_use]
     pub fn is_encrypted(&self) -> bool {
         self.contains(Self::ENCRYPTED)
     }
@@ -183,26 +190,28 @@ impl FileAttributes {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the filename cannot be parsed (e.g., invalid encoding)
     pub fn parse_from_source(filename: &str, mode: Option<u32>) -> Result<(Self, String)> {
         let mut attrs = Self::new();
         let mut target_name = filename.to_string();
 
-        // Check for .age extension (must be last)
-        if target_name.ends_with(".age") {
+        // Check for .age extension (must be last) - case insensitive
+        if target_name.to_lowercase().ends_with(".age") {
             attrs.set_encrypted(true);
-            target_name = target_name
-                .strip_suffix(".age")
-                .expect("checked with ends_with")
-                .to_string();
+            // Strip the extension preserving the original case
+            let ext_len = ".age".len();
+            target_name.truncate(target_name.len() - ext_len);
         }
 
-        // Check for .j2 extension (before .age)
-        if target_name.ends_with(".j2") {
+        // Check for .j2 extension (before .age) - case insensitive
+        if target_name.to_lowercase().ends_with(".j2") {
             attrs.set_template(true);
-            target_name = target_name
-                .strip_suffix(".j2")
-                .expect("checked with ends_with")
-                .to_string();
+            // Strip the extension preserving the original case
+            let ext_len = ".j2".len();
+            target_name.truncate(target_name.len() - ext_len);
         }
 
         // Parse permissions from Unix mode
@@ -257,6 +266,7 @@ impl FileAttributes {
     /// # Ok(())
     /// # }
     /// ```
+    #[must_use]
     pub fn mode(&self) -> Option<u32> {
         match (self.is_private(), self.is_readonly(), self.is_executable()) {
             (true, false, true) => Some(PRIVATE_DIR), // private + executable
@@ -264,8 +274,7 @@ impl FileAttributes {
             (false, true, true) => Some(READONLY_EXEC), // readonly + executable
             (false, true, false) => Some(READONLY),   // readonly only
             (false, false, true) => Some(STANDARD_EXEC), // executable only
-            (false, false, false) => None,            // use defaults
-            _ => None,                                // invalid combination
+            _ => None,                                // use defaults or invalid combination
         }
     }
 }
@@ -373,5 +382,357 @@ impl<'de> Deserialize<'de> for FileAttributes {
 impl Default for FileAttributes {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+
+    #[test]
+    fn test_new_attributes() {
+        let attrs = FileAttributes::new();
+        assert!(!attrs.is_dot());
+        assert!(!attrs.is_private());
+        assert!(!attrs.is_readonly());
+        assert!(!attrs.is_executable());
+        assert!(!attrs.is_template());
+        assert!(!attrs.is_encrypted());
+    }
+
+    #[test]
+    fn test_set_and_check_flags() {
+        let mut attrs = FileAttributes::new();
+
+        // Test each flag
+        attrs.set_dot(true);
+        assert!(attrs.is_dot());
+
+        attrs.set_private(true);
+        assert!(attrs.is_private());
+
+        attrs.set_readonly(true);
+        assert!(attrs.is_readonly());
+
+        attrs.set_executable(true);
+        assert!(attrs.is_executable());
+
+        attrs.set_template(true);
+        assert!(attrs.is_template());
+
+        attrs.set_encrypted(true);
+        assert!(attrs.is_encrypted());
+
+        // Test unsetting
+        attrs.set_dot(false);
+        assert!(!attrs.is_dot());
+    }
+
+    #[test]
+    fn test_parse_template_extension() {
+        let (attrs, target) =
+            FileAttributes::parse_from_source(".gitconfig.j2", Some(0o644)).expect("parse failed");
+
+        assert!(attrs.is_template());
+        assert!(!attrs.is_encrypted());
+        assert_eq!(target, ".gitconfig");
+    }
+
+    #[test]
+    fn test_parse_encrypted_extension() {
+        let (attrs, target) =
+            FileAttributes::parse_from_source("secrets.age", Some(0o600)).expect("parse failed");
+
+        assert!(!attrs.is_template());
+        assert!(attrs.is_encrypted());
+        assert!(attrs.is_private());
+        assert_eq!(target, "secrets");
+    }
+
+    #[test]
+    fn test_parse_encrypted_template() {
+        let (attrs, target) =
+            FileAttributes::parse_from_source("config.j2.age", Some(0o600)).expect("parse failed");
+
+        assert!(attrs.is_template());
+        assert!(attrs.is_encrypted());
+        assert!(attrs.is_private());
+        assert_eq!(target, "config");
+    }
+
+    #[test]
+    fn test_parse_executable_file() {
+        let (attrs, target) =
+            FileAttributes::parse_from_source("deploy.sh", Some(0o755)).expect("parse failed");
+
+        assert!(attrs.is_executable());
+        assert!(!attrs.is_private());
+        assert!(!attrs.is_readonly());
+        assert_eq!(target, "deploy.sh");
+    }
+
+    #[test]
+    fn test_parse_private_file_permissions() {
+        let (attrs, _) =
+            FileAttributes::parse_from_source("test", Some(0o600)).expect("parse failed");
+        assert!(attrs.is_private());
+        assert!(!attrs.is_readonly());
+    }
+
+    #[test]
+    fn test_parse_private_directory_permissions() {
+        let (attrs, _) =
+            FileAttributes::parse_from_source(".ssh", Some(0o700)).expect("parse failed");
+        assert!(attrs.is_private());
+        assert!(attrs.is_executable());
+    }
+
+    #[test]
+    fn test_parse_readonly_permissions() {
+        let (attrs, _) =
+            FileAttributes::parse_from_source("readonly.txt", Some(0o444)).expect("parse failed");
+        assert!(attrs.is_readonly());
+        assert!(!attrs.is_executable());
+        assert!(!attrs.is_private());
+    }
+
+    #[test]
+    fn test_parse_readonly_executable() {
+        let (attrs, _) =
+            FileAttributes::parse_from_source("readonly-exec", Some(0o555)).expect("parse failed");
+        assert!(attrs.is_readonly());
+        assert!(attrs.is_executable());
+    }
+
+    #[test]
+    fn test_parse_standard_executable() {
+        let (attrs, _) =
+            FileAttributes::parse_from_source("script", Some(0o755)).expect("parse failed");
+        assert!(attrs.is_executable());
+        assert!(!attrs.is_private());
+        assert!(!attrs.is_readonly());
+    }
+
+    #[test]
+    fn test_parse_no_permissions() {
+        let (attrs, target) =
+            FileAttributes::parse_from_source("file.txt", None).expect("parse failed");
+
+        assert!(!attrs.is_private());
+        assert!(!attrs.is_executable());
+        assert!(!attrs.is_readonly());
+        assert_eq!(target, "file.txt");
+    }
+
+    #[test]
+    fn test_parse_multiple_dots() {
+        let (attrs, target) = FileAttributes::parse_from_source(".my.config.file.j2", Some(0o644))
+            .expect("parse failed");
+
+        assert!(attrs.is_template());
+        assert_eq!(target, ".my.config.file");
+    }
+
+    #[test]
+    fn test_mode_private_file() {
+        let mut attrs = FileAttributes::new();
+        attrs.set_private(true);
+        assert_eq!(attrs.mode(), Some(0o600));
+    }
+
+    #[test]
+    fn test_mode_private_directory() {
+        let mut attrs = FileAttributes::new();
+        attrs.set_private(true);
+        attrs.set_executable(true);
+        assert_eq!(attrs.mode(), Some(0o700));
+    }
+
+    #[test]
+    fn test_mode_readonly() {
+        let mut attrs = FileAttributes::new();
+        attrs.set_readonly(true);
+        assert_eq!(attrs.mode(), Some(0o444));
+    }
+
+    #[test]
+    fn test_mode_readonly_executable() {
+        let mut attrs = FileAttributes::new();
+        attrs.set_readonly(true);
+        attrs.set_executable(true);
+        assert_eq!(attrs.mode(), Some(0o555));
+    }
+
+    #[test]
+    fn test_mode_standard_executable() {
+        let mut attrs = FileAttributes::new();
+        attrs.set_executable(true);
+        assert_eq!(attrs.mode(), Some(0o755));
+    }
+
+    #[test]
+    fn test_mode_default() {
+        let attrs = FileAttributes::new();
+        assert_eq!(attrs.mode(), None);
+    }
+
+    #[test]
+    fn test_serialize_deserialize() {
+        let mut attrs = FileAttributes::new();
+        attrs.set_template(true);
+        attrs.set_encrypted(true);
+        attrs.set_private(true);
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&attrs).expect("serialize failed");
+
+        // Deserialize back
+        let deserialized: FileAttributes = serde_json::from_str(&json).expect("deserialize failed");
+
+        assert_eq!(attrs, deserialized);
+        assert!(deserialized.is_template());
+        assert!(deserialized.is_encrypted());
+        assert!(deserialized.is_private());
+    }
+
+    #[test]
+    fn test_serialize_format() {
+        let mut attrs = FileAttributes::new();
+        attrs.set_template(true);
+        attrs.set_executable(true);
+
+        let json = serde_json::to_value(attrs).expect("serialize failed");
+
+        assert_eq!(json["is_template"], true);
+        assert_eq!(json["is_executable"], true);
+        assert_eq!(json["is_encrypted"], false);
+        assert_eq!(json["is_private"], false);
+    }
+
+    #[test]
+    fn test_deserialize_all_flags() {
+        let json = r#"{
+            "is_dot": true,
+            "is_private": true,
+            "is_readonly": false,
+            "is_executable": true,
+            "is_template": true,
+            "is_encrypted": true
+        }"#;
+
+        let attrs: FileAttributes = serde_json::from_str(json).expect("deserialize failed");
+
+        assert!(attrs.is_dot());
+        assert!(attrs.is_private());
+        assert!(!attrs.is_readonly());
+        assert!(attrs.is_executable());
+        assert!(attrs.is_template());
+        assert!(attrs.is_encrypted());
+    }
+
+    #[test]
+    fn test_roundtrip_parse_and_mode() {
+        // Test that parsing permissions and then getting mode returns the same value
+        let test_cases = vec![
+            (0o600, 0o600), // private file
+            (0o700, 0o700), // private dir
+            (0o755, 0o755), // executable
+            (0o444, 0o444), // readonly
+            (0o555, 0o555), // readonly executable
+        ];
+
+        for (input_mode, expected_mode) in test_cases {
+            let (attrs, _) =
+                FileAttributes::parse_from_source("test", Some(input_mode)).expect("parse failed");
+            assert_eq!(attrs.mode(), Some(expected_mode));
+        }
+    }
+
+    #[test]
+    fn test_bitflags_combinations() {
+        // Test that we can combine multiple flags
+        let mut attrs = FileAttributes::new();
+        attrs.set_template(true);
+        attrs.set_encrypted(true);
+        attrs.set_private(true);
+        attrs.set_executable(true);
+
+        assert!(attrs.is_template());
+        assert!(attrs.is_encrypted());
+        assert!(attrs.is_private());
+        assert!(attrs.is_executable());
+    }
+
+    #[test]
+    fn test_empty_filename() {
+        let (attrs, target) = FileAttributes::parse_from_source("", None).expect("parse failed");
+
+        assert_eq!(target, "");
+        assert!(!attrs.is_template());
+        assert!(!attrs.is_encrypted());
+    }
+
+    #[test]
+    fn test_only_extensions() {
+        let (attrs, target) =
+            FileAttributes::parse_from_source(".j2.age", Some(0o644)).expect("parse failed");
+
+        assert!(attrs.is_template());
+        assert!(attrs.is_encrypted());
+        assert_eq!(target, "");
+    }
+
+    #[test]
+    fn test_hidden_file_starting_with_dot() {
+        // Files starting with . should keep the dot in target name
+        let (attrs, target) =
+            FileAttributes::parse_from_source(".bashrc", Some(0o644)).expect("parse failed");
+
+        assert_eq!(target, ".bashrc");
+        assert!(!attrs.is_template());
+    }
+
+    #[test]
+    fn test_hidden_template_file() {
+        let (attrs, target) =
+            FileAttributes::parse_from_source(".config.j2", Some(0o644)).expect("parse failed");
+
+        assert!(attrs.is_template());
+        assert_eq!(target, ".config");
+    }
+
+    #[test]
+    fn test_parse_permissions_with_extra_bits() {
+        // Test that we correctly mask out non-permission bits
+        let (attrs, _) =
+            FileAttributes::parse_from_source("test", Some(0o100_755)).expect("parse failed");
+
+        assert!(attrs.is_executable());
+        assert!(!attrs.is_private());
+    }
+
+    #[test]
+    fn test_equality() {
+        let mut attrs1 = FileAttributes::new();
+        let mut attrs2 = FileAttributes::new();
+
+        assert_eq!(attrs1, attrs2);
+
+        attrs1.set_template(true);
+        assert_ne!(attrs1, attrs2);
+
+        attrs2.set_template(true);
+        assert_eq!(attrs1, attrs2);
+    }
+
+    #[test]
+    fn test_clone() {
+        let mut attrs = FileAttributes::new();
+        attrs.set_template(true);
+        attrs.set_encrypted(true);
+
+        let cloned = attrs;
+        assert_eq!(attrs, cloned);
     }
 }

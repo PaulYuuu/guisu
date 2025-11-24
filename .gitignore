@@ -29,6 +29,7 @@ CLAUDE.md
 *.gcda
 *.gcno
 *.gcov
+*.lcov
 coverage/
 lcov.info
 

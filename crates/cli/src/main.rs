@@ -24,8 +24,8 @@ fn main() {
     // Run and display errors with miette formatting
     if let Err(e) = guisu::run(cli) {
         // Convert anyhow error to miette for beautiful display
-        let miette_error = miette::Report::msg(format!("{:#}", e));
-        eprintln!("{:?}", miette_error);
+        let miette_error = miette::Report::msg(format!("{e:#}"));
+        eprintln!("{miette_error:?}");
         std::process::exit(1);
     }
 }

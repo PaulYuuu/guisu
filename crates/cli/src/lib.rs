@@ -6,6 +6,7 @@
 pub mod cmd;
 pub mod command;
 pub mod common;
+pub mod conflict;
 pub mod error;
 pub mod logging;
 pub mod stats;
@@ -14,7 +15,7 @@ pub mod ui;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use owo_colors::OwoColorize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use command::Command;
 use common::RuntimeContext;
@@ -55,10 +56,12 @@ pub struct Cli {
     #[arg(long, env = "GUISU_LOG_FILE", value_name = "FILE")]
     pub log_file: Option<PathBuf>,
 
+    /// Subcommand to execute
     #[command(subcommand)]
     pub command: Commands,
 }
 
+/// Available commands for guisu CLI
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize a new source directory or clone from GitHub
@@ -179,6 +182,7 @@ Examples:
     Hooks(HooksCommands),
 }
 
+/// Age encryption management commands
 #[derive(Subcommand)]
 pub enum AgeCommands {
     /// Generate a new age identity
@@ -210,7 +214,7 @@ pub enum AgeCommands {
         ///
         /// Examples:
         ///   --recipient age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
-        ///   --recipient ssh-ed25519 AAAAC3NzaC1lZDI1NTE5...
+        ///   --recipient ssh-ed25519 `AAAAC3NzaC1lZDI1NTE5`...
         #[arg(short, long)]
         recipients: Vec<String>,
     },
@@ -248,6 +252,7 @@ pub enum AgeCommands {
     },
 }
 
+/// Commands for viewing ignored files and patterns
 #[derive(Subcommand)]
 pub enum IgnoredCommands {
     /// List files that are ignored on the current platform
@@ -261,6 +266,7 @@ pub enum IgnoredCommands {
     },
 }
 
+/// Commands for managing template files
 #[derive(Subcommand)]
 pub enum TemplatesCommands {
     /// List available template files for the current platform
@@ -274,6 +280,7 @@ pub enum TemplatesCommands {
     },
 }
 
+/// Commands for managing and executing hooks
 #[derive(Subcommand)]
 pub enum HooksCommands {
     /// Run hooks from configuration
@@ -302,26 +309,27 @@ pub enum HooksCommands {
 }
 
 /// Main entry point for the CLI logic
-pub fn run(cli: Cli) -> Result<()> {
-    // Initialize logging based on verbosity
-    crate::logging::init(cli.verbose, cli.log_file.as_deref())?;
-
-    // Save custom source for init command before it's consumed
-    let custom_source = cli.source.clone();
-
-    // First, load base config to determine source_dir
-    let base_config = if let Some(source_dir) = guisu_config::default_source_dir()
+///
+/// Load base config to determine source directory
+fn load_base_config() -> guisu_config::Config {
+    if let Some(source_dir) = guisu_config::default_source_dir()
         && source_dir.exists()
         && let Ok(config) = load_config_with_template_support(None, &source_dir)
     {
         config
     } else {
         guisu_config::Config::default()
-    };
+    }
+}
 
-    // Determine source and destination directories
+/// Determine source and destination directories from CLI and config
+fn determine_directories(
+    cli: &Cli,
+    base_config: &guisu_config::Config,
+) -> Result<(PathBuf, PathBuf)> {
     let source_dir = cli
         .source
+        .clone()
         .or_else(|| base_config.source_dir().cloned())
         .or_else(guisu_config::dirs::default_source_dir)
         .ok_or_else(|| {
@@ -332,6 +340,7 @@ pub fn run(cli: Cli) -> Result<()> {
 
     let dest_dir = cli
         .dest
+        .clone()
         .or_else(|| base_config.dest_dir().cloned())
         .or_else(::dirs::home_dir)
         .ok_or_else(|| {
@@ -341,107 +350,116 @@ pub fn run(cli: Cli) -> Result<()> {
             )
         })?;
 
-    // Handle init command separately (doesn't need config before directory creation)
-    if let Commands::Init {
-        path_or_repo,
-        apply,
+    Ok((source_dir, dest_dir))
+}
+
+/// Handle init command separately (doesn't need config before directory creation)
+#[allow(clippy::too_many_arguments)]
+fn handle_init_command(
+    path_or_repo: Option<&String>,
+    custom_source: Option<&PathBuf>,
+    depth: Option<usize>,
+    branch: Option<&String>,
+    ssh: bool,
+    recurse_submodules: bool,
+    apply: bool,
+    dest_dir: &Path,
+    config_path: Option<&Path>,
+) -> Result<()> {
+    let init_result = crate::cmd::init::run(
+        path_or_repo.map(String::as_str),
+        custom_source.map(std::path::PathBuf::as_path),
         depth,
-        branch,
+        branch.map(String::as_str),
         ssh,
         recurse_submodules,
-    } = cli.command
+    )?;
+
+    // Apply if requested
+    if apply && let Some(source_path) = init_result {
+        println!("\nApplying changes...");
+        // Now load config after source directory is created
+        let config = load_config_with_template_support(config_path, &source_path)?;
+
+        // Create ApplyCommand with default options (all files)
+        let apply_cmd = cmd::apply::ApplyCommand {
+            files: vec![],
+            dry_run: false,
+            force: false,
+            interactive: false,
+            include: vec![],
+            exclude: vec![],
+        };
+
+        // Create RuntimeContext and execute
+        let context = RuntimeContext::new(config, &source_path, dest_dir)?;
+        apply_cmd.execute(&context)?;
+    }
+    Ok(())
+}
+
+/// Handle apply command with pre and post hooks
+fn handle_apply_command(
+    apply_cmd: &cmd::apply::ApplyCommand,
+    context: &RuntimeContext,
+) -> Result<()> {
+    // Handle pre-apply hooks (unless it's a dry run)
+    if !apply_cmd.dry_run
+        && let Err(e) = cmd::hooks::handle_hooks_pre(context.source_dir(), &context.config)
     {
-        let init_result = crate::cmd::init::run(
-            path_or_repo.as_deref(),
-            custom_source.as_deref(),
-            depth,
-            branch.as_deref(),
-            ssh,
-            recurse_submodules,
-        )?;
-
-        // Apply if requested
-        if apply && let Some(source_path) = init_result {
-            println!("\nApplying changes...");
-            // Now load config after source directory is created
-            let config = load_config_with_template_support(cli.config.as_deref(), &source_path)?;
-
-            // Create ApplyCommand with default options (all files)
-            let apply_cmd = cmd::apply::ApplyCommand {
-                files: vec![],
-                dry_run: false,
-                force: false,
-                interactive: false,
-                include: vec![],
-                exclude: vec![],
-            };
-
-            // Create RuntimeContext and execute
-            let context = RuntimeContext::new(config, &source_path, &dest_dir)?;
-            apply_cmd.execute(&context)?;
-        }
-        return Ok(());
+        tracing::warn!("Pre-apply hooks failed: {}", e);
+        println!(
+            "{}: Pre-apply hooks encountered issues: {}",
+            "Warning".yellow(),
+            e
+        );
+        println!("Continuing with file application...\n");
     }
 
-    // For all other commands, load config now
-    let config = load_config_with_template_support(cli.config.as_deref(), &source_dir)?;
+    // Execute apply command and get stats
+    let is_single_file = apply_cmd.files.len() == 1;
+    let dry_run = apply_cmd.dry_run;
+    let stats = apply_cmd.execute(context)?;
 
-    // Create RuntimeContext for commands (config is moved, no clone needed)
-    let context = RuntimeContext::new(config, &source_dir, &dest_dir)?;
+    // Close database before running post hooks
+    if !dry_run && let Err(e) = guisu_engine::database::close_db() {
+        tracing::warn!("Failed to close database: {}", e);
+    }
 
-    // Execute the command
-    match cli.command {
+    // Handle post-apply hooks (unless it's a dry run)
+    if !dry_run && let Err(e) = cmd::hooks::handle_hooks_post(context.source_dir(), &context.config)
+    {
+        tracing::warn!("Post-apply hooks failed: {}", e);
+        println!(
+            "{}: Post-apply hooks encountered issues: {}",
+            "Warning".yellow(),
+            e
+        );
+    }
+
+    // Print summary after hooks complete (skip for single file mode)
+    if !is_single_file {
+        println!();
+        stats.print_summary(dry_run);
+    }
+
+    Ok(())
+}
+
+/// Execute the command based on the command type
+fn execute_command(command: Commands, context: &RuntimeContext) -> Result<()> {
+    match command {
         Commands::Init { .. } => {
             unreachable!("Init command already handled above")
         }
         Commands::Add(add_cmd) => {
-            add_cmd.execute(&context)?;
+            add_cmd.execute(context)?;
         }
         Commands::Apply(apply_cmd) => {
-            // Handle pre-apply hooks (unless it's a dry run)
-            if !apply_cmd.dry_run
-                && let Err(e) = cmd::hooks::handle_hooks_pre(context.source_dir(), &context.config)
-            {
-                tracing::warn!("Pre-apply hooks failed: {}", e);
-                println!(
-                    "{}: Pre-apply hooks encountered issues: {}",
-                    "Warning".yellow(),
-                    e
-                );
-                println!("Continuing with file application...\n");
-            }
-
-            // Execute apply command and get stats
-            let is_single_file = apply_cmd.files.len() == 1;
-            let dry_run = apply_cmd.dry_run;
-            let stats = apply_cmd.execute(&context)?;
-
-            // Close database before running post hooks
-            // This allows post hooks to open the database without conflicts
-            if !dry_run && let Err(e) = guisu_engine::database::close_db() {
-                tracing::warn!("Failed to close database: {}", e);
-            }
-
-            // Handle post-apply hooks (unless it's a dry run)
-            if !dry_run
-                && let Err(e) = cmd::hooks::handle_hooks_post(context.source_dir(), &context.config)
-            {
-                tracing::warn!("Post-apply hooks failed: {}", e);
-                println!(
-                    "{}: Post-apply hooks encountered issues: {}",
-                    "Warning".yellow(),
-                    e
-                );
-            }
-
-            // Print summary after hooks complete (skip for single file mode)
-            if !is_single_file {
-                println!();
-                stats.print_summary(dry_run);
-            }
+            handle_apply_command(&apply_cmd, context)?;
         }
         Commands::Diff(diff_cmd) => {
-            diff_cmd.execute(&context)?;
+            diff_cmd.execute(context)?;
         }
         Commands::Age(age_cmd) => match age_cmd {
             AgeCommands::Generate { output } => {
@@ -455,10 +473,10 @@ pub fn run(cli: Cli) -> Result<()> {
                 interactive,
                 recipients,
             } => {
-                cmd::age::encrypt(value, interactive, recipients, &context.config)?;
+                cmd::age::encrypt(value, interactive, &recipients, &context.config)?;
             }
             AgeCommands::Decrypt { value } => {
-                cmd::age::decrypt(value, &context.config)?;
+                cmd::age::decrypt(&value, &context.config)?;
             }
             AgeCommands::Migrate {
                 old_identities,
@@ -476,13 +494,13 @@ pub fn run(cli: Cli) -> Result<()> {
             }
         },
         Commands::Status(status_cmd) => {
-            status_cmd.execute(&context)?;
+            status_cmd.execute(context)?;
         }
         Commands::Cat(cat_cmd) => {
-            cat_cmd.execute(&context)?;
+            cat_cmd.execute(context)?;
         }
         Commands::Edit(edit_cmd) => {
-            edit_cmd.execute(&context)?;
+            edit_cmd.execute(context)?;
         }
         Commands::Ignored(ignored_cmd) => match ignored_cmd {
             IgnoredCommands::List => {
@@ -506,13 +524,13 @@ pub fn run(cli: Cli) -> Result<()> {
             }
         },
         Commands::Update(update_cmd) => {
-            update_cmd.execute(&context)?;
+            update_cmd.execute(context)?;
         }
         Commands::Info(info_cmd) => {
-            info_cmd.execute(&context)?;
+            info_cmd.execute(context)?;
         }
         Commands::Variables(vars_cmd) => {
-            vars_cmd.execute(&context)?;
+            vars_cmd.execute(context)?;
         }
         Commands::Hooks(hooks_cmd) => match hooks_cmd {
             HooksCommands::Run { yes, hook } => {
@@ -530,6 +548,57 @@ pub fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns an error if:
+/// - Logging initialization fails
+/// - Configuration loading fails
+/// - Source or destination directories cannot be determined
+/// - Command execution fails
+pub fn run(cli: Cli) -> Result<()> {
+    // Initialize logging based on verbosity
+    crate::logging::init(cli.verbose, cli.log_file.as_deref())?;
+
+    // Save custom source for init command before it's consumed
+    let custom_source = cli.source.clone();
+
+    // Load base config and determine directories
+    let base_config = load_base_config();
+    let (source_dir, dest_dir) = determine_directories(&cli, &base_config)?;
+
+    // Handle init command separately (doesn't need config before directory creation)
+    if let Commands::Init {
+        path_or_repo,
+        apply,
+        depth,
+        branch,
+        ssh,
+        recurse_submodules,
+    } = cli.command
+    {
+        return handle_init_command(
+            path_or_repo.as_ref(),
+            custom_source.as_ref(),
+            depth,
+            branch.as_ref(),
+            ssh,
+            recurse_submodules,
+            apply,
+            &dest_dir,
+            cli.config.as_deref(),
+        );
+    }
+
+    // For all other commands, load config now
+    let config = load_config_with_template_support(cli.config.as_deref(), &source_dir)?;
+
+    // Create RuntimeContext for commands
+    let context = RuntimeContext::new(config, &source_dir, &dest_dir)?;
+
+    // Execute the command
+    execute_command(cli.command, &context)
+}
+
 // ============================================================================
 // Common utility functions
 // ============================================================================
@@ -537,7 +606,7 @@ pub fn run(cli: Cli) -> Result<()> {
 /// Build filter paths from user-provided file arguments (crate-internal use only)
 ///
 /// This function converts file paths (which may be relative, absolute, or use ~)
-/// into RelPath entries that can be used to filter source/target states.
+/// into `RelPath` entries that can be used to filter source/target states.
 ///
 /// # Arguments
 ///
@@ -546,7 +615,7 @@ pub fn run(cli: Cli) -> Result<()> {
 ///
 /// # Returns
 ///
-/// Returns a vector of RelPath entries representing the files relative to dest_dir.
+/// Returns a vector of `RelPath` entries representing the files relative to `dest_dir`.
 ///
 /// # Errors
 ///
@@ -649,7 +718,7 @@ pub(crate) fn load_config_with_template_support(
     // If .guisu.toml exists, use the standard loader
     if toml_path.exists() {
         return guisu_config::Config::load_with_variables(None, source_dir)
-            .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e));
+            .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"));
     }
 
     // If .guisu.toml.j2 exists, render it first
@@ -673,11 +742,11 @@ pub(crate) fn load_config_with_template_support(
         // Render the template
         let rendered_toml = engine
             .render_str(&template_content, &context)
-            .map_err(|e| anyhow::anyhow!("Failed to render .guisu.toml.j2 template: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to render .guisu.toml.j2 template: {e}"))?;
 
         // Parse the rendered TOML
         let mut config = guisu_config::Config::from_toml_str(&rendered_toml, source_dir)
-            .map_err(|e| anyhow::anyhow!("Failed to parse rendered config: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to parse rendered config: {e}"))?;
 
         // Load and merge platform-specific variables and ignores (same as load_with_variables)
         let platform = guisu_core::platform::CURRENT_PLATFORM.os;
@@ -731,13 +800,13 @@ pub(crate) fn load_config_with_template_support(
 ///
 /// # Returns
 ///
-/// A configured TemplateEngine instance with:
+/// A configured `TemplateEngine` instance with:
 /// - Age identities for inline decryption
 /// - Template directory (if .guisu/templates exists)
 /// - Bitwarden provider configuration
 pub(crate) fn create_template_engine(
     source_dir: &std::path::Path,
-    identities: std::sync::Arc<Vec<guisu_crypto::Identity>>,
+    identities: &std::sync::Arc<Vec<guisu_crypto::Identity>>,
     config: &guisu_config::Config,
 ) -> guisu_template::TemplateEngine {
     let templates_dir = source_dir.join(".guisu").join("templates");

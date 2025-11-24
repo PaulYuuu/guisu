@@ -12,6 +12,11 @@ use std::path::{Path, PathBuf};
 
 /// Template rendering trait for hook scripts
 pub trait TemplateRenderer {
+    /// Render a template string
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if template rendering fails (e.g., syntax error, undefined variable)
     fn render(&self, input: &str) -> Result<String>;
 }
 
@@ -25,7 +30,7 @@ impl TemplateRenderer for NoOpRenderer {
     }
 }
 
-/// Implement TemplateRenderer for closures
+/// Implement `TemplateRenderer` for closures
 impl<F> TemplateRenderer for F
 where
     F: Fn(&str) -> Result<String>,
@@ -77,13 +82,14 @@ impl<'a> HookRunner<'a, NoOpRenderer> {
     ///     .template_renderer(my_renderer)
     ///     .build();
     /// ```
+    #[must_use]
     pub fn new(collections: &'a HookCollections, source_dir: &'a Path) -> Self {
         Self::builder(collections, source_dir).build()
     }
 
-    /// Create a builder for configuring a HookRunner
+    /// Create a builder for configuring a `HookRunner`
     ///
-    /// This is the primary way to create a HookRunner with custom configuration.
+    /// This is the primary way to create a `HookRunner` with custom configuration.
     ///
     /// # Examples
     ///
@@ -94,6 +100,7 @@ impl<'a> HookRunner<'a, NoOpRenderer> {
     ///     .env("CUSTOM_VAR", "value")
     ///     .build();
     /// ```
+    #[must_use]
     pub fn builder(
         collections: &'a HookCollections,
         source_dir: &'a Path,
@@ -102,28 +109,42 @@ impl<'a> HookRunner<'a, NoOpRenderer> {
     }
 }
 
-impl<'a, R> HookRunner<'a, R>
+impl<R> HookRunner<'_, R>
 where
     R: TemplateRenderer + Sync,
 {
     /// Get the set of hooks with mode=once that were executed in this session
     ///
     /// This should be saved to persistent state after running hooks
+    ///
+    /// # Panics
+    ///
+    /// Panics if the mutex is poisoned (should never happen in normal operation)
     pub fn get_once_executed(&self) -> std::collections::HashSet<String> {
-        self.once_executed.lock().unwrap().clone()
+        self.once_executed
+            .lock()
+            .expect("Once-executed mutex poisoned")
+            .clone()
     }
 
     /// Get the content hashes for hooks with mode=onchange from this session
     ///
     /// This should be saved to persistent state after running hooks
+    ///
+    /// # Panics
+    ///
+    /// Panics if the mutex is poisoned (should never happen in normal operation)
     pub fn get_onchange_hashes(&self) -> std::collections::HashMap<String, Vec<u8>> {
-        self.onchange_hashes.lock().unwrap().clone()
+        self.onchange_hashes
+            .lock()
+            .expect("OnChange hashes mutex poisoned")
+            .clone()
     }
 
     /// Check if a hook should be skipped based on its mode
     ///
-    /// Returns (should_skip, reason, cached_hash) for logging and state update
-    /// The cached_hash is only computed for OnChange mode to avoid redundant hashing
+    /// Returns (`should_skip`, reason, `cached_hash`) for logging and state update
+    /// The `cached_hash` is only computed for `OnChange` mode to avoid redundant hashing
     #[tracing::instrument(skip(self), fields(hook_name = %hook.name, hook_mode = ?hook.mode))]
     fn should_skip_hook(&self, hook: &Hook) -> (bool, &'static str, Option<Vec<u8>>) {
         use sha2::{Digest, Sha256};
@@ -136,7 +157,12 @@ where
 
             HookMode::Once => {
                 // Check if executed in this session
-                if self.once_executed.lock().unwrap().contains(&hook.name) {
+                if self
+                    .once_executed
+                    .lock()
+                    .expect("Once-executed mutex poisoned")
+                    .contains(&hook.name)
+                {
                     tracing::debug!("Skipping hook: already executed in this session");
                     return (true, "already executed in this session (mode=once)", None);
                 }
@@ -159,7 +185,11 @@ where
                 let current_hash = hasher.finalize().to_vec();
 
                 // Check if content changed from this session
-                if let Some(session_hash) = self.onchange_hashes.lock().unwrap().get(&hook.name)
+                if let Some(session_hash) = self
+                    .onchange_hashes
+                    .lock()
+                    .expect("OnChange hashes mutex poisoned")
+                    .get(&hook.name)
                     && session_hash == &current_hash
                 {
                     tracing::debug!("Skipping hook: content unchanged in this session");
@@ -191,7 +221,7 @@ where
 
     /// Mark a hook as executed based on its mode
     ///
-    /// Accepts a cached_hash from should_skip_hook to avoid redundant hash computation
+    /// Accepts a `cached_hash` from `should_skip_hook` to avoid redundant hash computation
     fn mark_hook_executed(&self, hook: &Hook, cached_hash: Option<Vec<u8>>) {
         match hook.mode {
             HookMode::Always => {
@@ -199,7 +229,10 @@ where
             }
 
             HookMode::Once => {
-                self.once_executed.lock().unwrap().insert(hook.name.clone());
+                self.once_executed
+                    .lock()
+                    .expect("Once-executed mutex poisoned")
+                    .insert(hook.name.clone());
             }
 
             HookMode::OnChange => {
@@ -214,15 +247,20 @@ where
 
                 self.onchange_hashes
                     .lock()
-                    .unwrap()
+                    .expect("OnChange hashes mutex poisoned")
                     .insert(hook.name.clone(), content_hash);
             }
         }
     }
 
     /// Run all hooks for a specific stage
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any hook execution fails (e.g., hook script fails, template rendering error, execution timeout)
     #[tracing::instrument(skip(self), fields(stage = %stage.name()))]
     pub fn run_stage(&self, stage: HookStage) -> Result<()> {
+        use rayon::prelude::*;
         use std::collections::BTreeMap;
 
         let hooks = match stage {
@@ -259,12 +297,11 @@ where
 
             // Validate hook
             if let Err(e) = hook.validate() {
-                if !hook.failfast {
-                    tracing::warn!("Invalid hook '{}': {}", hook.name, e);
-                    continue;
-                } else {
+                if hook.failfast {
                     return Err(e);
                 }
+                tracing::warn!("Invalid hook '{}': {}", hook.name, e);
+                continue;
             }
 
             hooks_by_order.entry(hook.order).or_default().push(hook);
@@ -280,8 +317,6 @@ where
 
             // Parallel execution within same order group
             // All hooks with the same order number run concurrently
-            use rayon::prelude::*;
-
             let results: Vec<(Option<Vec<u8>>, Result<()>)> = order_hooks
                 .par_iter()
                 .map(|hook| {
@@ -307,24 +342,24 @@ where
 
                     let elapsed = start.elapsed();
                     match &result {
-                        Ok(_) => {
+                        Ok(()) => {
                             tracing::debug!(
                                 elapsed_ms = elapsed.as_millis(),
                                 "Hook completed successfully"
                             );
                         }
                         Err(e) => {
-                            if !hook.failfast {
-                                tracing::warn!(
-                                    elapsed_ms = elapsed.as_millis(),
-                                    error = %e,
-                                    "Hook failed but continuing (failfast=false)"
-                                );
-                            } else {
+                            if hook.failfast {
                                 tracing::error!(
                                     elapsed_ms = elapsed.as_millis(),
                                     error = %e,
                                     "Hook failed"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    elapsed_ms = elapsed.as_millis(),
+                                    error = %e,
+                                    "Hook failed but continuing (failfast=false)"
                                 );
                             }
                         }
@@ -337,21 +372,20 @@ where
             // Process results: mark hooks as executed and check for errors
             for ((cached_hash, result), hook) in results.into_iter().zip(order_hooks.iter()) {
                 match result {
-                    Ok(_) => {
+                    Ok(()) => {
                         // Mark hook as executed based on mode (with cached hash)
                         self.mark_hook_executed(hook, cached_hash);
                     }
                     Err(e) => {
-                        if !hook.failfast {
-                            // Still mark as executed for non-failfast hooks
-                            self.mark_hook_executed(hook, cached_hash);
-                        } else {
+                        if hook.failfast {
                             // Fail-fast: return first error
                             return Err(Error::HookExecution(format!(
                                 "Hook '{}' failed: {}",
                                 hook.name, e
                             )));
                         }
+                        // Still mark as executed for non-failfast hooks
+                        self.mark_hook_executed(hook, cached_hash);
                     }
                 }
             }
@@ -364,7 +398,7 @@ where
     fn execute_hook(&self, hook: &Hook) -> Result<()> {
         // If hook uses 'script' and is a template (.j2 extension), process it specially
         if let Some(script) = &hook.script
-            && script.ends_with(".j2")
+            && script.to_lowercase().ends_with(".j2")
         {
             return self.execute_template_script(hook);
         }
@@ -403,13 +437,12 @@ where
                 } else {
                     self.source_dir.join(script_path)
                 };
-                self.execute_script(&script_abs, &working_dir, &env, hook.timeout)
-                    .map_err(|e| {
-                        Error::HookExecution(format!(
-                            "Hook '{}' script '{}' failed: {}",
-                            hook.name, script_path, e
-                        ))
-                    })
+                Self::execute_script(&script_abs, &working_dir, &env, hook.timeout).map_err(|e| {
+                    Error::HookExecution(format!(
+                        "Hook '{}' script '{}' failed: {}",
+                        hook.name, script_path, e
+                    ))
+                })
             }
             (None, None) => Err(Error::HookExecution(format!(
                 "Hook '{}' has neither cmd nor script (validation should have caught this)",
@@ -446,9 +479,8 @@ where
 
         // Parse command using shell-words for proper quote handling
         // Handles: git commit -m "Initial commit" → ["git", "commit", "-m", "Initial commit"]
-        let parts = shell_words::split(&expanded_cmd).map_err(|e| {
-            Error::HookExecution(format!("Failed to parse command '{}': {}", cmd, e))
-        })?;
+        let parts = shell_words::split(&expanded_cmd)
+            .map_err(|e| Error::HookExecution(format!("Failed to parse command '{cmd}': {e}")))?;
 
         if parts.is_empty() {
             return Err(Error::HookExecution("Empty command".to_string()));
@@ -467,7 +499,7 @@ where
         let mut cmd_builder = duct::cmd(program, args).dir(working_dir).stderr_to_stdout();
 
         // Add custom environment variables (guisu-specific + hook-specific)
-        for (key, value) in env.iter() {
+        for (key, value) in env {
             cmd_builder = cmd_builder.env(key, value);
         }
 
@@ -476,25 +508,23 @@ where
         // Execute with or without timeout
         if timeout > 0 {
             let handle = cmd_builder.start().map_err(|e| {
-                Error::HookExecution(format!("Failed to start command '{}': {}", program, e))
+                Error::HookExecution(format!("Failed to start command '{program}': {e}"))
             })?;
 
             match handle.wait_timeout(Duration::from_secs(timeout)) {
                 Ok(Some(_output)) => Ok(()),
                 Ok(None) => Err(Error::HookExecution(format!(
-                    "Command '{}' timed out after {} seconds",
-                    program, timeout
+                    "Command '{program}' timed out after {timeout} seconds"
                 ))),
                 Err(e) => Err(Error::HookExecution(format!(
-                    "Command '{}' failed: {}",
-                    program, e
+                    "Command '{program}' failed: {e}"
                 ))),
             }
         } else {
             cmd_builder
                 .run()
                 .map(|_| ())
-                .map_err(|e| Error::HookExecution(format!("Command '{}' failed: {}", program, e)))
+                .map_err(|e| Error::HookExecution(format!("Command '{program}' failed: {e}")))
         }
     }
 
@@ -502,9 +532,8 @@ where
     ///
     /// Reads the script's shebang line to determine the interpreter,
     /// then executes the script with that interpreter.
-    #[tracing::instrument(skip(self, env), fields(script_path = %script_path.display(), working_dir = %working_dir.display(), timeout))]
+    #[tracing::instrument(skip(env), fields(script_path = %script_path.display(), working_dir = %working_dir.display(), timeout))]
     fn execute_script(
-        &self,
         script_path: &Path,
         working_dir: &Path,
         env: &IndexMap<String, String>,
@@ -526,7 +555,7 @@ where
         }
 
         // Parse shebang to get interpreter
-        let (interpreter, args) = self.parse_shebang(script_path)?;
+        let (interpreter, args) = Self::parse_shebang(script_path)?;
 
         // Build command: interpreter + args + script_path
         let mut cmd_args = args;
@@ -540,7 +569,7 @@ where
             .stderr_to_stdout();
 
         // Add custom environment variables (guisu-specific + hook-specific)
-        for (key, value) in env.iter() {
+        for (key, value) in env {
             cmd_builder = cmd_builder.env(key, value);
         }
 
@@ -584,8 +613,8 @@ where
     ///
     /// - `#!/bin/bash` → ("bash", [])
     /// - `#!/usr/bin/env python3` → ("python3", [])
-    /// - `#!/bin/bash -e` → ("bash", ["-e"])
-    fn parse_shebang(&self, script_path: &Path) -> Result<(String, Vec<String>)> {
+    /// - `#!/bin/bash -e` → ("bash", [`"-e"`])
+    fn parse_shebang(script_path: &Path) -> Result<(String, Vec<String>)> {
         use std::io::{BufRead, BufReader};
 
         let file = fs::File::open(script_path).map_err(|e| {
@@ -609,7 +638,7 @@ where
         // Check for shebang
         if !first_line.starts_with("#!") {
             // No shebang, try to infer from extension or use default
-            return self.infer_interpreter(script_path);
+            return Self::infer_interpreter(script_path);
         }
 
         // Parse shebang line
@@ -620,23 +649,19 @@ where
             let parts: Vec<&str> = shebang.split_whitespace().collect();
             if parts.len() < 2 {
                 return Err(Error::HookExecution(format!(
-                    "Invalid env shebang: {}",
-                    first_line
+                    "Invalid env shebang: {first_line}"
                 )));
             }
 
             let interpreter = parts[1].to_string();
-            let args = parts[2..].iter().map(|s| s.to_string()).collect();
+            let args = parts[2..].iter().map(|s| (*s).to_string()).collect();
             return Ok((interpreter, args));
         }
 
         // Handle "#! /bin/bash" or "#! /bin/bash -e"
         let parts: Vec<&str> = shebang.split_whitespace().collect();
         if parts.is_empty() {
-            return Err(Error::HookExecution(format!(
-                "Empty shebang: {}",
-                first_line
-            )));
+            return Err(Error::HookExecution(format!("Empty shebang: {first_line}")));
         }
 
         // Extract interpreter name from path
@@ -647,13 +672,13 @@ where
             .ok_or_else(|| Error::HookExecution(format!("Invalid interpreter path: {}", parts[0])))?
             .to_string();
 
-        let args = parts[1..].iter().map(|s| s.to_string()).collect();
+        let args = parts[1..].iter().map(|s| (*s).to_string()).collect();
 
         Ok((interpreter, args))
     }
 
     /// Infer interpreter from script extension when no shebang is present
-    fn infer_interpreter(&self, script_path: &Path) -> Result<(String, Vec<String>)> {
+    fn infer_interpreter(script_path: &Path) -> Result<(String, Vec<String>)> {
         let extension = script_path
             .extension()
             .and_then(|e| e.to_str())
@@ -724,7 +749,7 @@ where
         let processed_content = self
             .template_renderer
             .render(&content)
-            .map_err(|e| Error::HookExecution(format!("Failed to render template: {}", e)))?;
+            .map_err(|e| Error::HookExecution(format!("Failed to render template: {e}")))?;
 
         // Execute the processed script
         self.execute_processed_script(&processed_content, hook)
@@ -736,12 +761,12 @@ where
 
         // Create temporary file
         let mut temp_file = NamedTempFile::new()
-            .map_err(|e| Error::HookExecution(format!("Failed to create temp file: {}", e)))?;
+            .map_err(|e| Error::HookExecution(format!("Failed to create temp file: {e}")))?;
 
         // Write content
         temp_file
             .write_all(content.as_bytes())
-            .map_err(|e| Error::HookExecution(format!("Failed to write temp file: {}", e)))?;
+            .map_err(|e| Error::HookExecution(format!("Failed to write temp file: {e}")))?;
 
         // Set executable permissions (Unix)
         #[cfg(unix)]
@@ -751,7 +776,7 @@ where
             temp_file
                 .as_file()
                 .set_permissions(perms)
-                .map_err(|e| Error::HookExecution(format!("Failed to set permissions: {}", e)))?;
+                .map_err(|e| Error::HookExecution(format!("Failed to set permissions: {e}")))?;
         }
 
         // Working directory is always source_dir
@@ -777,7 +802,7 @@ where
 
         // Execute script using shebang (same as regular scripts)
         // temp_file is automatically deleted when dropped
-        self.execute_script(temp_path, &working_dir, &env, hook.timeout)
+        Self::execute_script(temp_path, &working_dir, &env, hook.timeout)
     }
 
     /// Expand environment variables in a string (simple ${VAR} expansion)
@@ -841,9 +866,9 @@ where
 // HookRunnerBuilder - Type-safe builder pattern for HookRunner
 // ======================================================================
 
-/// Builder for creating a HookRunner with custom configuration
+/// Builder for creating a `HookRunner` with custom configuration
 ///
-/// This builder provides a fluent API for configuring a HookRunner before
+/// This builder provides a fluent API for configuring a `HookRunner` before
 /// creating it. It ensures all necessary configuration is provided while
 /// making optional configuration clear.
 ///
@@ -876,6 +901,7 @@ impl<'a> HookRunnerBuilder<'a, NoOpRenderer> {
     /// Create a new builder with required parameters
     ///
     /// This is typically called via [`HookRunner::builder`].
+    #[must_use]
     pub fn new(collections: &'a HookCollections, source_dir: &'a Path) -> Self {
         let mut env_vars = IndexMap::new();
 
@@ -953,6 +979,7 @@ where
     ///     )
     ///     .build();
     /// ```
+    #[must_use]
     pub fn persistent_state(
         mut self,
         once_executed: std::collections::HashSet<String>,
@@ -976,6 +1003,7 @@ where
     ///     .env("REGION", "us-west-2")
     ///     .build();
     /// ```
+    #[must_use]
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env_vars.insert(key.into(), value.into());
         self
@@ -996,14 +1024,15 @@ where
     ///     .env_vars(vars)
     ///     .build();
     /// ```
+    #[must_use]
     pub fn env_vars(mut self, vars: IndexMap<String, String>) -> Self {
         self.env_vars.extend(vars);
         self
     }
 
-    /// Build the HookRunner
+    /// Build the `HookRunner`
     ///
-    /// Consumes the builder and creates a configured HookRunner.
+    /// Consumes the builder and creates a configured `HookRunner`.
     ///
     /// # Examples
     ///
@@ -1028,5 +1057,792 @@ where
                 std::collections::HashMap::new(),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+    use crate::hooks::config::{Hook, HookCollections, HookMode};
+    use indexmap::IndexMap;
+    use std::collections::{HashMap, HashSet};
+    use std::fs;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    // ======================================================================
+    // NoOpRenderer Tests
+    // ======================================================================
+
+    #[test]
+    fn test_noop_renderer_returns_input_unchanged() {
+        let renderer = NoOpRenderer;
+        let input = "Hello, {{ name }}!";
+
+        let result = renderer.render(input).expect("Render failed");
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_noop_renderer_empty_string() {
+        let renderer = NoOpRenderer;
+        let result = renderer.render("").expect("Render failed");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_noop_renderer_with_special_chars() {
+        let renderer = NoOpRenderer;
+        let input = "#!/bin/bash\necho $VAR\n{{ template }}";
+
+        let result = renderer.render(input).expect("Render failed");
+        assert_eq!(result, input);
+    }
+
+    // ======================================================================
+    // HookRunnerBuilder Tests
+    // ======================================================================
+
+    #[test]
+    fn test_builder_new_creates_default_env() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+
+        let builder = HookRunnerBuilder::new(&collections, temp.path());
+
+        // Should have GUISU_SOURCE env var
+        assert!(builder.env_vars.contains_key("GUISU_SOURCE"));
+        assert_eq!(
+            builder.env_vars.get("GUISU_SOURCE").unwrap(),
+            &temp.path().display().to_string()
+        );
+
+        // Should have HOME env var (if dirs::home_dir() returns Some)
+        if dirs::home_dir().is_some() {
+            assert!(builder.env_vars.contains_key("HOME"));
+        }
+    }
+
+    #[test]
+    fn test_builder_template_renderer() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+
+        let custom_renderer = |input: &str| -> Result<String> { Ok(format!("RENDERED: {input}")) };
+
+        let runner = HookRunnerBuilder::new(&collections, temp.path())
+            .template_renderer(custom_renderer)
+            .build();
+
+        // Verify renderer works
+        let result = runner
+            .template_renderer
+            .render("test")
+            .expect("Render failed");
+        assert_eq!(result, "RENDERED: test");
+    }
+
+    #[test]
+    fn test_builder_persistent_state() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+
+        let mut once_executed = HashSet::new();
+        once_executed.insert("hook1".to_string());
+
+        let mut onchange_hashes = HashMap::new();
+        onchange_hashes.insert("hook2".to_string(), vec![0x12, 0x34]);
+
+        let runner = HookRunnerBuilder::new(&collections, temp.path())
+            .persistent_state(once_executed.clone(), onchange_hashes.clone())
+            .build();
+
+        assert_eq!(runner.persistent_once, once_executed);
+        assert_eq!(runner.persistent_onchange, onchange_hashes);
+    }
+
+    #[test]
+    fn test_builder_env() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+
+        let runner = HookRunnerBuilder::new(&collections, temp.path())
+            .env("CUSTOM_VAR", "custom_value")
+            .env("ANOTHER_VAR", "another_value")
+            .build();
+
+        assert_eq!(runner.env_vars.get("CUSTOM_VAR").unwrap(), "custom_value");
+        assert_eq!(runner.env_vars.get("ANOTHER_VAR").unwrap(), "another_value");
+    }
+
+    #[test]
+    fn test_builder_env_vars() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+
+        let mut custom_vars = IndexMap::new();
+        custom_vars.insert("VAR1".to_string(), "value1".to_string());
+        custom_vars.insert("VAR2".to_string(), "value2".to_string());
+
+        let runner = HookRunnerBuilder::new(&collections, temp.path())
+            .env_vars(custom_vars)
+            .build();
+
+        assert_eq!(runner.env_vars.get("VAR1").unwrap(), "value1");
+        assert_eq!(runner.env_vars.get("VAR2").unwrap(), "value2");
+    }
+
+    #[test]
+    fn test_builder_build_creates_runner() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+
+        let runner = HookRunnerBuilder::new(&collections, temp.path()).build();
+
+        // Verify Arc-wrapped fields are initialized
+        assert!(runner.once_executed.lock().unwrap().is_empty());
+        assert!(runner.onchange_hashes.lock().unwrap().is_empty());
+    }
+
+    // ======================================================================
+    // Hook Execution Mode Tests
+    // ======================================================================
+
+    fn create_test_hook(name: &str, mode: HookMode) -> Hook {
+        Hook {
+            name: name.to_string(),
+            order: 100,
+            platforms: vec![],
+            cmd: Some("echo test".to_string()),
+            script: None,
+            script_content: None,
+            env: IndexMap::new(),
+            failfast: true,
+            mode,
+            timeout: 0,
+        }
+    }
+
+    #[test]
+    fn test_should_skip_hook_always() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunner::new(&collections, temp.path());
+
+        let hook = create_test_hook("test", HookMode::Always);
+        let (should_skip, _reason, hash) = runner.should_skip_hook(&hook);
+
+        assert!(!should_skip);
+        assert!(hash.is_none());
+    }
+
+    #[test]
+    fn test_should_skip_hook_once_first_execution() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunner::new(&collections, temp.path());
+
+        let hook = create_test_hook("test", HookMode::Once);
+        let (should_skip, _reason, hash) = runner.should_skip_hook(&hook);
+
+        assert!(!should_skip);
+        assert!(hash.is_none());
+    }
+
+    #[test]
+    fn test_should_skip_hook_once_already_in_session() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunner::new(&collections, temp.path());
+
+        let hook = create_test_hook("test", HookMode::Once);
+
+        // Mark as executed in this session
+        runner
+            .once_executed
+            .lock()
+            .unwrap()
+            .insert("test".to_string());
+
+        let (should_skip, reason, _hash) = runner.should_skip_hook(&hook);
+
+        assert!(should_skip);
+        assert!(reason.contains("already executed in this session"));
+    }
+
+    #[test]
+    fn test_should_skip_hook_once_already_in_persistent() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+
+        let mut persistent_once = HashSet::new();
+        persistent_once.insert("test".to_string());
+
+        let runner = HookRunnerBuilder::new(&collections, temp.path())
+            .persistent_state(persistent_once, HashMap::new())
+            .build();
+
+        let hook = create_test_hook("test", HookMode::Once);
+        let (should_skip, reason, _hash) = runner.should_skip_hook(&hook);
+
+        assert!(should_skip);
+        assert!(reason.contains("already executed previously"));
+    }
+
+    #[test]
+    fn test_should_skip_hook_onchange_first_execution() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunner::new(&collections, temp.path());
+
+        let hook = create_test_hook("test", HookMode::OnChange);
+        let (should_skip, _reason, hash) = runner.should_skip_hook(&hook);
+
+        assert!(!should_skip);
+        assert!(hash.is_some()); // Hash should be computed
+    }
+
+    #[test]
+    fn test_should_skip_hook_onchange_unchanged_in_session() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunner::new(&collections, temp.path());
+
+        let hook = create_test_hook("test", HookMode::OnChange);
+
+        // Get initial hash
+        let (_skip, _reason, hash) = runner.should_skip_hook(&hook);
+        let hash = hash.unwrap();
+
+        // Store hash in session
+        runner
+            .onchange_hashes
+            .lock()
+            .unwrap()
+            .insert("test".to_string(), hash);
+
+        // Check again - should skip now
+        let (should_skip, reason, _hash) = runner.should_skip_hook(&hook);
+
+        assert!(should_skip);
+        assert!(reason.contains("content unchanged in this session"));
+    }
+
+    #[test]
+    fn test_should_skip_hook_onchange_unchanged_in_persistent() {
+        use sha2::{Digest, Sha256};
+
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+
+        let hook = create_test_hook("test", HookMode::OnChange);
+
+        // Compute expected hash
+        let mut hasher = Sha256::new();
+        hasher.update(hook.get_content().as_bytes());
+        let expected_hash = hasher.finalize().to_vec();
+
+        let mut persistent_onchange = HashMap::new();
+        persistent_onchange.insert("test".to_string(), expected_hash);
+
+        let runner = HookRunnerBuilder::new(&collections, temp.path())
+            .persistent_state(HashSet::new(), persistent_onchange)
+            .build();
+
+        let (should_skip, reason, _hash) = runner.should_skip_hook(&hook);
+
+        assert!(should_skip);
+        assert!(reason.contains("content unchanged"));
+    }
+
+    #[test]
+    fn test_should_skip_hook_onchange_content_changed() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+
+        // Store hash for different content
+        let mut persistent_onchange = HashMap::new();
+        persistent_onchange.insert("test".to_string(), vec![0x00, 0x11, 0x22]);
+
+        let runner = HookRunnerBuilder::new(&collections, temp.path())
+            .persistent_state(HashSet::new(), persistent_onchange)
+            .build();
+
+        let hook = create_test_hook("test", HookMode::OnChange);
+        let (should_skip, _reason, hash) = runner.should_skip_hook(&hook);
+
+        assert!(!should_skip);
+        assert!(hash.is_some());
+    }
+
+    #[test]
+    fn test_mark_hook_executed_always() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunner::new(&collections, temp.path());
+
+        let hook = create_test_hook("test", HookMode::Always);
+        runner.mark_hook_executed(&hook, None);
+
+        // Should not be tracked
+        assert!(runner.once_executed.lock().unwrap().is_empty());
+        assert!(runner.onchange_hashes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_mark_hook_executed_once() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunner::new(&collections, temp.path());
+
+        let hook = create_test_hook("test", HookMode::Once);
+        runner.mark_hook_executed(&hook, None);
+
+        // Should be in once_executed
+        assert!(runner.once_executed.lock().unwrap().contains("test"));
+    }
+
+    #[test]
+    fn test_mark_hook_executed_onchange_with_cached_hash() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunner::new(&collections, temp.path());
+
+        let hook = create_test_hook("test", HookMode::OnChange);
+        let cached_hash = vec![0x12, 0x34, 0x56];
+
+        runner.mark_hook_executed(&hook, Some(cached_hash.clone()));
+
+        // Should be in onchange_hashes
+        let hashes = runner.onchange_hashes.lock().unwrap();
+        assert_eq!(hashes.get("test"), Some(&cached_hash));
+    }
+
+    #[test]
+    fn test_mark_hook_executed_onchange_without_cached_hash() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunner::new(&collections, temp.path());
+
+        let hook = create_test_hook("test", HookMode::OnChange);
+        runner.mark_hook_executed(&hook, None);
+
+        // Should compute and store hash
+        let hashes = runner.onchange_hashes.lock().unwrap();
+        assert!(hashes.contains_key("test"));
+        assert!(!hashes.get("test").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_get_once_executed() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunner::new(&collections, temp.path());
+
+        runner
+            .once_executed
+            .lock()
+            .unwrap()
+            .insert("hook1".to_string());
+        runner
+            .once_executed
+            .lock()
+            .unwrap()
+            .insert("hook2".to_string());
+
+        let executed = runner.get_once_executed();
+        assert_eq!(executed.len(), 2);
+        assert!(executed.contains("hook1"));
+        assert!(executed.contains("hook2"));
+    }
+
+    #[test]
+    fn test_get_onchange_hashes() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunner::new(&collections, temp.path());
+
+        runner
+            .onchange_hashes
+            .lock()
+            .unwrap()
+            .insert("hook1".to_string(), vec![0x12]);
+        runner
+            .onchange_hashes
+            .lock()
+            .unwrap()
+            .insert("hook2".to_string(), vec![0x34]);
+
+        let hashes = runner.get_onchange_hashes();
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes.get("hook1"), Some(&vec![0x12]));
+        assert_eq!(hashes.get("hook2"), Some(&vec![0x34]));
+    }
+
+    // ======================================================================
+    // Environment Variable Expansion Tests
+    // ======================================================================
+
+    #[test]
+    fn test_expand_env_vars_no_variables() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunner::new(&collections, temp.path());
+
+        let input = "plain text without variables";
+        let result = runner.expand_env_vars(input);
+
+        assert_eq!(result, input);
+        // Should be borrowed (no allocation)
+        assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn test_expand_env_vars_single_variable() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunnerBuilder::new(&collections, temp.path())
+            .env("NAME", "Alice")
+            .build();
+
+        let input = "Hello, ${NAME}!";
+        let result = runner.expand_env_vars(input);
+
+        assert_eq!(result, "Hello, Alice!");
+        assert!(matches!(result, std::borrow::Cow::Owned(_)));
+    }
+
+    #[test]
+    fn test_expand_env_vars_multiple_variables() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunnerBuilder::new(&collections, temp.path())
+            .env("FIRST", "John")
+            .env("LAST", "Doe")
+            .build();
+
+        let input = "${FIRST} ${LAST}";
+        let result = runner.expand_env_vars(input);
+
+        assert_eq!(result, "John Doe");
+    }
+
+    #[test]
+    fn test_expand_env_vars_undefined_variable() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunner::new(&collections, temp.path());
+
+        let input = "Value: ${UNDEFINED}";
+        let result = runner.expand_env_vars(input);
+
+        // Undefined variables are kept as-is
+        assert_eq!(result, "Value: ${UNDEFINED}");
+    }
+
+    #[test]
+    fn test_expand_env_vars_unclosed_brace() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunnerBuilder::new(&collections, temp.path())
+            .env("VAR", "value")
+            .build();
+
+        let input = "Unclosed: ${VAR";
+        let result = runner.expand_env_vars(input);
+
+        // Unclosed braces are left as-is
+        assert_eq!(result, "Unclosed: ${VAR");
+    }
+
+    #[test]
+    fn test_expand_env_vars_empty_variable_name() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunner::new(&collections, temp.path());
+
+        let input = "Empty: ${}";
+        let result = runner.expand_env_vars(input);
+
+        // Empty variable name is kept as-is
+        assert_eq!(result, "Empty: ${}");
+    }
+
+    #[test]
+    fn test_expand_env_vars_nested_braces() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunnerBuilder::new(&collections, temp.path())
+            .env("OUTER", "outer")
+            .build();
+
+        let input = "${OUTER} and ${INNER}";
+        let result = runner.expand_env_vars(input);
+
+        assert_eq!(result, "outer and ${INNER}");
+    }
+
+    #[test]
+    fn test_expand_env_vars_at_start() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunnerBuilder::new(&collections, temp.path())
+            .env("VAR", "start")
+            .build();
+
+        let input = "${VAR} text";
+        let result = runner.expand_env_vars(input);
+
+        assert_eq!(result, "start text");
+    }
+
+    #[test]
+    fn test_expand_env_vars_at_end() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunnerBuilder::new(&collections, temp.path())
+            .env("VAR", "end")
+            .build();
+
+        let input = "text ${VAR}";
+        let result = runner.expand_env_vars(input);
+
+        assert_eq!(result, "text end");
+    }
+
+    #[test]
+    fn test_expand_env_vars_only_variable() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunnerBuilder::new(&collections, temp.path())
+            .env("VAR", "value")
+            .build();
+
+        let input = "${VAR}";
+        let result = runner.expand_env_vars(input);
+
+        assert_eq!(result, "value");
+    }
+
+    // ======================================================================
+    // Shebang Parsing Tests
+    // ======================================================================
+
+    #[test]
+    fn test_parse_shebang_bash() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("test.sh");
+        fs::write(&script_path, "#!/bin/bash\necho hello").unwrap();
+
+        let (interpreter, args) = HookRunner::<NoOpRenderer>::parse_shebang(&script_path).unwrap();
+        assert_eq!(interpreter, "bash");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_parse_shebang_bash_with_args() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("test.sh");
+        fs::write(&script_path, "#!/bin/bash -e\necho hello").unwrap();
+
+        let (interpreter, args) = HookRunner::<NoOpRenderer>::parse_shebang(&script_path).unwrap();
+        assert_eq!(interpreter, "bash");
+        assert_eq!(args, vec!["-e"]);
+    }
+
+    #[test]
+    fn test_parse_shebang_env_python() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("test.py");
+        fs::write(&script_path, "#!/usr/bin/env python3\nprint('hello')").unwrap();
+
+        let (interpreter, args) = HookRunner::<NoOpRenderer>::parse_shebang(&script_path).unwrap();
+        assert_eq!(interpreter, "python3");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_parse_shebang_env_with_args() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("test.sh");
+        fs::write(&script_path, "#!/usr/bin/env bash -x\necho hello").unwrap();
+
+        let (interpreter, args) = HookRunner::<NoOpRenderer>::parse_shebang(&script_path).unwrap();
+        assert_eq!(interpreter, "bash");
+        assert_eq!(args, vec!["-x"]);
+    }
+
+    #[test]
+    fn test_parse_shebang_bin_env() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("test.sh");
+        fs::write(&script_path, "#!/bin/env bash\necho hello").unwrap();
+
+        let (interpreter, args) = HookRunner::<NoOpRenderer>::parse_shebang(&script_path).unwrap();
+        assert_eq!(interpreter, "bash");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_parse_shebang_with_spaces() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("test.sh");
+        fs::write(&script_path, "#! /bin/bash\necho hello").unwrap();
+
+        let (interpreter, args) = HookRunner::<NoOpRenderer>::parse_shebang(&script_path).unwrap();
+        assert_eq!(interpreter, "bash");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_infer_interpreter_sh() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("test.sh");
+        fs::write(&script_path, "echo hello").unwrap();
+
+        let (interpreter, args) =
+            HookRunner::<NoOpRenderer>::infer_interpreter(&script_path).unwrap();
+        assert_eq!(interpreter, "sh");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_infer_interpreter_bash() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("test.bash");
+        fs::write(&script_path, "echo hello").unwrap();
+
+        let (interpreter, args) =
+            HookRunner::<NoOpRenderer>::infer_interpreter(&script_path).unwrap();
+        assert_eq!(interpreter, "bash");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_infer_interpreter_python() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("test.py");
+        fs::write(&script_path, "print('hello')").unwrap();
+
+        let (interpreter, args) =
+            HookRunner::<NoOpRenderer>::infer_interpreter(&script_path).unwrap();
+        assert_eq!(interpreter, "python3");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_infer_interpreter_ruby() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("test.rb");
+        fs::write(&script_path, "puts 'hello'").unwrap();
+
+        let (interpreter, args) =
+            HookRunner::<NoOpRenderer>::infer_interpreter(&script_path).unwrap();
+        assert_eq!(interpreter, "ruby");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_infer_interpreter_perl() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("test.pl");
+        fs::write(&script_path, "print 'hello'").unwrap();
+
+        let (interpreter, args) =
+            HookRunner::<NoOpRenderer>::infer_interpreter(&script_path).unwrap();
+        assert_eq!(interpreter, "perl");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_infer_interpreter_javascript() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("test.js");
+        fs::write(&script_path, "console.log('hello')").unwrap();
+
+        let (interpreter, args) =
+            HookRunner::<NoOpRenderer>::infer_interpreter(&script_path).unwrap();
+        assert_eq!(interpreter, "node");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_infer_interpreter_zsh() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("test.zsh");
+        fs::write(&script_path, "echo hello").unwrap();
+
+        let (interpreter, args) =
+            HookRunner::<NoOpRenderer>::infer_interpreter(&script_path).unwrap();
+        assert_eq!(interpreter, "zsh");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_infer_interpreter_unknown_extension() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("test.unknown");
+        fs::write(&script_path, "content").unwrap();
+
+        let result = HookRunner::<NoOpRenderer>::infer_interpreter(&script_path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Cannot infer"));
+    }
+
+    #[test]
+    fn test_infer_interpreter_no_extension_defaults_to_sh() {
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("test");
+        fs::write(&script_path, "echo hello").unwrap();
+
+        let (interpreter, args) =
+            HookRunner::<NoOpRenderer>::infer_interpreter(&script_path).unwrap();
+        assert_eq!(interpreter, "sh");
+        assert!(args.is_empty());
+    }
+
+    // ======================================================================
+    // HookRunner Stage Tests
+    // ======================================================================
+
+    #[test]
+    fn test_run_stage_empty_hooks() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+        let runner = HookRunner::new(&collections, temp.path());
+
+        // Should succeed with no hooks
+        let result = runner.run_stage(HookStage::Pre);
+        assert!(result.is_ok());
+
+        let result = runner.run_stage(HookStage::Post);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_hook_runner_new() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+
+        let runner = HookRunner::new(&collections, temp.path());
+
+        // Should have empty execution state
+        assert!(runner.once_executed.lock().unwrap().is_empty());
+        assert!(runner.onchange_hashes.lock().unwrap().is_empty());
+
+        // Should have GUISU_SOURCE env var
+        assert!(runner.env_vars.get("GUISU_SOURCE").is_some());
+    }
+
+    #[test]
+    fn test_hook_runner_builder_creates_runner() {
+        let temp = TempDir::new().unwrap();
+        let collections = HookCollections::default();
+
+        let runner = HookRunner::builder(&collections, temp.path()).build();
+
+        // Should have env vars set
+        assert!(runner.env_vars.get("GUISU_SOURCE").is_some());
     }
 }

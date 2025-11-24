@@ -41,3 +41,9 @@ toml.workspace = true
 tracing.workspace = true
 walkdir.workspace = true
 which.workspace = true
+
+[dev-dependencies]
+serial_test.workspace = true
+
+[lints]
+workspace = true

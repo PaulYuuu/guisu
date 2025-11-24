@@ -24,11 +24,13 @@ pub static CURRENT_PLATFORM: LazyLock<Platform> = LazyLock::new(Platform::detect
 pub struct Platform {
     /// OS: "darwin" (macOS), "linux", "windows", "unknown"
     pub os: &'static str,
-    /// CPU architecture: "x86_64", "aarch64", etc.
+    /// CPU architecture: `x86_64`, `aarch64`, etc.
     pub arch: &'static str,
 }
 
 impl Platform {
+    /// Detect the current platform
+    #[must_use]
     pub fn detect() -> Self {
         Self {
             os: Self::detect_os(),

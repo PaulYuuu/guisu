@@ -95,7 +95,7 @@ fn run_impl(source_dir: &Path, config: &Config, all: bool, json: bool) -> Result
     // Validate configuration
     validate_configuration(source_dir)?;
 
-    let info = gather_info(source_dir, config, all)?;
+    let info = gather_info(source_dir, config, all);
 
     if json {
         display_json(&info, config, all)?;
@@ -107,7 +107,7 @@ fn run_impl(source_dir: &Path, config: &Config, all: bool, json: bool) -> Result
 }
 
 /// Gather all system information
-fn gather_info(source_dir: &Path, config: &Config, all: bool) -> Result<InfoData> {
+fn gather_info(source_dir: &Path, config: &Config, all: bool) -> InfoData {
     debug!("Gathering system information");
 
     // Guisu information
@@ -125,7 +125,7 @@ fn gather_info(source_dir: &Path, config: &Config, all: bool) -> Result<InfoData
                     .ok()
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
             }),
-            git_sha: option_env!("VERGEN_GIT_SHA").map(|s| s.to_string()),
+            git_sha: option_env!("VERGEN_GIT_SHA").map(std::string::ToString::to_string),
         })
     } else {
         None
@@ -174,7 +174,7 @@ fn gather_info(source_dir: &Path, config: &Config, all: bool) -> Result<InfoData
         None => ("not found".to_string(), Some("not found".to_string())),
     };
 
-    Ok(InfoData {
+    InfoData {
         guisu: GuisuInfo {
             version: guisu_version,
             config: config_display,
@@ -212,7 +212,7 @@ fn gather_info(source_dir: &Path, config: &Config, all: bool) -> Result<InfoData
             },
             version: if all { bw_command_version } else { None },
         },
-    })
+    }
 }
 
 /// Find config file path
@@ -242,7 +242,7 @@ fn get_git_info(source_dir: &Path) -> (Option<String>, Option<String>, Option<St
         Ok(repo) => {
             // Get repository URL
             let repository = if let Ok(remote) = repo.find_remote("origin") {
-                remote.url().map(|s| s.to_string())
+                remote.url().map(std::string::ToString::to_string)
             } else {
                 None
             };
@@ -251,7 +251,7 @@ fn get_git_info(source_dir: &Path) -> (Option<String>, Option<String>, Option<St
             let branch = repo
                 .head()
                 .ok()
-                .and_then(|head| head.shorthand().map(|s| s.to_string()))
+                .and_then(|head| head.shorthand().map(std::string::ToString::to_string))
                 .or_else(|| {
                     // If HEAD doesn't exist (no commits yet), parse .git/HEAD file
                     let git_head = source_dir.join(".git").join("HEAD");
@@ -311,10 +311,10 @@ fn get_kernel_version() -> String {
         // Safe: rustix provides a safe wrapper around uname()
         let info = rustix::system::uname();
         let release = info.release().to_string_lossy().to_string();
-        if !release.is_empty() {
-            release
-        } else {
+        if release.is_empty() {
             "unknown".to_string()
+        } else {
+            release
         }
     }
 
@@ -324,21 +324,21 @@ fn get_kernel_version() -> String {
     }
 }
 
-/// Get OS name with version if possible using os_info crate
+/// Get OS name with version if possible using `os_info` crate
 fn get_os_name() -> String {
     let info = os_info::get();
 
     // Format: "OS Type Version"
     let version = info.version();
-    if version != &os_info::Version::Unknown {
-        format!("{} {}", info.os_type(), version)
-    } else {
+    if version == &os_info::Version::Unknown {
         info.os_type().to_string()
+    } else {
+        format!("{} {}", info.os_type(), version)
     }
 }
 
 /// Get age encryption information
-/// Returns: (identity_files, identity_note, derive, public_keys)
+/// Returns: (`identity_files`, `identity_note`, derive, `public_keys`)
 fn get_age_info(
     config: &Config,
     all: bool,
@@ -373,10 +373,10 @@ fn get_age_info(
 
     // Check if all files exist
     let all_exist = identity_paths.iter().all(|p| p.exists());
-    let identity_note = if !all_exist {
-        Some("some files not found".to_string())
-    } else {
+    let identity_note = if all_exist {
         None
+    } else {
+        Some("some files not found".to_string())
     };
 
     // Read derive flag from config
@@ -409,133 +409,153 @@ fn extract_public_keys(config: &Config) -> Vec<String> {
 
 /// Display information in table format
 fn display_table(info: &InfoData, config: &Config, all: bool) {
-    // Guisu section
+    display_guisu_section(&info.guisu);
+    display_build_section(info.build.as_ref());
+    display_system_section(&info.system);
+    display_git_section(&info.git);
+    display_age_section(&info.age);
+    display_bitwarden_section(&info.bitwarden);
+
+    if all {
+        show_config_table_simple(config);
+    }
+}
+
+/// Display guisu version and configuration
+fn display_guisu_section(guisu: &GuisuInfo) {
     println!("{}", "Guisu".bright_white().bold());
-    print_row("Version", &info.guisu.version, true, None);
+    print_row("Version", &guisu.version, true, None);
     print_row(
         "Config",
-        &info.guisu.config,
-        info.guisu.config_note.is_none(),
-        info.guisu.config_note.as_deref(),
+        &guisu.config,
+        guisu.config_note.is_none(),
+        guisu.config_note.as_deref(),
     );
-
     println!();
+}
 
-    // Build section (only shown if present = --all mode)
-    if let Some(build) = info.build.as_ref() {
+/// Display build information (if present)
+fn display_build_section(build: Option<&BuildInfo>) {
+    if let Some(build) = build {
         println!("{}", "Build".bright_white().bold());
         print_row("Rustc", &build.rustc, true, None);
         if let Some(time) = build.timestamp.as_ref() {
-            print_row("Timestamp", time, true, None)
+            print_row("Timestamp", time, true, None);
         }
         if let Some(sha) = build.git_sha.as_ref() {
-            print_row("Git SHA", sha, true, None)
+            print_row("Git SHA", sha, true, None);
         }
         println!();
     }
+}
 
-    // System section
+/// Display system information
+fn display_system_section(system: &SystemInfo) {
     println!("{}", "System".bright_white().bold());
-    print_row("OS", &info.system.os, true, None);
-    print_row("Architecture", &info.system.architecture, true, None);
-    if let Some(kernel) = info.system.kernel.as_ref() {
-        print_row("Kernel", kernel, true, None)
+    print_row("OS", &system.os, true, None);
+    print_row("Architecture", &system.architecture, true, None);
+    if let Some(kernel) = system.kernel.as_ref() {
+        print_row("Kernel", kernel, true, None);
     }
-
     println!();
+}
 
-    // Git section (only show if has content)
-    if info.git.version.is_some()
-        || info.git.repository.is_some()
-        || info.git.branch.is_some()
-        || info.git.sha.is_some()
+/// Display git repository information
+fn display_git_section(git: &GitInfo) {
+    if git.version.is_some()
+        || git.repository.is_some()
+        || git.branch.is_some()
+        || git.sha.is_some()
     {
         println!("{}", "Git".bright_white().bold());
 
-        // Show version only in --all mode
-        if let Some(version) = info.git.version.as_ref() {
-            print_row("Version", version, true, None)
+        if let Some(version) = git.version.as_ref() {
+            print_row("Version", version, true, None);
         }
 
-        // Show repository if available
-        if let Some(repo) = info.git.repository.as_ref() {
-            print_row("Repository", repo, true, None)
+        if let Some(repo) = git.repository.as_ref() {
+            print_row("Repository", repo, true, None);
         }
 
-        // Show branch (always show if available)
-        if let Some(branch) = info.git.branch.as_ref() {
-            let note = if info.git.dirty && info.git.version.is_none() {
-                // Only show note in normal mode
+        if let Some(branch) = git.branch.as_ref() {
+            let note = if git.dirty && git.version.is_none() {
                 Some("uncommitted changes")
             } else {
                 None
             };
-            print_row(
-                "Branch",
-                branch,
-                !info.git.dirty || info.git.version.is_some(),
-                note,
-            )
+            print_row("Branch", branch, !git.dirty || git.version.is_some(), note);
         }
 
-        // Show SHA in --all mode
-        if info.git.version.is_some()
-            && let Some(sha) = info.git.sha.as_ref()
+        if git.version.is_some()
+            && let Some(sha) = git.sha.as_ref()
         {
-            let note = if info.git.dirty {
+            let note = if git.dirty {
                 Some("uncommitted changes")
             } else {
                 None
             };
-            print_row("SHA", sha, !info.git.dirty, note)
+            print_row("SHA", sha, !git.dirty, note);
         }
 
         println!();
     }
+}
 
-    // Age encryption section
+/// Display age encryption information
+fn display_age_section(age: &AgeInfo) {
     println!("{}", "Age".bright_white().bold());
-    if let Some(version) = info.age.version.as_ref() {
-        print_row("Version", version, true, None)
+
+    if let Some(version) = age.version.as_ref() {
+        print_row("Version", version, true, None);
     }
 
-    // Display identity files
-    if info.age.identity_files.len() == 1 {
+    display_age_identity_files(age);
+
+    if let Some(derive_val) = age.derive.as_ref() {
+        print_row("Derive", derive_val, true, None);
+    }
+
+    display_age_public_keys(&age.public_keys);
+
+    println!();
+}
+
+/// Display age identity files (single or multiple)
+fn display_age_identity_files(age: &AgeInfo) {
+    if age.identity_files.len() == 1 {
         print_row(
             "Identity",
-            &info.age.identity_files[0],
-            info.age.identity_note.is_none(),
-            info.age.identity_note.as_deref(),
+            &age.identity_files[0],
+            age.identity_note.is_none(),
+            age.identity_note.as_deref(),
         );
     } else {
-        for (i, file) in info.age.identity_files.iter().enumerate() {
+        for (i, file) in age.identity_files.iter().enumerate() {
             let label = if i == 0 {
                 "Identities".to_string()
             } else {
-                "".to_string()
+                String::new()
             };
             print_row(
                 &label,
                 file,
-                info.age.identity_note.is_none(),
+                age.identity_note.is_none(),
                 if i == 0 {
-                    info.age.identity_note.as_deref()
+                    age.identity_note.as_deref()
                 } else {
                     None
                 },
             );
         }
     }
+}
 
-    if let Some(derive_val) = info.age.derive.as_ref() {
-        print_row("Derive", derive_val, true, None)
-    }
-
-    // Display public keys
-    if !info.age.public_keys.is_empty() {
-        for (i, key) in info.age.public_keys.iter().enumerate() {
+/// Display age public keys
+fn display_age_public_keys(public_keys: &[String]) {
+    if !public_keys.is_empty() {
+        for (i, key) in public_keys.iter().enumerate() {
             let label = if i == 0 {
-                if info.age.public_keys.len() == 1 {
+                if public_keys.len() == 1 {
                     "Public key"
                 } else {
                     "Public keys"
@@ -546,25 +566,19 @@ fn display_table(info: &InfoData, config: &Config, all: bool) {
             print_row(label, key, true, None);
         }
     }
+}
 
-    println!();
-
-    // Bitwarden section (only show if has content)
-    if info.bitwarden.provider.is_some() || info.bitwarden.version.is_some() {
+/// Display bitwarden information
+fn display_bitwarden_section(bitwarden: &BitwardenInfo) {
+    if bitwarden.provider.is_some() || bitwarden.version.is_some() {
         println!("{}", "Bitwarden".bright_white().bold());
-        if let Some(provider) = info.bitwarden.provider.as_ref() {
-            print_row("Provider", provider, true, None)
+        if let Some(provider) = bitwarden.provider.as_ref() {
+            print_row("Provider", provider, true, None);
         }
-        if let Some(version) = info.bitwarden.version.as_ref() {
-            print_row("Version", version, true, None)
+        if let Some(version) = bitwarden.version.as_ref() {
+            print_row("Version", version, true, None);
         }
-
         println!();
-    }
-
-    // Configuration section (only in --all mode)
-    if all {
-        show_config_table_simple(config);
     }
 }
 
@@ -590,10 +604,10 @@ fn print_row(label: &str, value: &str, ok: bool, note: Option<&str>) {
             symbol,
             label,
             formatted_value,
-            format!("({})", note_text).dimmed()
+            format!("({note_text})").dimmed()
         );
     } else {
-        println!("  {} {:14} {}", symbol, label, formatted_value);
+        println!("  {symbol} {label:14} {formatted_value}");
     }
 }
 
@@ -644,7 +658,7 @@ fn validate_configuration(source_dir: &Path) -> Result<()> {
 
     // Try to load config to validate it
     crate::load_config_with_template_support(None, source_dir)
-        .map_err(|e| anyhow::anyhow!("Configuration validation failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Configuration validation failed: {e}"))?;
 
     Ok(())
 }
@@ -681,10 +695,324 @@ fn display_json(info: &InfoData, config: &Config, all: bool) -> Result<()> {
         };
 
         let json = serde_json::to_string_pretty(&output)?;
-        println!("{}", json);
+        println!("{json}");
     } else {
         let json = serde_json::to_string_pretty(info)?;
-        println!("{}", json);
+        println!("{json}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+
+    // Tests for InfoCommand
+
+    #[test]
+    fn test_info_command_default() {
+        let cmd = InfoCommand {
+            all: false,
+            json: false,
+        };
+
+        assert!(!cmd.all);
+        assert!(!cmd.json);
+    }
+
+    #[test]
+    fn test_info_command_all_flag() {
+        let cmd = InfoCommand {
+            all: true,
+            json: false,
+        };
+
+        assert!(cmd.all);
+        assert!(!cmd.json);
+    }
+
+    #[test]
+    fn test_info_command_json_flag() {
+        let cmd = InfoCommand {
+            all: false,
+            json: true,
+        };
+
+        assert!(!cmd.all);
+        assert!(cmd.json);
+    }
+
+    #[test]
+    fn test_info_command_both_flags() {
+        let cmd = InfoCommand {
+            all: true,
+            json: true,
+        };
+
+        assert!(cmd.all);
+        assert!(cmd.json);
+    }
+
+    // Tests for InfoData structures
+
+    #[test]
+    fn test_info_data_debug() {
+        let info = InfoData {
+            guisu: GuisuInfo {
+                version: "test".to_string(),
+                config: "/test/.guisu.toml".to_string(),
+                config_note: Some("note".to_string()),
+            },
+            build: Some(BuildInfo {
+                rustc: "1.70.0".to_string(),
+                timestamp: Some("2025-01-01".to_string()),
+                git_sha: Some("abc123".to_string()),
+            }),
+            system: SystemInfo {
+                os: "Linux".to_string(),
+                architecture: "x86_64".to_string(),
+                kernel: Some("6.0.0".to_string()),
+            },
+            git: GitInfo {
+                version: Some("builtin".to_string()),
+                repository: Some("repo".to_string()),
+                branch: Some("main".to_string()),
+                sha: Some("abc".to_string()),
+                dirty: false,
+            },
+            age: AgeInfo {
+                identity_files: vec!["/path".to_string()],
+                identity_note: Some("note".to_string()),
+                derive: None,
+                public_keys: vec!["key1".to_string()],
+                version: Some("1.0".to_string()),
+            },
+            bitwarden: BitwardenInfo {
+                provider: Some("bw".to_string()),
+                version: Some("1.0".to_string()),
+            },
+        };
+
+        let debug_str = format!("{info:?}");
+        assert!(debug_str.contains("InfoData"));
+        assert!(debug_str.contains("test"));
+    }
+
+    #[test]
+    fn test_info_data_serialize() {
+        let info = InfoData {
+            guisu: GuisuInfo {
+                version: "test".to_string(),
+                config: "/config".to_string(),
+                config_note: None,
+            },
+            build: None,
+            system: SystemInfo {
+                os: "Linux".to_string(),
+                architecture: "x86_64".to_string(),
+                kernel: None,
+            },
+            git: GitInfo {
+                version: None,
+                repository: None,
+                branch: None,
+                sha: None,
+                dirty: false,
+            },
+            age: AgeInfo {
+                identity_files: vec![],
+                identity_note: None,
+                derive: None,
+                public_keys: vec![],
+                version: None,
+            },
+            bitwarden: BitwardenInfo {
+                provider: None,
+                version: None,
+            },
+        };
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"version\":\"test\""));
+        assert!(json.contains("\"os\":\"Linux\""));
+    }
+
+    #[test]
+    fn test_guisu_info_debug() {
+        let guisu = GuisuInfo {
+            version: "1.0.0".to_string(),
+            config: "/config/.guisu.toml".to_string(),
+            config_note: Some("Template file".to_string()),
+        };
+
+        let debug_str = format!("{guisu:?}");
+        assert!(debug_str.contains("GuisuInfo"));
+        assert!(debug_str.contains("1.0.0"));
+    }
+
+    #[test]
+    fn test_guisu_info_serialize() {
+        let guisu = GuisuInfo {
+            version: "1.0.0".to_string(),
+            config: "/config/.guisu.toml".to_string(),
+            config_note: None,
+        };
+
+        let json = serde_json::to_string(&guisu).unwrap();
+        assert!(json.contains("\"version\":\"1.0.0\""));
+        assert!(json.contains("\"config\":\"/config/.guisu.toml\""));
+    }
+
+    #[test]
+    fn test_build_info_debug() {
+        let build = BuildInfo {
+            rustc: "1.70.0".to_string(),
+            timestamp: Some("2025-01-01T00:00:00Z".to_string()),
+            git_sha: Some("abc123".to_string()),
+        };
+
+        let debug_str = format!("{build:?}");
+        assert!(debug_str.contains("BuildInfo"));
+        assert!(debug_str.contains("abc123"));
+    }
+
+    #[test]
+    fn test_build_info_serialize() {
+        let build = BuildInfo {
+            rustc: "1.70.0".to_string(),
+            timestamp: None,
+            git_sha: None,
+        };
+
+        let json = serde_json::to_string(&build).unwrap();
+        assert!(json.contains("\"rustc\":\"1.70.0\""));
+    }
+
+    #[test]
+    fn test_system_info_debug() {
+        let system = SystemInfo {
+            os: "Linux".to_string(),
+            architecture: "x86_64".to_string(),
+            kernel: Some("6.0.0".to_string()),
+        };
+
+        let debug_str = format!("{system:?}");
+        assert!(debug_str.contains("SystemInfo"));
+        assert!(debug_str.contains("Linux"));
+    }
+
+    #[test]
+    fn test_system_info_serialize() {
+        let system = SystemInfo {
+            os: "macOS".to_string(),
+            architecture: "aarch64".to_string(),
+            kernel: None,
+        };
+
+        let json = serde_json::to_string(&system).unwrap();
+        assert!(json.contains("\"os\":\"macOS\""));
+        assert!(json.contains("\"architecture\":\"aarch64\""));
+    }
+
+    #[test]
+    fn test_git_info_debug() {
+        let git = GitInfo {
+            version: Some("builtin".to_string()),
+            repository: Some("repo".to_string()),
+            branch: Some("main".to_string()),
+            sha: Some("abc123".to_string()),
+            dirty: false,
+        };
+
+        let debug_str = format!("{git:?}");
+        assert!(debug_str.contains("GitInfo"));
+        assert!(debug_str.contains("main"));
+    }
+
+    #[test]
+    fn test_git_info_serialize() {
+        let git = GitInfo {
+            version: None,
+            repository: None,
+            branch: None,
+            sha: None,
+            dirty: false,
+        };
+
+        let json = serde_json::to_string(&git).unwrap();
+        assert!(json.contains("\"dirty\":false"));
+    }
+
+    #[test]
+    fn test_age_info_debug() {
+        let age = AgeInfo {
+            identity_files: vec!["/path1".to_string(), "/path2".to_string()],
+            identity_note: Some("Template identity".to_string()),
+            derive: Some("key".to_string()),
+            public_keys: vec!["age1...".to_string()],
+            version: Some("1.0".to_string()),
+        };
+
+        let debug_str = format!("{age:?}");
+        assert!(debug_str.contains("AgeInfo"));
+        assert!(debug_str.contains("identity"));
+    }
+
+    #[test]
+    fn test_age_info_serialize() {
+        let age = AgeInfo {
+            identity_files: vec!["/identity".to_string()],
+            identity_note: None,
+            derive: None,
+            public_keys: vec![],
+            version: None,
+        };
+
+        let json = serde_json::to_string(&age).unwrap();
+        assert!(json.contains("\"identity_files\":[\"/identity\"]"));
+    }
+
+    #[test]
+    fn test_bitwarden_info_debug() {
+        let bw = BitwardenInfo {
+            provider: Some("bw".to_string()),
+            version: Some("1.0.0".to_string()),
+        };
+
+        let debug_str = format!("{bw:?}");
+        assert!(debug_str.contains("BitwardenInfo"));
+        assert!(debug_str.contains("bw"));
+    }
+
+    #[test]
+    fn test_bitwarden_info_serialize() {
+        let bw = BitwardenInfo {
+            provider: None,
+            version: None,
+        };
+
+        let json = serde_json::to_string(&bw).unwrap();
+        assert!(json.contains("null"));
+    }
+
+    // Tests for pure functions
+
+    #[test]
+    fn test_get_os_name_from_os_info() {
+        // This function uses os_info::get() which returns the actual OS
+        let os_name = get_os_name();
+
+        // Just verify it returns a non-empty string
+        assert!(!os_name.is_empty());
+    }
+
+    #[test]
+    fn test_get_kernel_version() {
+        // This function returns String (not Option)
+        let kernel = get_kernel_version();
+
+        // Just verify it returns a non-empty string
+        assert!(!kernel.is_empty());
+    }
 }

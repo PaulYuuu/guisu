@@ -1,3 +1,10 @@
+//! Build script for guisu-cli.
+//!
+//! Generates build-time metadata using vergen:
+//! - Build information (timestamp, target, etc.)
+//! - Rustc version information
+//! - Git repository information (commit, branch, etc.)
+
 use vergen_git2::{Emitter, Git2Builder};
 
 fn main() -> anyhow::Result<()> {

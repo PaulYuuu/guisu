@@ -40,6 +40,10 @@ impl IgnoreMatcher {
     /// Loads patterns for the current platform (global + platform-specific).
     /// Patterns starting with ! are treated as exclude patterns (re-include).
     /// Pattern order is preserved for correct gitignore-style matching.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if ignores config cannot be loaded or parsing fails
     pub fn from_ignores_toml(source_dir: &Path) -> Result<Self> {
         let config = IgnoresConfig::load(source_dir)
             .map_err(|e| crate::Error::Io(std::io::Error::other(e.to_string())))?;
@@ -85,6 +89,7 @@ impl IgnoreMatcher {
     /// - `.config/atuin/config.toml` -> matches `!.config/atuin/` -> NOT ignored
     /// - `.config/atuin/secret.key` -> matches `.config/atuin/secret.key` (after exclude) -> ignored
     /// - `.config/random/file` -> matches `.config/*` -> ignored
+    #[must_use]
     pub fn is_ignored(&self, path: &Path) -> bool {
         let path_str = path.to_string_lossy();
         let mut result = false; // Default: not ignored
@@ -93,12 +98,12 @@ impl IgnoreMatcher {
         for pattern in &self.patterns {
             match pattern {
                 PatternType::Include(pat) => {
-                    if self.matches_pattern(&path_str, pat) {
+                    if Self::matches_pattern(&path_str, pat) {
                         result = true; // Ignore
                     }
                 }
                 PatternType::Exclude(pat) => {
-                    if self.matches_pattern(&path_str, pat) {
+                    if Self::matches_pattern(&path_str, pat) {
                         result = false; // Don't ignore (re-include)
                     }
                 }
@@ -114,8 +119,8 @@ impl IgnoreMatcher {
     /// - Exact match: "file.txt"
     /// - Glob patterns: "*.log", ".config/*"
     /// - Directory prefix: ".config/" matches ".config/foo/bar"
-    /// - Directory name: "DankMaterialShell" matches ".config/DankMaterialShell" or ".config/DankMaterialShell/foo"
-    fn matches_pattern(&self, path_str: &str, pattern: &str) -> bool {
+    /// - Directory name: `DankMaterialShell` matches ".config/DankMaterialShell" or ".config/DankMaterialShell/foo"
+    fn matches_pattern(path_str: &str, pattern: &str) -> bool {
         // Exact match
         if path_str == pattern {
             return true;
@@ -137,7 +142,7 @@ impl IgnoreMatcher {
             }
 
             // Also check if path starts with pattern/ (directory at root level)
-            if path_str == pattern || path_str.starts_with(&format!("{}/", pattern)) {
+            if path_str == pattern || path_str.starts_with(&format!("{pattern}/")) {
                 return true;
             }
         }
@@ -160,5 +165,201 @@ impl IgnoreMatcher {
         }
 
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn create_test_ignores(temp: &TempDir, content: &str) -> std::path::PathBuf {
+        let guisu_dir = temp.path().join(".guisu");
+        fs::create_dir_all(&guisu_dir).unwrap();
+        fs::write(guisu_dir.join("ignores.toml"), content).unwrap();
+        temp.path().to_path_buf()
+    }
+
+    #[test]
+    fn test_from_ignores_toml_basic() {
+        let temp = TempDir::new().unwrap();
+        let content = r#"
+global = ["*.log", ".DS_Store"]
+"#;
+        let source_dir = create_test_ignores(&temp, content);
+
+        let matcher = IgnoreMatcher::from_ignores_toml(&source_dir).unwrap();
+        assert_eq!(matcher.patterns.len(), 2);
+    }
+
+    #[test]
+    fn test_from_ignores_toml_with_negation() {
+        let temp = TempDir::new().unwrap();
+        let content = r#"
+global = [".config/*", "!.config/atuin/"]
+"#;
+        let source_dir = create_test_ignores(&temp, content);
+
+        let matcher = IgnoreMatcher::from_ignores_toml(&source_dir).unwrap();
+        assert_eq!(matcher.patterns.len(), 2);
+    }
+
+    #[test]
+    fn test_is_ignored_exact_match() {
+        let temp = TempDir::new().unwrap();
+        let content = r#"global = ["file.txt"]"#;
+        let source_dir = create_test_ignores(&temp, content);
+
+        let matcher = IgnoreMatcher::from_ignores_toml(&source_dir).unwrap();
+
+        assert!(matcher.is_ignored(Path::new("file.txt")));
+        assert!(!matcher.is_ignored(Path::new("file.tx")));
+        assert!(!matcher.is_ignored(Path::new("other.txt")));
+    }
+
+    #[test]
+    fn test_is_ignored_glob_pattern() {
+        let temp = TempDir::new().unwrap();
+        let content = r#"global = ["*.log"]"#;
+        let source_dir = create_test_ignores(&temp, content);
+
+        let matcher = IgnoreMatcher::from_ignores_toml(&source_dir).unwrap();
+
+        assert!(matcher.is_ignored(Path::new("test.log")));
+        assert!(matcher.is_ignored(Path::new("error.log")));
+        assert!(!matcher.is_ignored(Path::new("test.txt")));
+    }
+
+    #[test]
+    fn test_is_ignored_directory_prefix() {
+        let temp = TempDir::new().unwrap();
+        let content = r#"global = [".config/"]"#;
+        let source_dir = create_test_ignores(&temp, content);
+
+        let matcher = IgnoreMatcher::from_ignores_toml(&source_dir).unwrap();
+
+        assert!(matcher.is_ignored(Path::new(".config/foo")));
+        assert!(matcher.is_ignored(Path::new(".config/foo/bar")));
+        assert!(!matcher.is_ignored(Path::new(".confi")));
+    }
+
+    #[test]
+    fn test_is_ignored_directory_wildcard() {
+        let temp = TempDir::new().unwrap();
+        let content = r#"global = [".config/*"]"#;
+        let source_dir = create_test_ignores(&temp, content);
+
+        let matcher = IgnoreMatcher::from_ignores_toml(&source_dir).unwrap();
+
+        assert!(matcher.is_ignored(Path::new(".config/foo")));
+        assert!(matcher.is_ignored(Path::new(".config/bar")));
+    }
+
+    #[test]
+    fn test_is_ignored_negation_pattern() {
+        let temp = TempDir::new().unwrap();
+        let content = r#"
+global = [".config/*", "!.config/atuin/"]
+"#;
+        let source_dir = create_test_ignores(&temp, content);
+
+        let matcher = IgnoreMatcher::from_ignores_toml(&source_dir).unwrap();
+
+        // Matches .config/* -> ignored
+        assert!(matcher.is_ignored(Path::new(".config/random")));
+
+        // Matches !.config/atuin/ -> not ignored
+        assert!(!matcher.is_ignored(Path::new(".config/atuin/config.toml")));
+    }
+
+    #[test]
+    fn test_is_ignored_last_match_wins() {
+        let temp = TempDir::new().unwrap();
+        let content = r#"
+global = [".config/*", "!.config/atuin/", ".config/atuin/secret"]
+"#;
+        let source_dir = create_test_ignores(&temp, content);
+
+        let matcher = IgnoreMatcher::from_ignores_toml(&source_dir).unwrap();
+
+        // Last pattern .config/atuin/secret wins
+        assert!(matcher.is_ignored(Path::new(".config/atuin/secret")));
+
+        // Negation pattern wins for other files
+        assert!(!matcher.is_ignored(Path::new(".config/atuin/config.toml")));
+    }
+
+    #[test]
+    fn test_is_ignored_directory_name_match() {
+        let temp = TempDir::new().unwrap();
+        let content = r#"global = ["DankMaterialShell"]"#;
+        let source_dir = create_test_ignores(&temp, content);
+
+        let matcher = IgnoreMatcher::from_ignores_toml(&source_dir).unwrap();
+
+        assert!(matcher.is_ignored(Path::new("DankMaterialShell")));
+        assert!(matcher.is_ignored(Path::new(".config/DankMaterialShell")));
+        assert!(matcher.is_ignored(Path::new(".config/DankMaterialShell/file.txt")));
+    }
+
+    #[test]
+    fn test_is_ignored_default_not_ignored() {
+        let temp = TempDir::new().unwrap();
+        let content = r"global = []";
+        let source_dir = create_test_ignores(&temp, content);
+
+        let matcher = IgnoreMatcher::from_ignores_toml(&source_dir).unwrap();
+
+        // No patterns means nothing is ignored
+        assert!(!matcher.is_ignored(Path::new("anything")));
+    }
+
+    #[test]
+    fn test_matches_pattern_exact() {
+        let temp = TempDir::new().unwrap();
+        let content = r#"global = ["file.txt"]"#;
+        let source_dir = create_test_ignores(&temp, content);
+
+        let _matcher = IgnoreMatcher::from_ignores_toml(&source_dir).unwrap();
+
+        assert!(IgnoreMatcher::matches_pattern("file.txt", "file.txt"));
+        assert!(!IgnoreMatcher::matches_pattern("other.txt", "file.txt"));
+    }
+
+    #[test]
+    fn test_matches_pattern_directory_with_slash() {
+        let temp = TempDir::new().unwrap();
+        let content = r#"global = ["test/"]"#;
+        let source_dir = create_test_ignores(&temp, content);
+
+        let _matcher = IgnoreMatcher::from_ignores_toml(&source_dir).unwrap();
+
+        assert!(IgnoreMatcher::matches_pattern("test/file", "test/"));
+        assert!(IgnoreMatcher::matches_pattern("test/sub/file", "test/"));
+        assert!(!IgnoreMatcher::matches_pattern("testing/file", "test/"));
+    }
+
+    #[test]
+    fn test_matches_pattern_component() {
+        let temp = TempDir::new().unwrap();
+        let content = r#"global = ["node_modules"]"#;
+        let source_dir = create_test_ignores(&temp, content);
+
+        let _matcher = IgnoreMatcher::from_ignores_toml(&source_dir).unwrap();
+
+        assert!(IgnoreMatcher::matches_pattern(
+            "node_modules",
+            "node_modules"
+        ));
+        assert!(IgnoreMatcher::matches_pattern(
+            "project/node_modules",
+            "node_modules"
+        ));
+        assert!(IgnoreMatcher::matches_pattern(
+            "node_modules/pkg",
+            "node_modules"
+        ));
     }
 }

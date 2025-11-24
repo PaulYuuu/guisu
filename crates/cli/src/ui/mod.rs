@@ -7,14 +7,23 @@
 //! - Progress indicators
 //! - Icons and themes
 
+/// Diff viewer implementations
 pub mod diffviewer;
+/// Text editor integration
 pub mod editor;
+/// Icon definitions and file type detection
 pub mod icons;
+/// Merge conflict resolution
 pub mod merge;
+/// Change preview utilities
 pub mod preview;
+/// Progress indicators
 pub mod progress;
+/// Interactive user prompts
 pub mod prompt;
+/// UI theme configuration
 pub mod theme;
+/// Interactive file viewer
 pub mod viewer;
 
 pub use diffviewer::{DiffFormat, DiffViewer};

@@ -63,8 +63,7 @@ fn run_impl(
     let is_encrypted = source_file
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e == "age")
-        .unwrap_or(false);
+        .is_some_and(|e| e == "age");
 
     if is_encrypted {
         edit_encrypted_file(&source_file, config)?;
@@ -157,31 +156,31 @@ fn find_source_file(
 }
 
 /// Get the editor command to use
-fn get_editor(config: &Config) -> Result<(String, Vec<String>)> {
-    // 1. Use configured editor if available
-    if let Some(editor_cmd) = config.editor_command()
-        && let Some((cmd, args)) = editor_cmd.split_first()
-    {
-        return Ok((cmd.clone(), args.to_vec()));
-    }
-
-    // 2. Try $VISUAL environment variable
-    if let Ok(visual) = env::var("VISUAL") {
-        return Ok((visual, vec![]));
-    }
-
-    // 3. Try $EDITOR environment variable
-    if let Ok(editor) = env::var("EDITOR") {
-        return Ok((editor, vec![]));
-    }
-
-    // 4. Use system default editor
+fn get_editor(config: &Config) -> (String, Vec<String>) {
+    // 4. System default editor constants
     #[cfg(unix)]
     const DEFAULT_EDITOR: &str = "vi";
     #[cfg(windows)]
     const DEFAULT_EDITOR: &str = "notepad.exe";
 
-    Ok((DEFAULT_EDITOR.to_string(), vec![]))
+    // 1. Use configured editor if available
+    if let Some(editor_cmd) = config.editor_command()
+        && let Some((cmd, args)) = editor_cmd.split_first()
+    {
+        return (cmd.clone(), args.to_vec());
+    }
+
+    // 2. Try $VISUAL environment variable
+    if let Ok(visual) = env::var("VISUAL") {
+        return (visual, vec![]);
+    }
+
+    // 3. Try $EDITOR environment variable
+    if let Ok(editor) = env::var("EDITOR") {
+        return (editor, vec![]);
+    }
+
+    (DEFAULT_EDITOR.to_string(), vec![])
 }
 
 /// Run the editor with the given file
@@ -190,10 +189,10 @@ fn run_editor(editor: &str, args: &[String], file: &Path) -> Result<()> {
         .args(args)
         .arg(file)
         .status()
-        .with_context(|| format!("Failed to run editor: {}", editor))?;
+        .with_context(|| format!("Failed to run editor: {editor}"))?;
 
     if !status.success() {
-        anyhow::bail!("Editor exited with error: {}", status);
+        anyhow::bail!("Editor exited with error: {status}");
     }
 
     Ok(())
@@ -217,7 +216,7 @@ fn edit_regular_file(source_file: &Path, config: &Config) -> Result<()> {
     }
 
     // No inline encryption or no identities - edit normally
-    let (editor, args) = get_editor(config)?;
+    let (editor, args) = get_editor(config);
     run_editor(&editor, &args, source_file)
 }
 
@@ -255,7 +254,7 @@ fn edit_file_with_inline_encryption(
         .context("Failed to write decrypted content to temporary file")?;
 
     // Open editor
-    let (editor, args) = get_editor(config)?;
+    let (editor, args) = get_editor(config);
     run_editor(&editor, &args, &temp_file)?;
 
     // Read edited content
@@ -271,7 +270,10 @@ fn edit_file_with_inline_encryption(
     let mut final_content = edited_content;
 
     // Convert all identities to recipients for re-encryption
-    let recipients: Vec<_> = identities.iter().map(|id| id.to_public()).collect();
+    let recipients: Vec<_> = identities
+        .iter()
+        .map(guisu_crypto::Identity::to_public)
+        .collect();
 
     for (_, _, encrypted_value) in encrypted_positions {
         if let Ok(decrypted_value) = guisu_crypto::decrypt_inline(&encrypted_value, identities)
@@ -327,7 +329,7 @@ fn edit_encrypted_file(source_file: &Path, config: &Config) -> Result<()> {
         .context("Failed to write decrypted content to temporary file")?;
 
     // Get editor and run it
-    let (editor, args) = get_editor(config)?;
+    let (editor, args) = get_editor(config);
     run_editor(&editor, &args, &temp_file)?;
 
     // Read the edited content
@@ -340,7 +342,10 @@ fn edit_encrypted_file(source_file: &Path, config: &Config) -> Result<()> {
     }
 
     // Re-encrypt the content with all recipients
-    let recipients: Vec<_> = identities.iter().map(|id| id.to_public()).collect();
+    let recipients: Vec<_> = identities
+        .iter()
+        .map(guisu_crypto::Identity::to_public)
+        .collect();
     let reencrypted_content =
         encrypt(&edited_content, &recipients).context("Failed to re-encrypt file")?;
 
@@ -349,4 +354,256 @@ fn edit_encrypted_file(source_file: &Path, config: &Config) -> Result<()> {
         .with_context(|| format!("Failed to write encrypted file: {}", source_file.display()))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+
+    use tempfile::TempDir;
+
+    // Helper to create test config
+    fn test_config() -> Config {
+        Config::default()
+    }
+
+    // Helper to create test config with age identity
+    fn test_config_with_identity(identity_path: &Path) -> Config {
+        let mut config = Config::default();
+        config.age.identity = Some(identity_path.to_path_buf());
+        config
+    }
+
+    #[test]
+    fn test_age_value_regex_matches_simple() {
+        let content = "password = age:YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOQ==";
+        assert!(AGE_VALUE_REGEX.is_match(content));
+    }
+
+    #[test]
+    fn test_age_value_regex_matches_multiple() {
+        let content = "pass1 = age:ABC123+/= and pass2 = age:XYZ789+/=";
+        let matches: Vec<_> = AGE_VALUE_REGEX.find_iter(content).collect();
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn test_age_value_regex_no_match() {
+        let content = "This is plain text without encryption";
+        assert!(!AGE_VALUE_REGEX.is_match(content));
+    }
+
+    #[test]
+    fn test_find_source_file_plain() {
+        let temp = TempDir::new().expect("Failed to create temp dir");
+        // Canonicalize temp path to resolve symlinks (like /var -> /private/var on macOS)
+        let temp_canon = std::fs::canonicalize(temp.path()).expect("Failed to canonicalize temp");
+        let source_dir = temp_canon.join("src");
+        let dest_dir = temp_canon.join("dst");
+
+        // Create directories
+        std::fs::create_dir_all(&dest_dir).expect("Failed to create dest dir");
+        std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
+
+        // Create a plain file in source
+        let source_file = source_dir.join("home").join("test.txt");
+        std::fs::write(&source_file, "content").expect("Failed to write source file");
+
+        // Create corresponding target file in destination
+        let target_file = dest_dir.join("test.txt");
+        std::fs::write(&target_file, "content").expect("Failed to write target file");
+
+        let config = test_config();
+
+        let result = find_source_file(&source_dir, &dest_dir, &target_file, &config);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), source_file);
+    }
+
+    #[test]
+    fn test_find_source_file_encrypted() {
+        let temp = TempDir::new().expect("Failed to create temp dir");
+        let temp_canon = std::fs::canonicalize(temp.path()).expect("Failed to canonicalize temp");
+        let source_dir = temp_canon.join("src");
+        let dest_dir = temp_canon.join("dst");
+
+        std::fs::create_dir_all(&dest_dir).expect("Failed to create dest dir");
+        std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
+
+        // Create encrypted file in source (with .age extension)
+        let source_file = source_dir.join("home").join("test.txt.age");
+        std::fs::write(&source_file, "encrypted").expect("Failed to write source file");
+
+        // Create corresponding target file in destination
+        let target_file = dest_dir.join("test.txt");
+        std::fs::write(&target_file, "plain").expect("Failed to write target file");
+
+        let config = test_config();
+
+        let result = find_source_file(&source_dir, &dest_dir, &target_file, &config);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), source_file);
+    }
+
+    #[test]
+    fn test_find_source_file_template() {
+        let temp = TempDir::new().expect("Failed to create temp dir");
+        let temp_canon = std::fs::canonicalize(temp.path()).expect("Failed to canonicalize temp");
+        let source_dir = temp_canon.join("src");
+        let dest_dir = temp_canon.join("dst");
+
+        std::fs::create_dir_all(&dest_dir).expect("Failed to create dest dir");
+        std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
+
+        // Create template file in source (with .j2 extension)
+        let source_file = source_dir.join("home").join("test.txt.j2");
+        std::fs::write(&source_file, "template").expect("Failed to write source file");
+
+        // Create corresponding target file in destination
+        let target_file = dest_dir.join("test.txt");
+        std::fs::write(&target_file, "rendered").expect("Failed to write target file");
+
+        let config = test_config();
+
+        let result = find_source_file(&source_dir, &dest_dir, &target_file, &config);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), source_file);
+    }
+
+    #[test]
+    fn test_find_source_file_encrypted_template() {
+        let temp = TempDir::new().expect("Failed to create temp dir");
+        let temp_canon = std::fs::canonicalize(temp.path()).expect("Failed to canonicalize temp");
+        let source_dir = temp_canon.join("src");
+        let dest_dir = temp_canon.join("dst");
+
+        std::fs::create_dir_all(&dest_dir).expect("Failed to create dest dir");
+        std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
+
+        // Create encrypted template file in source (with .j2.age extension)
+        let source_file = source_dir.join("home").join("test.txt.j2.age");
+        std::fs::write(&source_file, "encrypted template").expect("Failed to write source file");
+
+        // Create corresponding target file in destination
+        let target_file = dest_dir.join("test.txt");
+        std::fs::write(&target_file, "rendered").expect("Failed to write target file");
+
+        let config = test_config();
+
+        let result = find_source_file(&source_dir, &dest_dir, &target_file, &config);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), source_file);
+    }
+
+    #[test]
+    fn test_find_source_file_not_found() {
+        let temp = TempDir::new().expect("Failed to create temp dir");
+        let temp_canon = std::fs::canonicalize(temp.path()).expect("Failed to canonicalize temp");
+        let source_dir = temp_canon.join("src");
+        let dest_dir = temp_canon.join("dst");
+
+        std::fs::create_dir_all(&dest_dir).expect("Failed to create dest dir");
+        std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
+
+        // Create target file in destination but no corresponding source file
+        let target_file = dest_dir.join("test.txt");
+        std::fs::write(&target_file, "content").expect("Failed to write target file");
+
+        let config = test_config();
+
+        let result = find_source_file(&source_dir, &dest_dir, &target_file, &config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not managed"));
+    }
+
+    #[test]
+    fn test_find_source_file_not_under_dest() {
+        let temp = TempDir::new().expect("Failed to create temp dir");
+        let temp_canon = std::fs::canonicalize(temp.path()).expect("Failed to canonicalize temp");
+        let source_dir = temp_canon.join("src");
+        let dest_dir = temp_canon.join("dst");
+
+        std::fs::create_dir_all(&dest_dir).expect("Failed to create dest dir");
+
+        // Create target file outside destination directory
+        let target_file = temp_canon.join("outside.txt");
+        std::fs::write(&target_file, "content").expect("Failed to write target file");
+
+        let config = test_config();
+
+        let result = find_source_file(&source_dir, &dest_dir, &target_file, &config);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not under destination")
+        );
+    }
+
+    #[test]
+    fn test_get_editor_from_config() {
+        let mut config = Config::default();
+        config.general.editor = Some("vim".to_string());
+        config.general.editor_args = vec!["-n".to_string()];
+
+        let (editor, args) = get_editor(&config);
+        assert_eq!(editor, "vim");
+        assert_eq!(args, vec!["-n".to_string()]);
+    }
+
+    #[test]
+    fn test_get_editor_from_config_without_args() {
+        let mut config = Config::default();
+        config.general.editor = Some("emacs".to_string());
+
+        let (editor, args) = get_editor(&config);
+        assert_eq!(editor, "emacs");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_age_value_regex_with_padding() {
+        // Test with various base64 padding scenarios
+        let test_cases = vec![
+            "age:ABC123",   // No padding
+            "age:ABC123=",  // Single padding
+            "age:ABC123==", // Double padding
+            "age:A+B/C=",   // With + and /
+        ];
+
+        for case in test_cases {
+            assert!(AGE_VALUE_REGEX.is_match(case), "Failed to match: {case}");
+        }
+    }
+
+    #[test]
+    fn test_find_source_file_prefers_plain() {
+        let temp = TempDir::new().expect("Failed to create temp dir");
+        let temp_canon = std::fs::canonicalize(temp.path()).expect("Failed to canonicalize temp");
+        let source_dir = temp_canon.join("src");
+        let dest_dir = temp_canon.join("dst");
+
+        std::fs::create_dir_all(&dest_dir).expect("Failed to create dest dir");
+        std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
+
+        // Create both plain and .age versions
+        let plain_file = source_dir.join("home").join("test.txt");
+        let age_file = source_dir.join("home").join("test.txt.age");
+
+        std::fs::write(&plain_file, "plain").expect("Failed to write plain file");
+        std::fs::write(&age_file, "encrypted").expect("Failed to write age file");
+
+        // Create target
+        let target_file = dest_dir.join("test.txt");
+        std::fs::write(&target_file, "content").expect("Failed to write target file");
+
+        let config = test_config();
+
+        let result = find_source_file(&source_dir, &dest_dir, &target_file, &config);
+        assert!(result.is_ok());
+        // Should prefer plain file (checked first in candidates list)
+        assert_eq!(result.unwrap(), plain_file);
+    }
 }

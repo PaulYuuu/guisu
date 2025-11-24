@@ -56,40 +56,46 @@ pub enum SourceEntry {
 
 impl SourceEntry {
     /// Get the source path for this entry
+    #[must_use]
     pub fn source_path(&self) -> &SourceRelPath {
         match self {
-            SourceEntry::File { source_path, .. } => source_path,
-            SourceEntry::Directory { source_path, .. } => source_path,
-            SourceEntry::Symlink { source_path, .. } => source_path,
+            SourceEntry::File { source_path, .. }
+            | SourceEntry::Directory { source_path, .. }
+            | SourceEntry::Symlink { source_path, .. } => source_path,
         }
     }
 
     /// Get the target path for this entry
+    #[must_use]
     pub fn target_path(&self) -> &RelPath {
         match self {
-            SourceEntry::File { target_path, .. } => target_path,
-            SourceEntry::Directory { target_path, .. } => target_path,
-            SourceEntry::Symlink { target_path, .. } => target_path,
+            SourceEntry::File { target_path, .. }
+            | SourceEntry::Directory { target_path, .. }
+            | SourceEntry::Symlink { target_path, .. } => target_path,
         }
     }
 
     /// Get the attributes for this entry (if applicable)
+    #[must_use]
     pub fn attributes(&self) -> Option<&FileAttributes> {
         match self {
-            SourceEntry::File { attributes, .. } => Some(attributes),
-            SourceEntry::Directory { attributes, .. } => Some(attributes),
+            SourceEntry::File { attributes, .. } | SourceEntry::Directory { attributes, .. } => {
+                Some(attributes)
+            }
             SourceEntry::Symlink { .. } => None,
         }
     }
 
     /// Check if this entry is a template
     pub fn is_template(&self) -> bool {
-        self.attributes().map(|a| a.is_template()).unwrap_or(false)
+        self.attributes()
+            .is_some_and(super::attr::FileAttributes::is_template)
     }
 
     /// Check if this entry is encrypted
     pub fn is_encrypted(&self) -> bool {
-        self.attributes().map(|a| a.is_encrypted()).unwrap_or(false)
+        self.attributes()
+            .is_some_and(super::attr::FileAttributes::is_encrypted)
     }
 }
 
@@ -139,27 +145,29 @@ pub enum TargetEntry {
 impl TargetEntry {
     /// Get the destination path for this entry
     #[inline]
+    #[must_use]
     pub fn path(&self) -> &RelPath {
         match self {
-            TargetEntry::File { path, .. } => path,
-            TargetEntry::Directory { path, .. } => path,
-            TargetEntry::Symlink { path, .. } => path,
-            TargetEntry::Remove { path } => path,
+            TargetEntry::File { path, .. }
+            | TargetEntry::Directory { path, .. }
+            | TargetEntry::Symlink { path, .. }
+            | TargetEntry::Remove { path } => path,
         }
     }
 
     /// Get the file mode if applicable
     #[inline]
+    #[must_use]
     pub fn mode(&self) -> Option<u32> {
         match self {
-            TargetEntry::File { mode, .. } => *mode,
-            TargetEntry::Directory { mode, .. } => *mode,
+            TargetEntry::File { mode, .. } | TargetEntry::Directory { mode, .. } => *mode,
             _ => None,
         }
     }
 
     /// Check if this is a removal entry
     #[inline]
+    #[must_use]
     pub fn is_removal(&self) -> bool {
         matches!(self, TargetEntry::Remove { .. })
     }
@@ -199,6 +207,7 @@ pub enum EntryKind {
 
 impl DestEntry {
     /// Create a new destination entry for a file
+    #[must_use]
     pub fn file(path: RelPath, content: Vec<u8>, mode: Option<u32>) -> Self {
         Self {
             path,
@@ -210,6 +219,7 @@ impl DestEntry {
     }
 
     /// Create a new destination entry for a directory
+    #[must_use]
     pub fn directory(path: RelPath, mode: Option<u32>) -> Self {
         Self {
             path,
@@ -221,6 +231,7 @@ impl DestEntry {
     }
 
     /// Create a new destination entry for a symlink
+    #[must_use]
     pub fn symlink(path: RelPath, target: PathBuf) -> Self {
         Self {
             path,
@@ -232,6 +243,7 @@ impl DestEntry {
     }
 
     /// Create a new destination entry for a missing file
+    #[must_use]
     pub fn missing(path: RelPath) -> Self {
         Self {
             path,
@@ -246,6 +258,7 @@ impl DestEntry {
     ///
     /// Returns `true` if the destination entry matches the target entry
     /// (same type, content, and permissions).
+    #[must_use]
     pub fn matches(&self, target: &TargetEntry) -> bool {
         match (self.kind, target) {
             (EntryKind::File, TargetEntry::File { content, mode, .. }) => {

@@ -67,6 +67,7 @@ impl From<ThreeWayComparisonResult> for Option<ChangeType> {
 /// # Returns
 ///
 /// Returns the comparison result indicating which states changed
+#[must_use]
 pub fn compare_three_way(
     source_hash: &[u8],
     dest_hash: &[u8],
@@ -118,6 +119,7 @@ pub struct ConflictHandler {
 
 impl ConflictHandler {
     /// Create a new conflict handler
+    #[must_use]
     pub fn new(
         config: std::sync::Arc<Config>,
         identities: std::sync::Arc<Vec<guisu_crypto::Identity>>,
@@ -150,6 +152,10 @@ impl ConflictHandler {
     /// # Returns
     ///
     /// Returns the type of change detected, or None if file is up to date
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading the destination file fails
     pub fn detect_change_type(
         entry: &TargetEntry,
         dest_abs: &AbsPath,
@@ -157,9 +163,12 @@ impl ConflictHandler {
         identities: &[guisu_crypto::Identity],
     ) -> Result<Option<ChangeType>> {
         // Only check files
-        let target_content = match entry {
-            TargetEntry::File { content, .. } => content,
-            _ => return Ok(None),
+        let TargetEntry::File {
+            content: target_content,
+            ..
+        } = entry
+        else {
+            return Ok(None);
         };
 
         let dest_path = dest_abs.join(entry.path());
@@ -171,27 +180,24 @@ impl ConflictHandler {
 
         // Read actual content
         let actual_content = fs::read(dest_path.as_path())
-            .with_context(|| format!("Failed to read destination file: {}", dest_path))?;
+            .with_context(|| format!("Failed to read destination file: {dest_path}"))?;
 
         // Decrypt inline age: values in target_content before hashing (to match status behavior)
-        let target_content_decrypted = if !identities.is_empty() {
-            if let Ok(content_str) = String::from_utf8(target_content.to_vec()) {
-                if content_str.contains("age:") {
-                    if let Ok(decrypted) =
-                        guisu_crypto::decrypt_file_content(&content_str, identities)
-                    {
-                        decrypted.into_bytes()
-                    } else {
-                        target_content.to_vec()
-                    }
+        let target_content_decrypted = if identities.is_empty() {
+            target_content.clone()
+        } else if let Ok(content_str) = String::from_utf8(target_content.clone()) {
+            if content_str.contains("age:") {
+                if let Ok(decrypted) = guisu_crypto::decrypt_file_content(&content_str, identities)
+                {
+                    decrypted.into_bytes()
                 } else {
-                    target_content.to_vec()
+                    target_content.clone()
                 }
             } else {
-                target_content.to_vec()
+                target_content.clone()
             }
         } else {
-            target_content.to_vec()
+            target_content.clone()
         };
 
         // Compute hashes for three-way comparison
@@ -209,6 +215,10 @@ impl ConflictHandler {
     }
 
     /// Check if a conflict exists (for backward compatibility)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if detecting the change type fails
     pub fn has_conflict(
         entry: &TargetEntry,
         dest_abs: &AbsPath,
@@ -230,6 +240,13 @@ impl ConflictHandler {
     /// # Returns
     ///
     /// Returns the user's chosen action
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Reading file content fails
+    /// - Generating diff or preview fails
+    /// - User interaction (TUI prompt) fails
     pub fn prompt_action(
         &mut self,
         entry: &TargetEntry,
@@ -242,17 +259,21 @@ impl ConflictHandler {
             return Ok(ConflictAction::Override);
         }
 
-        let (target_content, _target_mode) = match entry {
-            TargetEntry::File { content, mode, .. } => (content, mode),
-            _ => return Err(anyhow!("Cannot handle conflict for non-file entry")),
+        let TargetEntry::File {
+            content: target_content,
+            mode: _target_mode,
+            ..
+        } = entry
+        else {
+            return Err(anyhow!("Cannot handle conflict for non-file entry"));
         };
 
         // Decrypt inline age: values in target_content before displaying
-        let target_content = self.decrypt_inline_age_values(target_content)?;
+        let target_content = self.decrypt_inline_age_values(target_content);
 
         let dest_path = dest_abs.join(entry.path());
         let actual_content = fs::read(dest_path.as_path())
-            .with_context(|| format!("Failed to read destination file: {}", dest_path))?;
+            .with_context(|| format!("Failed to read destination file: {dest_path}"))?;
 
         // Check if binary
         if is_binary(&target_content) || is_binary(&actual_content) {
@@ -272,7 +293,7 @@ impl ConflictHandler {
             println!("Choose Override to use source version, or Skip to keep destination.\n");
 
             // Simple prompt for binary files
-            return self.simple_prompt(entry);
+            return Self::simple_prompt(entry);
         }
 
         // Generate change summary and preview
@@ -309,7 +330,7 @@ impl ConflictHandler {
     }
 
     /// Simple prompt for binary files (no preview/merge available)
-    fn simple_prompt(&self, _entry: &TargetEntry) -> Result<ConflictAction> {
+    fn simple_prompt(_entry: &TargetEntry) -> Result<ConflictAction> {
         use dialoguer::{Select, theme::ColorfulTheme};
 
         let options = vec![
@@ -340,14 +361,18 @@ impl ConflictHandler {
 
     /// Show a diff between target and actual states
     fn show_diff(&self, entry: &TargetEntry, dest_abs: &AbsPath) -> Result<()> {
-        let (target_content, target_mode) = match entry {
-            TargetEntry::File { content, mode, .. } => (content, mode),
-            _ => return Ok(()),
+        let TargetEntry::File {
+            content: target_content,
+            mode: target_mode,
+            ..
+        } = entry
+        else {
+            return Ok(());
         };
 
         let dest_path = dest_abs.join(entry.path());
         let actual_content = fs::read(dest_path.as_path())
-            .with_context(|| format!("Failed to read destination file: {}", dest_path))?;
+            .with_context(|| format!("Failed to read destination file: {dest_path}"))?;
 
         // Get actual mode
         #[cfg(unix)]
@@ -361,7 +386,7 @@ impl ConflictHandler {
         let actual_mode: Option<u32> = None;
 
         // Decrypt inline age: values in target_content before displaying
-        let target_content = self.decrypt_inline_age_values(target_content)?;
+        let target_content = self.decrypt_inline_age_values(target_content);
 
         // Check if binary
         if is_binary(&target_content) || is_binary(&actual_content) {
@@ -388,8 +413,8 @@ impl ConflictHandler {
             const PERM_MASK: u32 = 0o7777;
             if (target_m & PERM_MASK) != (actual_m & PERM_MASK) {
                 println!();
-                println!("old mode {:06o}", actual_m);
-                println!("new mode {:06o}", target_m);
+                println!("old mode {actual_m:06o}");
+                println!("new mode {target_m:06o}");
             }
         }
 
@@ -402,30 +427,29 @@ impl ConflictHandler {
     /// allowing source files to store encrypted secrets while previews show plaintext.
     ///
     /// If decryption fails or no identities are available, returns the original content unchanged.
-    fn decrypt_inline_age_values(&self, content: &[u8]) -> Result<Vec<u8>> {
+    fn decrypt_inline_age_values(&self, content: &[u8]) -> Vec<u8> {
         // Convert to string (if not valid UTF-8, return original)
-        let content_str = match String::from_utf8(content.to_vec()) {
-            Ok(s) => s,
-            Err(_) => return Ok(content.to_vec()), // Binary file, return as-is
+        let Ok(content_str) = String::from_utf8(content.to_vec()) else {
+            return content.to_vec(); // Binary file, return as-is
         };
 
         // Check if content contains age: prefix (quick check before decrypting)
         if !content_str.contains("age:") {
-            return Ok(content.to_vec()); // No encrypted values, return as-is
+            return content.to_vec(); // No encrypted values, return as-is
         }
 
         // If no identities available, return original content
         if self.identities.is_empty() {
-            return Ok(content.to_vec());
+            return content.to_vec();
         }
 
         // Decrypt all inline age values
         match guisu_crypto::decrypt_file_content(&content_str, &self.identities) {
-            Ok(decrypted) => Ok(decrypted.into_bytes()),
+            Ok(decrypted) => decrypted.into_bytes(),
             Err(_) => {
                 // If decryption fails, return original content
                 // This allows the preview to show encrypted values
-                Ok(content.to_vec())
+                content.to_vec()
             }
         }
     }
@@ -435,4 +459,217 @@ impl ConflictHandler {
 fn is_binary(content: &[u8]) -> bool {
     // Simple heuristic: check for null bytes in first 8KB
     content.iter().take(8000).any(|&b| b == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+
+    // Helper function to create hash from string
+    fn hash(s: &str) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(s.as_bytes());
+        hasher.finalize().to_vec()
+    }
+
+    // Tests for compare_three_way function
+
+    #[test]
+    fn test_compare_three_way_no_change() {
+        // All three states match
+        let source_hash = hash("content");
+        let dest_hash = hash("content");
+        let base_hash = hash("content");
+
+        let result = compare_three_way(&source_hash, &dest_hash, Some(&base_hash));
+        assert_eq!(result, ThreeWayComparisonResult::NoChange);
+    }
+
+    #[test]
+    fn test_compare_three_way_source_changed() {
+        // Only source was updated
+        let source_hash = hash("new content");
+        let dest_hash = hash("old content");
+        let base_hash = hash("old content");
+
+        let result = compare_three_way(&source_hash, &dest_hash, Some(&base_hash));
+        assert_eq!(result, ThreeWayComparisonResult::SourceChanged);
+    }
+
+    #[test]
+    fn test_compare_three_way_destination_changed() {
+        // Only destination was modified
+        let source_hash = hash("old content");
+        let dest_hash = hash("modified content");
+        let base_hash = hash("old content");
+
+        let result = compare_three_way(&source_hash, &dest_hash, Some(&base_hash));
+        assert_eq!(result, ThreeWayComparisonResult::DestinationChanged);
+    }
+
+    #[test]
+    fn test_compare_three_way_both_changed_conflict() {
+        // Both source and destination changed to different values
+        let source_hash = hash("source update");
+        let dest_hash = hash("dest modification");
+        let base_hash = hash("original");
+
+        let result = compare_three_way(&source_hash, &dest_hash, Some(&base_hash));
+        assert_eq!(result, ThreeWayComparisonResult::BothChanged);
+    }
+
+    #[test]
+    fn test_compare_three_way_both_changed_converged() {
+        // Both changed but ended up with same content
+        let source_hash = hash("same new content");
+        let dest_hash = hash("same new content");
+        let base_hash = hash("old content");
+
+        let result = compare_three_way(&source_hash, &dest_hash, Some(&base_hash));
+        assert_eq!(result, ThreeWayComparisonResult::Converged);
+    }
+
+    #[test]
+    fn test_compare_three_way_no_base_same_content() {
+        // No base state, source and destination match
+        let source_hash = hash("content");
+        let dest_hash = hash("content");
+
+        let result = compare_three_way(&source_hash, &dest_hash, None);
+        assert_eq!(result, ThreeWayComparisonResult::NoChange);
+    }
+
+    #[test]
+    fn test_compare_three_way_no_base_different_content() {
+        // No base state, content differs (treat as source update)
+        let source_hash = hash("source content");
+        let dest_hash = hash("dest content");
+
+        let result = compare_three_way(&source_hash, &dest_hash, None);
+        assert_eq!(result, ThreeWayComparisonResult::SourceChanged);
+    }
+
+    // Tests for is_binary function
+
+    #[test]
+    fn test_is_binary_empty_content() {
+        assert!(!is_binary(b""));
+    }
+
+    #[test]
+    fn test_is_binary_text_content() {
+        let text = b"This is plain text content\nWith multiple lines\nNo null bytes";
+        assert!(!is_binary(text));
+    }
+
+    #[test]
+    fn test_is_binary_with_null_byte() {
+        let binary = b"Some text\0with a null byte";
+        assert!(is_binary(binary));
+    }
+
+    #[test]
+    fn test_is_binary_null_at_start() {
+        let binary = b"\0Binary content starts with null";
+        assert!(is_binary(binary));
+    }
+
+    #[test]
+    fn test_is_binary_null_at_end() {
+        let binary = b"Binary content ends with null\0";
+        assert!(is_binary(binary));
+    }
+
+    #[test]
+    fn test_is_binary_utf8_with_unicode() {
+        let text = "Unicode text with émojis 🚀 and special chars: ñ, ü, ö".as_bytes();
+        assert!(!is_binary(text));
+    }
+
+    #[test]
+    fn test_is_binary_large_text_file() {
+        // Create large text content (> 8KB)
+        let large_text = "Line of text\n".repeat(1000);
+        assert!(!is_binary(large_text.as_bytes()));
+    }
+
+    #[test]
+    fn test_is_binary_null_beyond_8kb() {
+        // Null byte after 8KB should not be detected
+        let mut content = vec![b'a'; 9000];
+        content[8500] = 0; // Put null beyond the check limit
+        assert!(!is_binary(&content));
+    }
+
+    #[test]
+    fn test_is_binary_null_within_8kb() {
+        // Null byte within 8KB should be detected
+        let mut content = vec![b'a'; 9000];
+        content[7000] = 0; // Put null within check limit
+        assert!(is_binary(&content));
+    }
+
+    // Tests for From<ThreeWayComparisonResult> conversion
+
+    #[test]
+    fn test_conversion_no_change() {
+        let result = ThreeWayComparisonResult::NoChange;
+        let change_type: Option<ChangeType> = result.into();
+        assert_eq!(change_type, None);
+    }
+
+    #[test]
+    fn test_conversion_source_changed() {
+        let result = ThreeWayComparisonResult::SourceChanged;
+        let change_type: Option<ChangeType> = result.into();
+        assert_eq!(change_type, Some(ChangeType::SourceUpdate));
+    }
+
+    #[test]
+    fn test_conversion_destination_changed() {
+        let result = ThreeWayComparisonResult::DestinationChanged;
+        let change_type: Option<ChangeType> = result.into();
+        assert_eq!(change_type, Some(ChangeType::LocalModification));
+    }
+
+    #[test]
+    fn test_conversion_both_changed() {
+        let result = ThreeWayComparisonResult::BothChanged;
+        let change_type: Option<ChangeType> = result.into();
+        assert_eq!(change_type, Some(ChangeType::TrueConflict));
+    }
+
+    #[test]
+    fn test_conversion_converged() {
+        let result = ThreeWayComparisonResult::Converged;
+        let change_type: Option<ChangeType> = result.into();
+        assert_eq!(change_type, None);
+    }
+
+    // Tests for ChangeType and ThreeWayComparisonResult enums
+
+    #[test]
+    fn test_change_type_equality() {
+        assert_eq!(ChangeType::LocalModification, ChangeType::LocalModification);
+        assert_ne!(ChangeType::LocalModification, ChangeType::SourceUpdate);
+        assert_ne!(ChangeType::LocalModification, ChangeType::TrueConflict);
+    }
+
+    #[test]
+    fn test_three_way_comparison_result_equality() {
+        assert_eq!(
+            ThreeWayComparisonResult::NoChange,
+            ThreeWayComparisonResult::NoChange
+        );
+        assert_ne!(
+            ThreeWayComparisonResult::NoChange,
+            ThreeWayComparisonResult::SourceChanged
+        );
+        assert_ne!(
+            ThreeWayComparisonResult::BothChanged,
+            ThreeWayComparisonResult::Converged
+        );
+    }
 }

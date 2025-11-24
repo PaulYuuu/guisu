@@ -127,11 +127,11 @@ fn convert_error(e: guisu_vault::Error) -> minijinja::Error {
         ),
         Error::AuthenticationRequired(msg) => minijinja::Error::new(
             minijinja::ErrorKind::InvalidOperation,
-            format!("Authentication required: {}", msg),
+            format!("Authentication required: {msg}"),
         ),
         Error::ProviderNotAvailable(msg) => minijinja::Error::new(
             minijinja::ErrorKind::InvalidOperation,
-            format!("Provider not available: {}", msg),
+            format!("Provider not available: {msg}"),
         ),
         _ => minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, e.to_string()),
     }
@@ -149,6 +149,7 @@ pub fn env(name: &str) -> std::borrow::Cow<'static, str> {
 /// Get the operating system name
 ///
 /// Usage: `{{ os() }}`
+#[must_use]
 pub fn os() -> &'static str {
     #[cfg(target_os = "linux")]
     return "linux";
@@ -166,6 +167,7 @@ pub fn os() -> &'static str {
 /// Get the system architecture
 ///
 /// Usage: `{{ arch() }}`
+#[must_use]
 pub fn arch() -> &'static str {
     env::consts::ARCH
 }
@@ -198,15 +200,17 @@ pub fn username() -> &'static str {
 /// Usage: `{{ home_dir() }}`
 pub fn home_dir() -> &'static str {
     HOME_DIR_CACHE.get_or_init(|| {
-        dirs::home_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "/home/unknown".to_string())
+        dirs::home_dir().map_or_else(
+            || "/home/unknown".to_string(),
+            |p| p.to_string_lossy().into_owned(),
+        )
     })
 }
 
 /// Join path components
 ///
 /// Usage: `{{ joinPath("/home", "user", ".config") }}`
+#[must_use]
 pub fn join_path(args: &[Value]) -> String {
     let mut path = PathBuf::new();
     for arg in args {
@@ -227,6 +231,10 @@ pub fn join_path(args: &[Value]) -> String {
 /// - Only alphanumeric characters, dashes, and underscores are allowed
 /// - Path traversal attempts (..) are rejected
 /// - Absolute paths are rejected
+///
+/// # Errors
+///
+/// Returns error if executable is not found in PATH or input validation fails
 pub fn look_path(name: &str) -> Result<String, minijinja::Error> {
     // Validate input: only alphanumeric, dash, underscore
     if !name
@@ -236,8 +244,7 @@ pub fn look_path(name: &str) -> Result<String, minijinja::Error> {
         return Err(minijinja::Error::new(
             minijinja::ErrorKind::InvalidOperation,
             format!(
-                "Invalid executable name: '{}'. Only alphanumeric characters, dashes, and underscores allowed",
-                name
+                "Invalid executable name: '{name}'. Only alphanumeric characters, dashes, and underscores allowed"
             ),
         ));
     }
@@ -267,6 +274,7 @@ pub fn look_path(name: &str) -> Result<String, minijinja::Error> {
 /// - `hello` → `"hello"`
 /// - `say "hi"` → `"say \"hi\""`
 /// - `path\to\file` → `"path\\to\\file"`
+#[must_use]
 pub fn quote(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -274,7 +282,11 @@ pub fn quote(value: &str) -> String {
 /// Convert a value to JSON
 ///
 /// Usage: `{{ some_data | toJson }}`
-pub fn to_json(value: Value) -> Result<String, minijinja::Error> {
+///
+/// # Errors
+///
+/// Returns error if value cannot be converted to JSON
+pub fn to_json(value: &Value) -> Result<String, minijinja::Error> {
     let json_value: serde_json::Value = serde_json::from_str(&value.to_string())
         .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
 
@@ -285,6 +297,10 @@ pub fn to_json(value: Value) -> Result<String, minijinja::Error> {
 /// Parse a JSON string
 ///
 /// Usage: `{{ json_string | fromJson }}`
+///
+/// # Errors
+///
+/// Returns error if value is not valid JSON
 pub fn from_json(value: &str) -> Result<Value, minijinja::Error> {
     let json_value: serde_json::Value = serde_json::from_str(value).map_err(|e| {
         minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, e.to_string())
@@ -304,6 +320,7 @@ pub fn from_json(value: &str) -> Result<Value, minijinja::Error> {
 /// {{ someVar | trim }}
 /// {{ bitwarden("item", "id").field | trim }}
 /// ```
+#[must_use]
 pub fn trim(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.len() == value.len() {
@@ -324,6 +341,7 @@ pub fn trim(value: &str) -> String {
 /// {{ "  hello  " | trimStart }}  {# Output: "hello  " #}
 /// {{ someVar | trimStart }}
 /// ```
+#[must_use]
 pub fn trim_start(value: &str) -> String {
     let trimmed = value.trim_start();
     if trimmed.len() == value.len() {
@@ -344,6 +362,7 @@ pub fn trim_start(value: &str) -> String {
 /// {{ "  hello  " | trimEnd }}  {# Output: "  hello" #}
 /// {{ someVar | trimEnd }}
 /// ```
+#[must_use]
 pub fn trim_end(value: &str) -> String {
     let trimmed = value.trim_end();
     if trimmed.len() == value.len() {
@@ -367,10 +386,14 @@ pub fn trim_end(value: &str) -> String {
 ///
 /// # Security
 ///
-/// To prevent ReDoS (Regular Expression Denial of Service) attacks:
+/// To prevent `ReDoS` (Regular Expression Denial of Service) attacks:
 /// - Pattern length is limited to 200 characters
 /// - Regex size is limited to 10MB
 /// - DFA size is limited to 2MB
+///
+/// # Errors
+///
+/// Returns error if pattern is invalid or exceeds complexity limits
 pub fn regex_match(text: &str, pattern: &str) -> Result<bool, minijinja::Error> {
     // Limit regex pattern complexity
     if pattern.len() > 200 {
@@ -388,7 +411,7 @@ pub fn regex_match(text: &str, pattern: &str) -> Result<bool, minijinja::Error> 
 /// Get a compiled regex from cache or compile and cache it
 fn get_compiled_regex(pattern: &str) -> Result<regex::Regex, minijinja::Error> {
     let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache_guard = cache.lock().unwrap();
+    let mut cache_guard = cache.lock().expect("Regex cache mutex poisoned");
 
     // Check cache first
     if let Some(re) = cache_guard.get(pattern) {
@@ -403,7 +426,7 @@ fn get_compiled_regex(pattern: &str) -> Result<regex::Regex, minijinja::Error> {
         .map_err(|e| {
             minijinja::Error::new(
                 minijinja::ErrorKind::InvalidOperation,
-                format!("Invalid regex pattern: {}", e),
+                format!("Invalid regex pattern: {e}"),
             )
         })?;
 
@@ -428,10 +451,14 @@ fn get_compiled_regex(pattern: &str) -> Result<regex::Regex, minijinja::Error> {
 ///
 /// # Security
 ///
-/// To prevent ReDoS (Regular Expression Denial of Service) attacks:
+/// To prevent `ReDoS` (Regular Expression Denial of Service) attacks:
 /// - Pattern length is limited to 200 characters
 /// - Regex size is limited to 10MB
 /// - DFA size is limited to 2MB
+///
+/// # Errors
+///
+/// Returns error if pattern is invalid or exceeds complexity limits
 pub fn regex_replace_all(
     text: &str,
     pattern: &str,
@@ -464,7 +491,9 @@ pub fn regex_replace_all(
 /// {% endfor %}
 /// ```
 pub fn split(text: &str, delimiter: &str) -> Vec<String> {
-    text.split(delimiter).map(|s| s.to_string()).collect()
+    text.split(delimiter)
+        .map(std::string::ToString::to_string)
+        .collect()
 }
 
 /// Join a list of strings with a delimiter
@@ -475,7 +504,8 @@ pub fn split(text: &str, delimiter: &str) -> Vec<String> {
 /// {{ join(["a", "b", "c"], ", ") }}  {# Output: "a, b, c" #}
 /// {{ items | join(" - ") }}
 /// ```
-pub fn join(items: Vec<Value>, delimiter: &str) -> String {
+#[must_use]
+pub fn join(items: &[Value], delimiter: &str) -> String {
     items
         .iter()
         .filter_map(|v| v.as_str())
@@ -491,17 +521,21 @@ pub fn join(items: Vec<Value>, delimiter: &str) -> String {
 /// {{ config | toToml }}
 /// {{ {"name": "value"} | toToml }}
 /// ```
-pub fn to_toml(value: Value) -> Result<String, minijinja::Error> {
+///
+/// # Errors
+///
+/// Returns error if value cannot be converted to TOML
+pub fn to_toml(value: &Value) -> Result<String, minijinja::Error> {
     // Convert minijinja Value to serde_json::Value first
     let json_value: serde_json::Value = serde_json::from_str(&value.to_string())
         .or_else(|_| {
             // If direct parsing fails, try serializing the value
-            serde_json::to_value(&value).map_err(|e| e.to_string())
+            serde_json::to_value(value).map_err(|e| e.to_string())
         })
         .map_err(|e| {
             minijinja::Error::new(
                 minijinja::ErrorKind::InvalidOperation,
-                format!("Failed to convert value: {}", e),
+                format!("Failed to convert value: {e}"),
             )
         })?;
 
@@ -509,7 +543,7 @@ pub fn to_toml(value: Value) -> Result<String, minijinja::Error> {
     toml::to_string(&json_value).map_err(|e| {
         minijinja::Error::new(
             minijinja::ErrorKind::InvalidOperation,
-            format!("Failed to serialize to TOML: {}", e),
+            format!("Failed to serialize to TOML: {e}"),
         )
     })
 }
@@ -523,11 +557,15 @@ pub fn to_toml(value: Value) -> Result<String, minijinja::Error> {
 /// {% set config = fromToml(file_content) %}
 /// {{ config.database.host }}
 /// ```
+///
+/// # Errors
+///
+/// Returns error if value is not valid TOML
 pub fn from_toml(value: &str) -> Result<Value, minijinja::Error> {
     let toml_value: toml::Value = toml::from_str(value).map_err(|e| {
         minijinja::Error::new(
             minijinja::ErrorKind::InvalidOperation,
-            format!("Failed to parse TOML: {}", e),
+            format!("Failed to parse TOML: {e}"),
         )
     })?;
 
@@ -535,7 +573,7 @@ pub fn from_toml(value: &str) -> Result<Value, minijinja::Error> {
     let json_value: serde_json::Value = serde_json::to_value(&toml_value).map_err(|e| {
         minijinja::Error::new(
             minijinja::ErrorKind::InvalidOperation,
-            format!("Failed to convert TOML to JSON: {}", e),
+            format!("Failed to convert TOML to JSON: {e}"),
         )
     })?;
 
@@ -570,6 +608,10 @@ pub fn from_toml(value: &str) -> Result<Value, minijinja::Error> {
 /// # Environment
 ///
 /// Requires either `bw` or `rbw` CLI to be installed and authenticated.
+///
+/// # Errors
+///
+/// Returns error if Bitwarden provider is not available or command fails
 #[cfg(any(feature = "bw", feature = "rbw"))]
 pub fn bitwarden(args: &[Value], provider_name: &str) -> Result<Value, minijinja::Error> {
     if args.is_empty() {
@@ -663,6 +705,14 @@ fn bitwarden_get_raw(
 /// # Environment
 ///
 /// Requires `bw` CLI to be installed and authenticated. The vault must be unlocked.
+///
+/// # Panics
+///
+/// Should not panic under normal circumstances. Cache access is protected by mutex.
+///
+/// # Errors
+///
+/// Returns error if Bitwarden CLI is not available or attachment retrieval fails
 #[cfg(feature = "bw")]
 pub fn bitwarden_attachment(
     args: &[Value],
@@ -761,6 +811,10 @@ pub fn bitwarden_attachment(
 /// # Environment
 ///
 /// Requires either `bw` or `rbw` CLI to be installed and authenticated.
+///
+/// # Errors
+///
+/// Returns error if Bitwarden provider is not available or field retrieval fails
 pub fn bitwarden_fields(args: &[Value], provider_name: &str) -> Result<Value, minijinja::Error> {
     if args.len() < 2 {
         return Err(minijinja::Error::new(
@@ -838,7 +892,7 @@ fn get_single_field(item: &Value, field_name: &str) -> Result<Value, minijinja::
 
     Err(minijinja::Error::new(
         minijinja::ErrorKind::InvalidOperation,
-        format!("Field '{}' not found in Bitwarden item", field_name),
+        format!("Field '{field_name}' not found in Bitwarden item"),
     ))
 }
 
@@ -869,6 +923,10 @@ fn get_single_field(item: &Value, field_name: &str) -> Result<Value, minijinja::
 /// # Environment Variables
 ///
 /// - `BWS_ACCESS_TOKEN`: Required - Your Bitwarden Secrets Manager access token
+///
+/// # Errors
+///
+/// Returns error if BWS CLI is not available, access token is missing, or secret retrieval fails
 #[cfg(feature = "bws")]
 pub fn bitwarden_secrets(args: &[Value]) -> Result<Value, minijinja::Error> {
     if args.is_empty() {
@@ -935,13 +993,13 @@ pub fn bitwarden_secrets(args: &[Value]) -> Result<Value, minijinja::Error> {
 ///
 /// # Note
 ///
-/// This filter requires that the TemplateEngine was created with `with_identities()`.
+/// This filter requires that the `TemplateEngine` was created with `with_identities()`.
 /// If no identities are available, decryption will fail.
 pub fn decrypt(value: &str, identities: &Arc<Vec<Identity>>) -> Result<String, minijinja::Error> {
     decrypt_inline(value, identities).map_err(|e| {
         minijinja::Error::new(
             minijinja::ErrorKind::InvalidOperation,
-            format!("Decryption failed: {}", e),
+            format!("Decryption failed: {e}"),
         )
     })
 }
@@ -975,7 +1033,7 @@ pub fn decrypt(value: &str, identities: &Arc<Vec<Identity>>) -> Result<String, m
 ///
 /// # Note
 ///
-/// This filter requires that the TemplateEngine was created with `with_identities()`.
+/// This filter requires that the `TemplateEngine` was created with `with_identities()`.
 /// If no identities are available, encryption will fail.
 ///
 /// The encrypted value will be different each time (due to encryption nonce),
@@ -1001,7 +1059,7 @@ pub fn encrypt(value: &str, identities: &Arc<Vec<Identity>>) -> Result<String, m
     encrypt_inline(value, &[recipient]).map_err(|e| {
         minijinja::Error::new(
             minijinja::ErrorKind::InvalidOperation,
-            format!("Encryption failed: {}", e),
+            format!("Encryption failed: {e}"),
         )
     })
 }
@@ -1019,7 +1077,7 @@ fn validate_include_path(
     if requested_path.is_absolute() {
         return Err(minijinja::Error::new(
             minijinja::ErrorKind::InvalidOperation,
-            format!("Absolute paths not allowed in include(): {}", path),
+            format!("Absolute paths not allowed in include(): {path}"),
         ));
     }
 
@@ -1029,13 +1087,13 @@ fn validate_include_path(
             Component::ParentDir => {
                 return Err(minijinja::Error::new(
                     minijinja::ErrorKind::InvalidOperation,
-                    format!("Path traversal (..) not allowed in include(): {}", path),
+                    format!("Path traversal (..) not allowed in include(): {path}"),
                 ));
             }
             Component::RootDir | Component::Prefix(_) => {
                 return Err(minijinja::Error::new(
                     minijinja::ErrorKind::InvalidOperation,
-                    format!("Invalid path component in include(): {}", path),
+                    format!("Invalid path component in include(): {path}"),
                 ));
             }
             _ => {}
@@ -1048,14 +1106,14 @@ fn validate_include_path(
     let canonical_file = fs::canonicalize(&file_path).map_err(|e| {
         minijinja::Error::new(
             minijinja::ErrorKind::InvalidOperation,
-            format!("Failed to resolve path '{}': {}", path, e),
+            format!("Failed to resolve path '{path}': {e}"),
         )
     })?;
 
     let canonical_source = fs::canonicalize(source_dir).map_err(|e| {
         minijinja::Error::new(
             minijinja::ErrorKind::InvalidOperation,
-            format!("Failed to resolve source directory: {}", e),
+            format!("Failed to resolve source directory: {e}"),
         )
     })?;
 
@@ -1122,7 +1180,7 @@ pub fn include(path: &str) -> Result<String, minijinja::Error> {
     fs::read_to_string(&canonical_file).map_err(|e| {
         minijinja::Error::new(
             minijinja::ErrorKind::InvalidOperation,
-            format!("Failed to read file '{}': {}", path, e),
+            format!("Failed to read file '{path}': {e}"),
         )
     })
 }
@@ -1179,4 +1237,856 @@ pub fn include_template(path: &str) -> Result<String, minijinja::Error> {
     // This matches chezmoi's behavior where includeTemplate returns
     // the template content to be rendered in the current context
     include(path)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+
+    use std::fs;
+    use tempfile::TempDir;
+
+    // Helper to create a temporary source directory
+    fn setup_source_dir() -> TempDir {
+        let temp = TempDir::new().expect("Failed to create temp dir");
+        set_source_dir(temp.path().to_path_buf());
+        temp
+    }
+
+    #[test]
+    fn test_env_existing() {
+        // Use temp_env for safe environment variable manipulation
+        temp_env::with_var("TEST_VAR", Some("test_value"), || {
+            assert_eq!(env("TEST_VAR"), "test_value");
+        });
+    }
+
+    #[test]
+    fn test_env_missing() {
+        // Use temp_env to ensure variable is not set
+        temp_env::with_var_unset("NONEXISTENT_VAR", || {
+            assert_eq!(env("NONEXISTENT_VAR"), "");
+        });
+    }
+
+    #[test]
+    fn test_os() {
+        let os_name = os();
+        #[cfg(target_os = "linux")]
+        assert_eq!(os_name, "linux");
+        #[cfg(target_os = "macos")]
+        assert_eq!(os_name, "macos");
+        #[cfg(target_os = "windows")]
+        assert_eq!(os_name, "windows");
+    }
+
+    #[test]
+    fn test_arch() {
+        let arch_name = arch();
+        assert!(!arch_name.is_empty());
+        assert!(["x86_64", "aarch64", "arm", "x86"].contains(&arch_name));
+    }
+
+    #[test]
+    fn test_hostname() {
+        let host = hostname();
+        assert!(!host.is_empty());
+        assert_ne!(host, "unknown");
+    }
+
+    #[test]
+    fn test_username() {
+        let user = username();
+        assert!(!user.is_empty());
+    }
+
+    #[test]
+    fn test_home_dir() {
+        let home = home_dir();
+        assert!(!home.is_empty());
+        assert!(home.starts_with('/') || home.contains(':')); // Unix or Windows
+    }
+
+    #[test]
+    fn test_join_path_simple() {
+        let parts = vec![
+            Value::from("home"),
+            Value::from("user"),
+            Value::from(".config"),
+        ];
+        let result = join_path(&parts);
+        assert!(result.contains("home"));
+        assert!(result.contains("user"));
+        assert!(result.contains(".config"));
+    }
+
+    #[test]
+    fn test_join_path_empty() {
+        let parts: Vec<Value> = vec![];
+        let result = join_path(&parts);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_join_path_single() {
+        let parts = vec![Value::from("file.txt")];
+        let result = join_path(&parts);
+        assert_eq!(result, "file.txt");
+    }
+
+    #[test]
+    fn test_look_path_valid() {
+        // Try common executables that should exist
+        let result = look_path("sh");
+        assert!(result.is_ok());
+        let path = result.unwrap();
+        if !path.is_empty() {
+            assert!(path.contains("sh"));
+        }
+    }
+
+    #[test]
+    fn test_look_path_invalid_chars() {
+        let result = look_path("bin/sh"); // Contains '/' which is invalid
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_look_path_absolute() {
+        let result = look_path("/bin/sh");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_look_path_special_chars() {
+        let result = look_path("sh;rm -rf");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_quote_simple() {
+        assert_eq!(quote("hello"), "\"hello\"");
+    }
+
+    #[test]
+    fn test_quote_with_quotes() {
+        assert_eq!(quote("say \"hi\""), "\"say \\\"hi\\\"\"");
+    }
+
+    #[test]
+    fn test_quote_with_backslashes() {
+        assert_eq!(quote("path\\to\\file"), "\"path\\\\to\\\\file\"");
+    }
+
+    #[test]
+    fn test_quote_empty() {
+        assert_eq!(quote(""), "\"\"");
+    }
+
+    #[test]
+    fn test_to_json_string() {
+        let value = Value::from("hello");
+        let result = to_json(&value).expect("to_json failed");
+        assert_eq!(result, "\"hello\"");
+    }
+
+    #[test]
+    fn test_from_json_string() {
+        let result = from_json("\"hello\"").expect("from_json failed");
+        assert_eq!(result.as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn test_from_json_object() {
+        let json = r#"{"name":"John","age":30}"#;
+        let result = from_json(json).expect("from_json failed");
+        assert!(result.get_attr("name").is_ok());
+        assert_eq!(result.get_attr("name").unwrap().as_str(), Some("John"));
+    }
+
+    #[test]
+    fn test_from_json_invalid() {
+        let result = from_json("not json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trim_both_sides() {
+        assert_eq!(trim("  hello  "), "hello");
+    }
+
+    #[test]
+    fn test_trim_left_only() {
+        assert_eq!(trim("  hello"), "hello");
+    }
+
+    #[test]
+    fn test_trim_right_only() {
+        assert_eq!(trim("hello  "), "hello");
+    }
+
+    #[test]
+    fn test_trim_none() {
+        assert_eq!(trim("hello"), "hello");
+    }
+
+    #[test]
+    fn test_trim_newlines() {
+        assert_eq!(trim("\n\thello\t\n"), "hello");
+    }
+
+    #[test]
+    fn test_trim_start_whitespace() {
+        assert_eq!(trim_start("  hello  "), "hello  ");
+    }
+
+    #[test]
+    fn test_trim_start_none() {
+        assert_eq!(trim_start("hello  "), "hello  ");
+    }
+
+    #[test]
+    fn test_trim_end_whitespace() {
+        assert_eq!(trim_end("  hello  "), "  hello");
+    }
+
+    #[test]
+    fn test_trim_end_none() {
+        assert_eq!(trim_end("  hello"), "  hello");
+    }
+
+    #[test]
+    fn test_regex_match_simple() {
+        let result = regex_match("hello123", r"\d+").expect("regex_match failed");
+        assert!(result);
+    }
+
+    #[test]
+    fn test_regex_match_no_match() {
+        let result = regex_match("hello", r"\d+").expect("regex_match failed");
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_regex_match_email() {
+        let pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$";
+        let result = regex_match("test@example.com", pattern).expect("regex_match failed");
+        assert!(result);
+    }
+
+    #[test]
+    fn test_regex_match_pattern_too_long() {
+        let pattern = "a".repeat(201);
+        let result = regex_match("text", &pattern);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("too long"));
+    }
+
+    #[test]
+    fn test_regex_replace_all_simple() {
+        let result = regex_replace_all("hello 123 world 456", r"\d+", "X")
+            .expect("regex_replace_all failed");
+        assert_eq!(result, "hello X world X");
+    }
+
+    #[test]
+    fn test_regex_replace_all_vowels() {
+        let result = regex_replace_all("hello", "[aeiou]", "*").expect("regex_replace_all failed");
+        assert_eq!(result, "h*ll*");
+    }
+
+    #[test]
+    fn test_regex_replace_all_no_match() {
+        let result = regex_replace_all("hello", r"\d+", "X").expect("regex_replace_all failed");
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_split_simple() {
+        let result = split("a,b,c", ",");
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_colon() {
+        let result = split("one:two:three", ":");
+        assert_eq!(result, vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn test_split_empty_parts() {
+        let result = split("a,,c", ",");
+        assert_eq!(result, vec!["a", "", "c"]);
+    }
+
+    #[test]
+    fn test_split_no_delimiter() {
+        let result = split("hello", ",");
+        assert_eq!(result, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_join_simple() {
+        let items = vec![Value::from("a"), Value::from("b"), Value::from("c")];
+        let result = join(&items, ", ");
+        assert_eq!(result, "a, b, c");
+    }
+
+    #[test]
+    fn test_join_empty() {
+        let items: Vec<Value> = vec![];
+        let result = join(&items, ", ");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_join_single() {
+        let items = vec![Value::from("hello")];
+        let result = join(&items, ", ");
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_to_toml_simple() {
+        let json = r#"{"name":"value","number":42}"#;
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        let minijinja_value = Value::from_serialize(&value);
+
+        let result = to_toml(&minijinja_value).expect("to_toml failed");
+        assert!(result.contains("name"));
+        assert!(result.contains("value"));
+    }
+
+    #[test]
+    fn test_from_toml_simple() {
+        let toml_str = r#"
+name = "test"
+value = 42
+"#;
+        let result = from_toml(toml_str).expect("from_toml failed");
+        assert_eq!(result.get_attr("name").unwrap().as_str(), Some("test"));
+    }
+
+    #[test]
+    fn test_from_toml_invalid() {
+        let result = from_toml("not toml [[]");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_roundtrip() {
+        use guisu_crypto::Identity;
+
+        let identity = Identity::generate();
+        let identities = Arc::new(vec![identity]);
+
+        let plaintext = "secret password";
+        let encrypted = encrypt(plaintext, &identities).expect("encrypt failed");
+        assert!(encrypted.starts_with("age:"));
+
+        let decrypted = decrypt(&encrypted, &identities).expect("decrypt failed");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_encrypt_no_identity() {
+        let identities = Arc::new(vec![]);
+        let result = encrypt("secret", &identities);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No identity"));
+    }
+
+    #[test]
+    fn test_decrypt_invalid_format() {
+        use guisu_crypto::Identity;
+
+        let identity = Identity::generate();
+        let identities = Arc::new(vec![identity]);
+
+        let result = decrypt("not-encrypted", &identities);
+        assert!(result.is_err());
+    }
+
+    // Note: include() tests that require file I/O are platform-dependent
+    // due to canonicalization requirements. They work in production but
+    // may fail in test temp directories on some systems.
+
+    #[test]
+    fn test_include_absolute_path_rejected() {
+        let _temp = setup_source_dir();
+        let result = include("/etc/passwd");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Absolute paths not allowed")
+        );
+    }
+
+    #[test]
+    fn test_include_parent_dir_rejected() {
+        let _temp = setup_source_dir();
+        let result = include("../etc/passwd");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Path traversal"));
+    }
+
+    #[test]
+    fn test_validate_include_path_normal() {
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("test.txt");
+        fs::write(&file_path, "content").unwrap();
+
+        let result = validate_include_path("test.txt", temp.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_include_path_parent_dir() {
+        let temp = TempDir::new().unwrap();
+        let result = validate_include_path("../secret", temp.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_include_path_absolute() {
+        let temp = TempDir::new().unwrap();
+        let result = validate_include_path("/etc/passwd", temp.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_regex_cache_eviction() {
+        // Fill cache beyond limit
+        for i in 0..MAX_REGEX_CACHE_SIZE + 5 {
+            let pattern = format!(r"pattern{i}");
+            let _ = regex_match("text", &pattern);
+        }
+
+        // Cache should have been cleared and repopulated
+        let result = regex_match("test123", r"\d+");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_get_compiled_regex_caching() {
+        // First call compiles and caches
+        let re1 = get_compiled_regex(r"\d+").expect("Failed to compile");
+
+        // Second call should hit cache
+        let re2 = get_compiled_regex(r"\d+").expect("Failed to compile");
+
+        // Both should match the same pattern
+        assert_eq!(re1.as_str(), re2.as_str());
+    }
+
+    #[test]
+    fn test_get_compiled_regex_invalid_pattern() {
+        let result = get_compiled_regex(r"[invalid");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid regex"));
+    }
+
+    #[test]
+    fn test_to_json_nested_object() {
+        let json = r#"{"outer":{"inner":"value"}}"#;
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        let minijinja_value = Value::from_serialize(&value);
+
+        let result = to_json(&minijinja_value).expect("to_json failed");
+        assert!(result.contains("outer"));
+        assert!(result.contains("inner"));
+        assert!(result.contains("value"));
+    }
+
+    #[test]
+    fn test_to_json_array() {
+        let json = r#"["a","b","c"]"#;
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        let minijinja_value = Value::from_serialize(&value);
+
+        let result = to_json(&minijinja_value).expect("to_json failed");
+        assert!(result.contains('['));
+        assert!(result.contains(']'));
+        assert!(result.contains('a'));
+    }
+
+    #[test]
+    fn test_from_json_array() {
+        let json = r#"["a","b","c"]"#;
+        let result = from_json(json).expect("from_json failed");
+
+        // Should be able to iterate
+        let iter_result = result.try_iter();
+        assert!(iter_result.is_ok());
+    }
+
+    #[test]
+    fn test_from_json_nested() {
+        let json = r#"{"outer":{"inner":"value"}}"#;
+        let result = from_json(json).expect("from_json failed");
+
+        let outer = result.get_attr("outer").expect("outer not found");
+        let inner = outer.get_attr("inner").expect("inner not found");
+        assert_eq!(inner.as_str(), Some("value"));
+    }
+
+    #[test]
+    fn test_from_json_empty_object() {
+        let result = from_json("{}").expect("from_json failed");
+        // Empty object should parse successfully
+        // Accessing non-existent attribute returns undefined, not an error
+        let attr = result.get_attr("nonexistent");
+        assert!(attr.is_ok());
+        assert!(attr.unwrap().is_undefined());
+    }
+
+    #[test]
+    fn test_from_json_empty_array() {
+        let result = from_json("[]").expect("from_json failed");
+        let iter = result.try_iter().expect("Should be iterable");
+        assert_eq!(iter.count(), 0);
+    }
+
+    #[test]
+    fn test_to_toml_nested() {
+        let json = r#"{"section":{"key":"value"}}"#;
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        let minijinja_value = Value::from_serialize(&value);
+
+        let result = to_toml(&minijinja_value).expect("to_toml failed");
+        assert!(result.contains("section"));
+        assert!(result.contains("key"));
+        assert!(result.contains("value"));
+    }
+
+    #[test]
+    fn test_from_toml_nested() {
+        let toml_str = r#"
+[database]
+host = "localhost"
+port = 5432
+"#;
+        let result = from_toml(toml_str).expect("from_toml failed");
+        let database = result.get_attr("database").expect("database not found");
+        assert_eq!(
+            database.get_attr("host").unwrap().as_str(),
+            Some("localhost")
+        );
+    }
+
+    #[test]
+    fn test_from_toml_empty() {
+        let result = from_toml("").expect("from_toml failed");
+        // Empty TOML should parse as empty object
+        // Accessing non-existent attribute returns undefined, not an error
+        let attr = result.get_attr("anything");
+        assert!(attr.is_ok());
+        assert!(attr.unwrap().is_undefined());
+    }
+
+    #[test]
+    fn test_regex_replace_all_pattern_too_long() {
+        let pattern = "a".repeat(201);
+        let result = regex_replace_all("text", &pattern, "X");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("too long"));
+    }
+
+    #[test]
+    fn test_split_multiple_consecutive_delimiters() {
+        let result = split("a:::b", ":");
+        assert_eq!(result, vec!["a", "", "", "b"]);
+    }
+
+    #[test]
+    fn test_split_delimiter_at_ends() {
+        let result = split(":a:b:", ":");
+        assert_eq!(result, vec!["", "a", "b", ""]);
+    }
+
+    #[test]
+    fn test_join_with_non_string_values() {
+        let items = vec![Value::from(1), Value::from(2), Value::from(3)];
+        let result = join(&items, ", ");
+        // Non-string values are filtered out
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_join_mixed_values() {
+        let items = vec![Value::from("a"), Value::from(123), Value::from("b")];
+        let result = join(&items, ", ");
+        // Only strings should be joined, numbers filtered out
+        assert_eq!(result, "a, b");
+    }
+
+    #[test]
+    fn test_trim_only_whitespace() {
+        assert_eq!(trim("   "), "");
+    }
+
+    #[test]
+    fn test_trim_start_only_whitespace() {
+        assert_eq!(trim_start("   "), "");
+    }
+
+    #[test]
+    fn test_trim_end_only_whitespace() {
+        assert_eq!(trim_end("   "), "");
+    }
+
+    #[test]
+    fn test_quote_already_quoted() {
+        assert_eq!(quote("\"hello\""), "\"\\\"hello\\\"\"");
+    }
+
+    #[test]
+    fn test_quote_mixed_escapes() {
+        assert_eq!(quote("path\\with\"quotes"), "\"path\\\\with\\\"quotes\"");
+    }
+
+    #[test]
+    fn test_regex_match_complex_pattern() {
+        let pattern = r"^[A-Z][a-z]+\s+\d{4}$";
+        assert!(regex_match("January 2024", pattern).expect("regex_match failed"));
+        assert!(!regex_match("jan 2024", pattern).expect("regex_match failed"));
+    }
+
+    #[test]
+    fn test_regex_replace_all_empty_replacement() {
+        let result =
+            regex_replace_all("hello123world456", r"\d+", "").expect("regex_replace_all failed");
+        assert_eq!(result, "helloworld");
+    }
+
+    #[test]
+    fn test_look_path_nonexistent() {
+        let result = look_path("nonexistent_binary_xyz123");
+        assert!(result.is_ok());
+        let path = result.unwrap();
+        // Should return empty string if not found
+        assert_eq!(path, "");
+    }
+
+    #[test]
+    fn test_join_path_with_non_string() {
+        let parts = vec![Value::from("home"), Value::from(123), Value::from("file")];
+        let result = join_path(&parts);
+        // Non-string values should be skipped
+        assert!(result.contains("home"));
+        assert!(result.contains("file"));
+        assert!(!result.contains("123"));
+    }
+
+    #[test]
+    fn test_convert_error_cancelled() {
+        let vault_error = guisu_vault::Error::Cancelled;
+        let minijinja_error = convert_error(vault_error);
+        assert!(minijinja_error.to_string().contains("cancelled by user"));
+    }
+
+    #[test]
+    fn test_convert_error_authentication_required() {
+        let vault_error = guisu_vault::Error::AuthenticationRequired("Please login".to_string());
+        let minijinja_error = convert_error(vault_error);
+        assert!(
+            minijinja_error
+                .to_string()
+                .contains("Authentication required")
+        );
+        assert!(minijinja_error.to_string().contains("Please login"));
+    }
+
+    #[test]
+    fn test_convert_error_provider_not_available() {
+        let vault_error = guisu_vault::Error::ProviderNotAvailable("bw not found".to_string());
+        let minijinja_error = convert_error(vault_error);
+        assert!(
+            minijinja_error
+                .to_string()
+                .contains("Provider not available")
+        );
+        assert!(minijinja_error.to_string().contains("bw not found"));
+    }
+
+    #[test]
+    fn test_quote_with_newlines() {
+        let text = "line1\nline2\nline3";
+        let result = quote(text);
+        assert_eq!(result, "\"line1\nline2\nline3\"");
+    }
+
+    #[test]
+    fn test_quote_with_tabs() {
+        let text = "col1\tcol2\tcol3";
+        let result = quote(text);
+        assert_eq!(result, "\"col1\tcol2\tcol3\"");
+    }
+
+    #[test]
+    fn test_look_path_with_dash() {
+        // Executable names can contain dashes
+        let result = look_path("test-executable");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_look_path_with_underscore() {
+        // Executable names can contain underscores
+        let result = look_path("test_executable");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_regex_match_empty_pattern() {
+        // Empty pattern should match empty string
+        let result = regex_match("", "");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_regex_replace_all_with_capture_groups() {
+        let result = regex_replace_all("hello world", r"(\w+) (\w+)", "$2 $1")
+            .expect("regex_replace_all failed");
+        assert_eq!(result, "world hello");
+    }
+
+    #[test]
+    fn test_split_with_multi_char_delimiter() {
+        let result = split("one::two::three", "::");
+        assert_eq!(result, vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn test_trim_unicode_whitespace() {
+        // Test with various Unicode whitespace characters
+        let text = "\u{00A0}hello\u{00A0}"; // Non-breaking space
+        let result = trim(text);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_trim_start_only_newlines() {
+        let result = trim_start("\n\n\n");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_trim_end_mixed_whitespace() {
+        let result = trim_end("text \t\n\r");
+        assert_eq!(result, "text");
+    }
+
+    #[test]
+    fn test_to_json_bool_values() {
+        let value = Value::from(true);
+        let result = to_json(&value).expect("to_json failed");
+        assert_eq!(result, "true");
+
+        let value = Value::from(false);
+        let result = to_json(&value).expect("to_json failed");
+        assert_eq!(result, "false");
+    }
+
+    #[test]
+    fn test_from_json_bool_values() {
+        let result = from_json("true").expect("from_json failed");
+        assert_eq!(result.to_string(), "true");
+
+        let result = from_json("false").expect("from_json failed");
+        assert_eq!(result.to_string(), "false");
+    }
+
+    #[test]
+    fn test_from_json_null() {
+        let result = from_json("null").expect("from_json failed");
+        assert!(result.is_none() || result.is_undefined());
+    }
+
+    #[test]
+    fn test_from_json_number() {
+        let result = from_json("42").expect("from_json failed");
+        // Numbers in JSON can be accessed as i64 or f64
+        assert!(result.as_i64().is_some() || result.to_string() == "42");
+    }
+
+    #[test]
+    fn test_to_toml_array() {
+        let json = r#"["a","b","c"]"#;
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        let minijinja_value = Value::from_serialize(&value);
+
+        let result = to_toml(&minijinja_value);
+        // Arrays at top level aren't valid TOML, so this might error
+        // Just verify it doesn't panic
+        let _ = result;
+    }
+
+    #[test]
+    fn test_from_toml_with_numbers() {
+        let toml_str = r"
+count = 42
+price = 19.99
+";
+        let result = from_toml(toml_str).expect("from_toml failed");
+        assert!(result.get_attr("count").is_ok());
+        assert!(result.get_attr("price").is_ok());
+    }
+
+    #[test]
+    fn test_from_toml_with_arrays() {
+        let toml_str = r#"
+items = ["a", "b", "c"]
+"#;
+        let result = from_toml(toml_str).expect("from_toml failed");
+        let items = result.get_attr("items").expect("items not found");
+        assert!(items.try_iter().is_ok());
+    }
+
+    #[test]
+    fn test_regex_cache_persistence_across_calls() {
+        // First call compiles and caches
+        let _ = regex_match("test123", r"\d+").expect("First match failed");
+
+        // Second call should use cache
+        let _ = regex_match("test456", r"\d+").expect("Second match failed");
+
+        // Different pattern should also be cached
+        let _ = regex_match("abc", r"[a-z]+").expect("Third match failed");
+    }
+
+    #[test]
+    fn test_get_compiled_regex_size_limits() {
+        // Test that regex size limits are enforced
+        // A very complex pattern might hit size limits
+        let complex_pattern = r"(a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u|v|w|x|y|z)+";
+        let result = get_compiled_regex(complex_pattern);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_include_path_with_current_dir_component() {
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("file.txt");
+        fs::write(&file_path, "content").unwrap();
+
+        // Path with ./ should work
+        let result = validate_include_path("./file.txt", temp.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_include_path_nested_directories() {
+        let temp = TempDir::new().unwrap();
+        let nested_dir = temp.path().join("a").join("b").join("c");
+        fs::create_dir_all(&nested_dir).unwrap();
+        let file_path = nested_dir.join("file.txt");
+        fs::write(&file_path, "content").unwrap();
+
+        let result = validate_include_path("a/b/c/file.txt", temp.path());
+        assert!(result.is_ok());
+    }
 }

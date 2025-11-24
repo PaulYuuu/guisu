@@ -21,11 +21,19 @@ use guisu_config::Config;
 /// This includes entries ignored by:
 /// - Global patterns from global section
 /// - Platform-specific patterns from `<platform>` section
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Resolving paths (source/destination directories) fails
+/// - Loading ignore patterns from .guisu/ignores.toml fails
+/// - Reading source state fails
 pub fn run_list(source_dir: &Path, config: &Config) -> Result<()> {
-    let platform = CURRENT_PLATFORM.os;
     use guisu_engine::entry::SourceEntry;
     use guisu_engine::state::SourceState;
     use owo_colors::OwoColorize;
+
+    let platform = CURRENT_PLATFORM.os;
 
     // Detect if output is to a terminal for icon auto mode
     let is_tty = std::io::stdout().is_terminal();
@@ -93,7 +101,7 @@ pub fn run_list(source_dir: &Path, config: &Config) -> Result<()> {
 
     // Display results
     if ignored_files.is_empty() {
-        println!("{}\n", format!("Ignored 0 files on {}", platform).dimmed());
+        println!("{}\n", format!("Ignored 0 files on {platform}").dimmed());
     } else {
         let count = ignored_files.len();
 
@@ -113,7 +121,7 @@ pub fn run_list(source_dir: &Path, config: &Config) -> Result<()> {
 
         for file in &ignored_files {
             // Add ~/ prefix to path
-            let display_path = format!("~/{}", file);
+            let display_path = format!("~/{file}");
 
             // Create FileIconInfo to get icon
             let icon_info = crate::ui::icons::FileIconInfo {
@@ -134,7 +142,7 @@ pub fn run_list(source_dir: &Path, config: &Config) -> Result<()> {
             let styled_icon = file_style.paint(icon);
             let styled_path = file_style.paint(&display_path);
 
-            println!("  {} {}", styled_icon, styled_path);
+            println!("  {styled_icon} {styled_path}");
         }
     }
 
@@ -145,6 +153,10 @@ pub fn run_list(source_dir: &Path, config: &Config) -> Result<()> {
 ///
 /// Shows the ignore rules that apply to the current platform.
 /// This reads from .guisu/ignores.toml in the source directory.
+///
+/// # Errors
+///
+/// Returns an error if loading .guisu/ignores.toml fails
 pub fn run_show(source_dir: &Path, _config: &Config, show_all: bool) -> Result<()> {
     use owo_colors::OwoColorize;
 
@@ -159,7 +171,7 @@ pub fn run_show(source_dir: &Path, _config: &Config, show_all: bool) -> Result<(
     // Helper to display a section
     let display_section = |section_name: &str, patterns: &[String], is_current: bool| {
         if is_current {
-            println!("{}:", format!("{} (current)", section_name).bright_white());
+            println!("{}:", format!("{section_name} (current)").bright_white());
         } else {
             println!("{}:", section_name.bright_white());
         }
@@ -168,7 +180,7 @@ pub fn run_show(source_dir: &Path, _config: &Config, show_all: bool) -> Result<(
             println!("  {}", "(none)".dimmed());
         } else {
             for pattern in patterns {
-                println!("  {}", pattern);
+                println!("  {pattern}");
             }
         }
     };
@@ -218,4 +230,388 @@ pub fn run_show(source_dir: &Path, _config: &Config, show_all: bool) -> Result<(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// Helper to create a test directory structure with config and source files
+    fn setup_test_env() -> (TempDir, Config) {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path();
+
+        // Create .guisu directory
+        let guisu_dir = source_dir.join(".guisu");
+        fs::create_dir_all(&guisu_dir).unwrap();
+
+        // Create ignores.toml
+        fs::write(
+            guisu_dir.join("ignores.toml"),
+            r#"
+global = [
+    "*.log",
+    "*.tmp",
+    ".DS_Store"
+]
+
+darwin = [
+    ".Trash/",
+    "Library/Caches/"
+]
+
+linux = [
+    "~/.cache/"
+]
+
+windows = [
+    "Thumbs.db"
+]
+"#,
+        )
+        .unwrap();
+
+        // Create dotfiles directory (default root_entry = "home")
+        let dotfiles_dir = source_dir.join("home");
+        fs::create_dir_all(&dotfiles_dir).unwrap();
+
+        // Create some test files in dotfiles directory
+        // Ignored files
+        fs::write(dotfiles_dir.join("test.log"), "log content").unwrap();
+        fs::write(dotfiles_dir.join("debug.tmp"), "tmp content").unwrap();
+        fs::write(dotfiles_dir.join(".DS_Store"), "macos junk").unwrap();
+
+        // Non-ignored files
+        fs::write(dotfiles_dir.join("config.txt"), "config").unwrap();
+        fs::write(dotfiles_dir.join("bashrc"), "bash config").unwrap();
+
+        // Create subdirectory with mixed files
+        let subdir = dotfiles_dir.join(".config");
+        fs::create_dir_all(&subdir).unwrap();
+        fs::write(subdir.join("app.log"), "app logs").unwrap(); // ignored
+        fs::write(subdir.join("settings.toml"), "settings").unwrap(); // not ignored
+
+        // Create default config
+        let mut config = Config::default();
+        config.general.root_entry = std::path::PathBuf::from("home");
+
+        (temp, config)
+    }
+
+    #[test]
+    fn test_run_list_basic() {
+        let (temp, config) = setup_test_env();
+        let source_dir = temp.path();
+
+        // run_list should succeed without errors
+        let result = run_list(source_dir, &config);
+        assert!(result.is_ok(), "run_list should succeed: {result:?}");
+    }
+
+    #[test]
+    fn test_run_list_missing_ignores_toml() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path();
+
+        // Create .guisu but NO ignores.toml (will use default empty config)
+        let guisu_dir = source_dir.join(".guisu");
+        fs::create_dir_all(&guisu_dir).unwrap();
+
+        let dotfiles_dir = source_dir.join("home");
+        fs::create_dir_all(&dotfiles_dir).unwrap();
+        fs::write(dotfiles_dir.join("test.txt"), "content").unwrap();
+
+        let config = Config::default();
+
+        // Should succeed with empty ignores (uses default)
+        let result = run_list(source_dir, &config);
+        assert!(
+            result.is_ok(),
+            "Should succeed with default empty ignores: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_run_list_empty_directory() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path();
+
+        // Create .guisu/ignores.toml
+        let guisu_dir = source_dir.join(".guisu");
+        fs::create_dir_all(&guisu_dir).unwrap();
+        fs::write(guisu_dir.join("ignores.toml"), "global = []").unwrap();
+
+        // Create empty dotfiles directory
+        let dotfiles_dir = source_dir.join("home");
+        fs::create_dir_all(&dotfiles_dir).unwrap();
+
+        let config = Config::default();
+
+        // Should succeed with no ignored files
+        let result = run_list(source_dir, &config);
+        assert!(result.is_ok(), "Should succeed with empty directory");
+    }
+
+    #[test]
+    fn test_run_show_basic() {
+        let (temp, config) = setup_test_env();
+        let source_dir = temp.path();
+
+        // Test show without --all flag
+        let result = run_show(source_dir, &config, false);
+        assert!(result.is_ok(), "run_show should succeed: {result:?}");
+    }
+
+    #[test]
+    fn test_run_show_all_platforms() {
+        let (temp, config) = setup_test_env();
+        let source_dir = temp.path();
+
+        // Test show with --all flag
+        let result = run_show(source_dir, &config, true);
+        assert!(result.is_ok(), "run_show --all should succeed: {result:?}");
+    }
+
+    #[test]
+    fn test_run_show_missing_ignores_toml() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path();
+
+        // No .guisu directory at all
+        let config = Config::default();
+
+        let result = run_show(source_dir, &config, false);
+        // Should succeed with default (empty) config
+        assert!(result.is_ok(), "Should succeed with missing ignores.toml");
+    }
+
+    #[test]
+    fn test_run_show_empty_ignores() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path();
+
+        let guisu_dir = source_dir.join(".guisu");
+        fs::create_dir_all(&guisu_dir).unwrap();
+
+        // Create empty ignores.toml
+        fs::write(guisu_dir.join("ignores.toml"), "").unwrap();
+
+        let config = Config::default();
+
+        let result = run_show(source_dir, &config, false);
+        assert!(result.is_ok(), "Should handle empty ignores.toml");
+
+        let result_all = run_show(source_dir, &config, true);
+        assert!(
+            result_all.is_ok(),
+            "Should handle empty ignores.toml with --all"
+        );
+    }
+
+    #[test]
+    fn test_run_show_invalid_toml() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path();
+
+        let guisu_dir = source_dir.join(".guisu");
+        fs::create_dir_all(&guisu_dir).unwrap();
+
+        // Create invalid TOML
+        fs::write(guisu_dir.join("ignores.toml"), "invalid toml {{{").unwrap();
+
+        let config = Config::default();
+
+        let result = run_show(source_dir, &config, false);
+        assert!(result.is_err(), "Should fail with invalid TOML");
+
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("Failed to load") || error_msg.contains("parse"),
+            "Error should mention parsing failure: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn test_run_show_with_negation_patterns() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path();
+
+        let guisu_dir = source_dir.join(".guisu");
+        fs::create_dir_all(&guisu_dir).unwrap();
+
+        fs::write(
+            guisu_dir.join("ignores.toml"),
+            r#"
+global = [
+    ".config/*",
+    "!.config/nvim/",
+    "!.config/bat/"
+]
+"#,
+        )
+        .unwrap();
+
+        let config = Config::default();
+
+        // Should display negation patterns correctly
+        let result = run_show(source_dir, &config, false);
+        assert!(result.is_ok(), "Should handle negation patterns");
+    }
+
+    #[test]
+    fn test_run_list_with_subdirectories() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path();
+
+        let guisu_dir = source_dir.join(".guisu");
+        fs::create_dir_all(&guisu_dir).unwrap();
+
+        fs::write(
+            guisu_dir.join("ignores.toml"),
+            r#"
+global = [
+    "*.log",
+    "cache/"
+]
+"#,
+        )
+        .unwrap();
+
+        let dotfiles_dir = source_dir.join("home");
+        fs::create_dir_all(&dotfiles_dir).unwrap();
+
+        // Create nested structure
+        let cache_dir = dotfiles_dir.join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join("data.txt"), "cached data").unwrap();
+
+        let config_dir = dotfiles_dir.join(".config");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(config_dir.join("app.log"), "logs").unwrap();
+        fs::write(config_dir.join("settings.toml"), "settings").unwrap();
+
+        let config = Config::default();
+
+        let result = run_list(source_dir, &config);
+        assert!(result.is_ok(), "Should handle subdirectories: {result:?}");
+    }
+
+    #[test]
+    fn test_run_list_with_templates_and_encrypted() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path();
+
+        let guisu_dir = source_dir.join(".guisu");
+        fs::create_dir_all(&guisu_dir).unwrap();
+
+        fs::write(
+            guisu_dir.join("ignores.toml"),
+            r#"
+global = [
+    "*.log"
+]
+"#,
+        )
+        .unwrap();
+
+        let dotfiles_dir = source_dir.join("home");
+        fs::create_dir_all(&dotfiles_dir).unwrap();
+
+        // Create files with .j2 and .age extensions
+        fs::write(dotfiles_dir.join("config.txt.j2"), "template").unwrap();
+        fs::write(dotfiles_dir.join("secret.txt.age"), "encrypted").unwrap();
+        fs::write(dotfiles_dir.join("debug.log.j2"), "log template").unwrap(); // ignored
+
+        let config = Config::default();
+
+        let result = run_list(source_dir, &config);
+        assert!(
+            result.is_ok(),
+            "Should handle .j2 and .age files: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_run_show_only_global_patterns() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path();
+
+        let guisu_dir = source_dir.join(".guisu");
+        fs::create_dir_all(&guisu_dir).unwrap();
+
+        fs::write(
+            guisu_dir.join("ignores.toml"),
+            r#"
+global = [
+    "*.tmp",
+    "*.log"
+]
+"#,
+        )
+        .unwrap();
+
+        let config = Config::default();
+
+        // Should show only global patterns for current platform
+        let result = run_show(source_dir, &config, false);
+        assert!(result.is_ok(), "Should show only global patterns");
+    }
+
+    #[test]
+    fn test_run_show_mixed_global_and_platform() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path();
+
+        let guisu_dir = source_dir.join(".guisu");
+        fs::create_dir_all(&guisu_dir).unwrap();
+
+        fs::write(
+            guisu_dir.join("ignores.toml"),
+            r#"
+global = ["*.tmp"]
+darwin = [".DS_Store"]
+linux = [".cache"]
+windows = ["Thumbs.db"]
+"#,
+        )
+        .unwrap();
+
+        let config = Config::default();
+
+        // Current platform view
+        let result = run_show(source_dir, &config, false);
+        assert!(result.is_ok(), "Should show global + platform patterns");
+
+        // All platforms view
+        let result_all = run_show(source_dir, &config, true);
+        assert!(result_all.is_ok(), "Should show all platforms");
+    }
+
+    #[test]
+    fn test_run_list_with_custom_root_entry() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path();
+
+        let guisu_dir = source_dir.join(".guisu");
+        fs::create_dir_all(&guisu_dir).unwrap();
+
+        fs::write(guisu_dir.join("ignores.toml"), "global = []").unwrap();
+
+        // Use custom root_entry instead of default "home"
+        let dotfiles_dir = source_dir.join("dotfiles");
+        fs::create_dir_all(&dotfiles_dir).unwrap();
+        fs::write(dotfiles_dir.join("test.txt"), "content").unwrap();
+
+        let mut config = Config::default();
+        config.general.root_entry = std::path::PathBuf::from("dotfiles");
+
+        let result = run_list(source_dir, &config);
+        assert!(
+            result.is_ok(),
+            "Should work with custom root_entry: {result:?}"
+        );
+    }
 }

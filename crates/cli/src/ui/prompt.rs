@@ -13,7 +13,7 @@ use ratatui::{
 };
 use std::io;
 
-use crate::cmd::conflict::ChangeType;
+use crate::conflict::ChangeType;
 use crate::ui::icons::Icons;
 use crate::ui::preview::{ChangePreview, ChangeSummary};
 use crate::ui::theme::Theme;
@@ -21,11 +21,17 @@ use crate::ui::theme::Theme;
 /// Conflict action options
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictAction {
+    /// Show full differences between files
     Diff,
+    /// Override destination with source changes
     Override,
+    /// Skip this file and keep destination as-is
     Skip,
+    /// Skip all remaining files
     AllSkip,
+    /// Override all remaining files with source
     AllOverride,
+    /// Quit the apply operation
     Quit,
 }
 
@@ -41,7 +47,7 @@ impl ConflictAction {
         ]
     }
 
-    fn label(&self) -> String {
+    fn label(self) -> String {
         match self {
             Self::Diff => "Diff - show full differences".to_string(),
             Self::Override => "Override - apply source changes".to_string(),
@@ -69,6 +75,7 @@ pub struct ConflictPrompt {
 
 impl ConflictPrompt {
     /// Create a new conflict prompt
+    #[must_use]
     pub fn new(
         file_path: String,
         summary: ChangeSummary,
@@ -91,6 +98,13 @@ impl ConflictPrompt {
     }
 
     /// Run the interactive prompt and return the selected action
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Terminal setup fails (raw mode, alternate screen)
+    /// - Event handling fails
+    /// - Terminal restoration fails
     pub fn run(&mut self) -> Result<ConflictAction> {
         // Setup terminal
         enable_raw_mode().context("Failed to enable raw mode")?;
@@ -131,8 +145,7 @@ impl ConflictPrompt {
                     KeyCode::PageUp => self.scroll_preview_up(),
                     KeyCode::PageDown => self.scroll_preview_down(),
                     KeyCode::Enter => return Ok(self.get_selected_action()),
-                    KeyCode::Char('q') => return Ok(ConflictAction::Quit),
-                    KeyCode::Esc => return Ok(ConflictAction::Quit),
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(ConflictAction::Quit),
                     _ => {}
                 }
             }
@@ -356,5 +369,408 @@ impl ConflictPrompt {
     /// Scroll preview down
     fn scroll_preview_down(&mut self) {
         self.preview_scroll = self.preview_scroll.saturating_add(5);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+    use crate::ui::preview::{PreviewLine, PreviewTag};
+
+    // Tests for ConflictAction
+
+    #[test]
+    fn test_conflict_action_all_actions() {
+        let actions = ConflictAction::all_actions();
+        assert_eq!(actions.len(), 6);
+        assert_eq!(actions[0], ConflictAction::Diff);
+        assert_eq!(actions[1], ConflictAction::Override);
+        assert_eq!(actions[2], ConflictAction::Skip);
+        assert_eq!(actions[3], ConflictAction::AllSkip);
+        assert_eq!(actions[4], ConflictAction::AllOverride);
+        assert_eq!(actions[5], ConflictAction::Quit);
+    }
+
+    #[test]
+    fn test_conflict_action_label_diff() {
+        let action = ConflictAction::Diff;
+        assert_eq!(action.label(), "Diff - show full differences");
+    }
+
+    #[test]
+    fn test_conflict_action_label_override() {
+        let action = ConflictAction::Override;
+        assert_eq!(action.label(), "Override - apply source changes");
+    }
+
+    #[test]
+    fn test_conflict_action_label_skip() {
+        let action = ConflictAction::Skip;
+        assert_eq!(action.label(), "Skip - keep destination as-is");
+    }
+
+    #[test]
+    fn test_conflict_action_label_all_skip() {
+        let action = ConflictAction::AllSkip;
+        assert_eq!(action.label(), "All Skip - keep all remaining files as-is");
+    }
+
+    #[test]
+    fn test_conflict_action_label_all_override() {
+        let action = ConflictAction::AllOverride;
+        assert_eq!(
+            action.label(),
+            "All Override - apply source for all remaining"
+        );
+    }
+
+    #[test]
+    fn test_conflict_action_label_quit() {
+        let action = ConflictAction::Quit;
+        assert_eq!(action.label(), "Quit - exit apply operation");
+    }
+
+    #[test]
+    fn test_conflict_action_equality() {
+        assert_eq!(ConflictAction::Diff, ConflictAction::Diff);
+        assert_eq!(ConflictAction::Override, ConflictAction::Override);
+        assert_ne!(ConflictAction::Diff, ConflictAction::Override);
+    }
+
+    #[test]
+    fn test_conflict_action_clone() {
+        let action = ConflictAction::Diff;
+        let cloned = action;
+        assert_eq!(action, cloned);
+    }
+
+    #[test]
+    fn test_conflict_action_copy() {
+        let action = ConflictAction::Skip;
+        let copied = action;
+        // After copy, original should still be usable
+        assert_eq!(action, ConflictAction::Skip);
+        assert_eq!(copied, ConflictAction::Skip);
+    }
+
+    // Tests for ConflictPrompt
+
+    fn create_test_prompt() -> ConflictPrompt {
+        let summary = ChangeSummary {
+            lines_added: 2,
+            lines_removed: 1,
+            lines_modified: 3,
+        };
+
+        let preview = ChangePreview {
+            lines: vec![
+                PreviewLine {
+                    tag: PreviewTag::Context,
+                    content: "line1".to_string(),
+                },
+                PreviewLine {
+                    tag: PreviewTag::Add,
+                    content: "line2".to_string(),
+                },
+                PreviewLine {
+                    tag: PreviewTag::Remove,
+                    content: "line3".to_string(),
+                },
+            ],
+            truncated: false,
+        };
+
+        ConflictPrompt::new(
+            "test/file.txt".to_string(),
+            summary,
+            preview,
+            ChangeType::TrueConflict,
+        )
+    }
+
+    #[test]
+    fn test_conflict_prompt_new() {
+        let prompt = create_test_prompt();
+
+        assert_eq!(prompt.file_path, "test/file.txt");
+        assert_eq!(prompt.summary.lines_added, 2);
+        assert_eq!(prompt.summary.lines_removed, 1);
+        assert_eq!(prompt.summary.lines_modified, 3);
+        assert_eq!(prompt.preview.lines.len(), 3);
+        assert!(!prompt.preview.truncated);
+        assert_eq!(prompt.actions.len(), 6);
+        assert_eq!(prompt.preview_scroll, 0);
+        assert_eq!(prompt.change_type, ChangeType::TrueConflict);
+    }
+
+    #[test]
+    fn test_conflict_prompt_new_selects_first_action() {
+        let prompt = create_test_prompt();
+        assert_eq!(prompt.list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_conflict_prompt_get_selected_action_default() {
+        let prompt = create_test_prompt();
+        assert_eq!(prompt.get_selected_action(), ConflictAction::Diff);
+    }
+
+    #[test]
+    fn test_conflict_prompt_next() {
+        let mut prompt = create_test_prompt();
+
+        // Start at 0
+        assert_eq!(prompt.list_state.selected(), Some(0));
+
+        // Move to 1
+        prompt.next();
+        assert_eq!(prompt.list_state.selected(), Some(1));
+        assert_eq!(prompt.get_selected_action(), ConflictAction::Override);
+
+        // Move to 2
+        prompt.next();
+        assert_eq!(prompt.list_state.selected(), Some(2));
+        assert_eq!(prompt.get_selected_action(), ConflictAction::Skip);
+    }
+
+    #[test]
+    fn test_conflict_prompt_next_wraps_around() {
+        let mut prompt = create_test_prompt();
+
+        // Move to last item
+        for _ in 0..5 {
+            prompt.next();
+        }
+        assert_eq!(prompt.list_state.selected(), Some(5));
+        assert_eq!(prompt.get_selected_action(), ConflictAction::Quit);
+
+        // Next should wrap to 0
+        prompt.next();
+        assert_eq!(prompt.list_state.selected(), Some(0));
+        assert_eq!(prompt.get_selected_action(), ConflictAction::Diff);
+    }
+
+    #[test]
+    fn test_conflict_prompt_previous() {
+        let mut prompt = create_test_prompt();
+
+        // Move to second item first
+        prompt.next();
+        assert_eq!(prompt.list_state.selected(), Some(1));
+
+        // Move back to first
+        prompt.previous();
+        assert_eq!(prompt.list_state.selected(), Some(0));
+        assert_eq!(prompt.get_selected_action(), ConflictAction::Diff);
+    }
+
+    #[test]
+    fn test_conflict_prompt_previous_wraps_around() {
+        let mut prompt = create_test_prompt();
+
+        // Start at 0
+        assert_eq!(prompt.list_state.selected(), Some(0));
+
+        // Previous should wrap to last item
+        prompt.previous();
+        assert_eq!(prompt.list_state.selected(), Some(5));
+        assert_eq!(prompt.get_selected_action(), ConflictAction::Quit);
+    }
+
+    #[test]
+    fn test_conflict_prompt_scroll_preview_down() {
+        let mut prompt = create_test_prompt();
+
+        assert_eq!(prompt.preview_scroll, 0);
+
+        prompt.scroll_preview_down();
+        assert_eq!(prompt.preview_scroll, 5);
+
+        prompt.scroll_preview_down();
+        assert_eq!(prompt.preview_scroll, 10);
+    }
+
+    #[test]
+    fn test_conflict_prompt_scroll_preview_up() {
+        let mut prompt = create_test_prompt();
+
+        // Scroll down first
+        prompt.scroll_preview_down();
+        prompt.scroll_preview_down();
+        assert_eq!(prompt.preview_scroll, 10);
+
+        // Scroll up
+        prompt.scroll_preview_up();
+        assert_eq!(prompt.preview_scroll, 5);
+
+        prompt.scroll_preview_up();
+        assert_eq!(prompt.preview_scroll, 0);
+    }
+
+    #[test]
+    fn test_conflict_prompt_scroll_preview_up_saturates_at_zero() {
+        let mut prompt = create_test_prompt();
+
+        assert_eq!(prompt.preview_scroll, 0);
+
+        // Scrolling up at 0 should stay at 0 (saturating_sub)
+        prompt.scroll_preview_up();
+        assert_eq!(prompt.preview_scroll, 0);
+
+        prompt.scroll_preview_up();
+        assert_eq!(prompt.preview_scroll, 0);
+    }
+
+    #[test]
+    fn test_conflict_prompt_scroll_preview_down_large_values() {
+        let mut prompt = create_test_prompt();
+
+        // Scroll down many times
+        for _ in 0..100 {
+            prompt.scroll_preview_down();
+        }
+
+        // Should be 500 (100 * 5)
+        assert_eq!(prompt.preview_scroll, 500);
+    }
+
+    #[test]
+    fn test_conflict_prompt_navigation_sequence() {
+        let mut prompt = create_test_prompt();
+
+        // Test a navigation sequence
+        prompt.next(); // 0 -> 1 (Override)
+        prompt.next(); // 1 -> 2 (Skip)
+        prompt.next(); // 2 -> 3 (AllSkip)
+        assert_eq!(prompt.get_selected_action(), ConflictAction::AllSkip);
+
+        prompt.previous(); // 3 -> 2 (Skip)
+        assert_eq!(prompt.get_selected_action(), ConflictAction::Skip);
+
+        prompt.previous(); // 2 -> 1 (Override)
+        prompt.previous(); // 1 -> 0 (Diff)
+        assert_eq!(prompt.get_selected_action(), ConflictAction::Diff);
+    }
+
+    #[test]
+    fn test_conflict_prompt_with_different_change_types() {
+        // Test LocalModification
+        let prompt1 = ConflictPrompt::new(
+            "file1.txt".to_string(),
+            ChangeSummary {
+                lines_added: 1,
+                lines_removed: 0,
+                lines_modified: 0,
+            },
+            ChangePreview {
+                lines: vec![PreviewLine {
+                    tag: PreviewTag::Add,
+                    content: "new line".to_string(),
+                }],
+                truncated: false,
+            },
+            ChangeType::LocalModification,
+        );
+        assert_eq!(prompt1.change_type, ChangeType::LocalModification);
+
+        // Test SourceUpdate
+        let prompt2 = ConflictPrompt::new(
+            "file2.txt".to_string(),
+            ChangeSummary {
+                lines_added: 1,
+                lines_removed: 0,
+                lines_modified: 0,
+            },
+            ChangePreview {
+                lines: vec![PreviewLine {
+                    tag: PreviewTag::Add,
+                    content: "new line".to_string(),
+                }],
+                truncated: false,
+            },
+            ChangeType::SourceUpdate,
+        );
+        assert_eq!(prompt2.change_type, ChangeType::SourceUpdate);
+
+        // Test TrueConflict
+        let prompt3 = ConflictPrompt::new(
+            "file3.txt".to_string(),
+            ChangeSummary {
+                lines_added: 1,
+                lines_removed: 0,
+                lines_modified: 0,
+            },
+            ChangePreview {
+                lines: vec![PreviewLine {
+                    tag: PreviewTag::Add,
+                    content: "new line".to_string(),
+                }],
+                truncated: false,
+            },
+            ChangeType::TrueConflict,
+        );
+        assert_eq!(prompt3.change_type, ChangeType::TrueConflict);
+    }
+
+    #[test]
+    fn test_conflict_prompt_with_empty_preview() {
+        let summary = ChangeSummary {
+            lines_added: 0,
+            lines_removed: 0,
+            lines_modified: 0,
+        };
+
+        let preview = ChangePreview {
+            lines: vec![],
+            truncated: false,
+        };
+
+        let prompt = ConflictPrompt::new(
+            "empty.txt".to_string(),
+            summary,
+            preview,
+            ChangeType::TrueConflict,
+        );
+
+        assert_eq!(prompt.preview.lines.len(), 0);
+        assert_eq!(prompt.summary.lines_added, 0);
+        assert_eq!(prompt.summary.lines_removed, 0);
+        assert_eq!(prompt.summary.lines_modified, 0);
+    }
+
+    #[test]
+    fn test_conflict_prompt_with_truncated_preview() {
+        let summary = ChangeSummary {
+            lines_added: 100,
+            lines_removed: 50,
+            lines_modified: 25,
+        };
+
+        let preview = ChangePreview {
+            lines: vec![
+                PreviewLine {
+                    tag: PreviewTag::Add,
+                    content: "line1".to_string(),
+                },
+                PreviewLine {
+                    tag: PreviewTag::Remove,
+                    content: "line2".to_string(),
+                },
+            ],
+            truncated: true,
+        };
+
+        let prompt = ConflictPrompt::new(
+            "large.txt".to_string(),
+            summary,
+            preview,
+            ChangeType::TrueConflict,
+        );
+
+        assert!(prompt.preview.truncated);
+        assert_eq!(prompt.summary.lines_added, 100);
+        assert_eq!(prompt.summary.lines_removed, 50);
+        assert_eq!(prompt.summary.lines_modified, 25);
     }
 }

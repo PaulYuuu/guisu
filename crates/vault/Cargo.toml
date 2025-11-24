@@ -28,3 +28,6 @@ rbw = [] # Unofficial Bitwarden CLI (rbw.rs)
 bw-sdk = ["tokio"]
 # Future: 1Password support
 op = [] # 1Password CLI
+
+[lints]
+workspace = true

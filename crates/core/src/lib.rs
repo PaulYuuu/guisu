@@ -2,10 +2,10 @@
 //!
 //! This is the foundation crate (Layer 0) that all other guisu crates depend on.
 //! It provides:
-//! - Path types (AbsPath, RelPath, SourceRelPath)
+//! - Path types (`AbsPath`, `RelPath`, `SourceRelPath`)
 //! - Base error types
 //! - Platform detection
-//! - Core behavioral traits (ConfigProvider, EncryptionProvider, etc.)
+//! - Core behavioral traits (`ConfigProvider`, `EncryptionProvider`, etc.)
 //! - Common type definitions
 //!
 //! This crate has no dependencies on other guisu crates.

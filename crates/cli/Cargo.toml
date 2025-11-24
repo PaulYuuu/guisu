@@ -62,3 +62,6 @@ xdg = "3.0"
 anyhow.workspace = true
 vergen.workspace = true
 vergen-git2.workspace = true
+
+[lints]
+workspace = true

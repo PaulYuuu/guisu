@@ -50,9 +50,17 @@ pub trait ConfigProvider {
 /// ```
 pub trait EncryptionProvider {
     /// Encrypt data
+    ///
+    /// # Errors
+    ///
+    /// Returns error if encryption fails
     fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>>;
 
     /// Decrypt data
+    ///
+    /// # Errors
+    ///
+    /// Returns error if decryption fails or data is invalid
     fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>>;
 }
 
@@ -89,6 +97,10 @@ pub trait TemplateRenderer {
     /// * `template` - The template source code
     /// * `context` - Context data as a JSON value
     ///
+    /// # Errors
+    ///
+    /// Returns error if template syntax is invalid or rendering fails
+    ///
     /// # Examples
     ///
     /// ```ignore
@@ -104,6 +116,10 @@ pub trait TemplateRenderer {
     /// * `name` - Template name to use in error messages (e.g., file path)
     /// * `template` - The template source code
     /// * `context` - Context data as a JSON value
+    ///
+    /// # Errors
+    ///
+    /// Returns error if template syntax is invalid or rendering fails
     fn render_named_str(
         &self,
         name: &str,
@@ -118,7 +134,7 @@ pub trait TemplateRenderer {
 /// (Bitwarden, 1Password, pass, etc.).
 pub trait VaultProvider {
     /// Get the name of this vault provider (e.g., "bitwarden", "1password")
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
 
     /// Check if this vault provider is available (CLI installed and accessible)
     fn is_available(&self) -> bool;
@@ -127,8 +143,16 @@ pub trait VaultProvider {
     fn requires_unlock(&self) -> bool;
 
     /// Unlock the vault (e.g., login, get session token)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if authentication fails or vault is unavailable
     fn unlock(&mut self) -> Result<()>;
 
     /// Get a secret value by key/identifier
+    ///
+    /// # Errors
+    ///
+    /// Returns error if secret is not found or vault access fails
     fn get_secret(&self, key: &str) -> Result<String>;
 }

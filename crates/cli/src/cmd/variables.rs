@@ -36,10 +36,9 @@ impl Command for VariablesCommand {
     fn execute(&self, context: &RuntimeContext) -> crate::error::Result<()> {
         // Determine filter based on flags
         let filter = match (self.builtin, self.user) {
-            (true, true) => VariableFilter::All, // Both = show all
             (true, false) => VariableFilter::BuiltinOnly,
             (false, true) => VariableFilter::UserOnly,
-            (false, false) => VariableFilter::All, // Default = show all
+            _ => VariableFilter::All, // Both or neither = show all
         };
 
         run_impl(context.source_dir(), &context.config, self.json, filter).map_err(Into::into)
@@ -49,8 +48,11 @@ impl Command for VariablesCommand {
 /// Which variables to display
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VariableFilter {
+    /// Show all variables (builtin and user)
     All,
+    /// Show only builtin variables
     BuiltinOnly,
+    /// Show only user-defined variables
     UserOnly,
 }
 
@@ -65,7 +67,7 @@ struct VariableData {
     variables: BTreeMap<String, serde_json::Value>,
 }
 
-/// System variables extracted from TemplateContext
+/// System variables extracted from `TemplateContext`
 #[derive(Debug, Serialize)]
 struct SystemVariables {
     os: String,
@@ -127,9 +129,10 @@ fn run_impl(source_dir: &Path, config: &Config, json: bool, filter: VariableFilt
 
     // Collect guisu runtime variables (only if needed)
     let guisu_vars = if matches!(filter, VariableFilter::All | VariableFilter::BuiltinOnly) {
-        let dest_dir = dirs::home_dir()
-            .map(|p| crate::path_to_string(&p))
-            .unwrap_or_else(|| "/home/unknown".to_string());
+        let dest_dir = dirs::home_dir().map_or_else(
+            || "/home/unknown".to_string(),
+            |p| crate::path_to_string(&p),
+        );
 
         // Get the full dotfiles directory (including rootEntry if configured)
         let dotfiles_dir = config.dotfiles_dir(source_dir);
@@ -186,96 +189,132 @@ fn run_impl(source_dir: &Path, config: &Config, json: bool, filter: VariableFilt
     Ok(())
 }
 
-/// Output in pretty/table format
-fn output_pretty(data: &VariableData) {
-    // Collect all key-value pairs first to calculate max width
-    let mut all_vars: Vec<(String, serde_json::Value)> = Vec::new();
-
-    // Collect system variables
-    if let Some(system) = &data.system {
-        all_vars.push((
+/// Collect system variables into key-value pairs
+fn collect_system_variables(system: &SystemVariables) -> Vec<(String, serde_json::Value)> {
+    let mut vars = vec![
+        (
             "system.os".to_string(),
             serde_json::Value::String(system.os.clone()),
-        ));
-        all_vars.push((
+        ),
+        (
             "system.osFamily".to_string(),
             serde_json::Value::String(system.os_family.clone()),
-        ));
+        ),
+    ];
 
-        if !system.distro.is_empty() {
-            all_vars.push((
-                "system.distro".to_string(),
-                serde_json::Value::String(system.distro.clone()),
-            ));
-        }
-        if !system.distro_id.is_empty() {
-            all_vars.push((
-                "system.distroId".to_string(),
-                serde_json::Value::String(system.distro_id.clone()),
-            ));
-        }
-        if !system.distro_version.is_empty() {
-            all_vars.push((
-                "system.distroVersion".to_string(),
-                serde_json::Value::String(system.distro_version.clone()),
-            ));
-        }
-
-        all_vars.push((
-            "system.arch".to_string(),
-            serde_json::Value::String(system.arch.clone()),
+    if !system.distro.is_empty() {
+        vars.push((
+            "system.distro".to_string(),
+            serde_json::Value::String(system.distro.clone()),
         ));
-        all_vars.push((
-            "system.hostname".to_string(),
-            serde_json::Value::String(system.hostname.clone()),
+    }
+    if !system.distro_id.is_empty() {
+        vars.push((
+            "system.distroId".to_string(),
+            serde_json::Value::String(system.distro_id.clone()),
         ));
-        all_vars.push((
-            "system.username".to_string(),
-            serde_json::Value::String(system.username.clone()),
-        ));
-        all_vars.push((
-            "system.uid".to_string(),
-            serde_json::Value::String(system.uid.clone()),
-        ));
-        all_vars.push((
-            "system.gid".to_string(),
-            serde_json::Value::String(system.gid.clone()),
-        ));
-        all_vars.push((
-            "system.group".to_string(),
-            serde_json::Value::String(system.group.clone()),
-        ));
-        all_vars.push((
-            "system.homeDir".to_string(),
-            serde_json::Value::String(system.home_dir.clone()),
+    }
+    if !system.distro_version.is_empty() {
+        vars.push((
+            "system.distroVersion".to_string(),
+            serde_json::Value::String(system.distro_version.clone()),
         ));
     }
 
-    // Collect guisu variables
-    if let Some(guisu) = &data.guisu {
-        all_vars.push((
+    vars.extend_from_slice(&[
+        (
+            "system.arch".to_string(),
+            serde_json::Value::String(system.arch.clone()),
+        ),
+        (
+            "system.hostname".to_string(),
+            serde_json::Value::String(system.hostname.clone()),
+        ),
+        (
+            "system.username".to_string(),
+            serde_json::Value::String(system.username.clone()),
+        ),
+        (
+            "system.uid".to_string(),
+            serde_json::Value::String(system.uid.clone()),
+        ),
+        (
+            "system.gid".to_string(),
+            serde_json::Value::String(system.gid.clone()),
+        ),
+        (
+            "system.group".to_string(),
+            serde_json::Value::String(system.group.clone()),
+        ),
+        (
+            "system.homeDir".to_string(),
+            serde_json::Value::String(system.home_dir.clone()),
+        ),
+    ]);
+
+    vars
+}
+
+/// Collect guisu variables into key-value pairs
+fn collect_guisu_variables(guisu: &GuisuVariables) -> Vec<(String, serde_json::Value)> {
+    let mut vars = vec![
+        (
             "guisu.srcDir".to_string(),
             serde_json::Value::String(guisu.src_dir.clone()),
-        ));
-        all_vars.push((
+        ),
+        (
             "guisu.workingTree".to_string(),
             serde_json::Value::String(guisu.working_tree.clone()),
-        ));
-        all_vars.push((
+        ),
+        (
             "guisu.dstDir".to_string(),
             serde_json::Value::String(guisu.dst_dir.clone()),
+        ),
+    ];
+
+    if let Some(ref root_entry) = guisu.root_entry {
+        vars.push((
+            "guisu.rootEntry".to_string(),
+            serde_json::Value::String(root_entry.clone()),
         ));
-        if let Some(ref root_entry) = guisu.root_entry {
-            all_vars.push((
-                "guisu.rootEntry".to_string(),
-                serde_json::Value::String(root_entry.clone()),
-            ));
-        }
+    }
+
+    vars
+}
+
+/// Collect all variables from data
+fn collect_all_variables(data: &VariableData) -> Vec<(String, serde_json::Value)> {
+    let mut all_vars = Vec::new();
+
+    if let Some(system) = &data.system {
+        all_vars.extend(collect_system_variables(system));
+    }
+
+    if let Some(guisu) = &data.guisu {
+        all_vars.extend(collect_guisu_variables(guisu));
     }
 
     // Collect user variables
     let flattened_user = flatten_json_map(&data.variables, "");
     all_vars.extend(flattened_user);
+
+    all_vars
+}
+
+/// Display a section of variables
+fn display_variable_section(title: &str, vars: &[(String, serde_json::Value)], max_key_len: usize) {
+    if !vars.is_empty() {
+        println!("\n{}", title.bright_cyan().bold());
+        println!("{}", "─".repeat(60).dimmed());
+        for (key, value) in vars {
+            print_variable_aligned(key, value, max_key_len);
+        }
+    }
+}
+
+/// Output in pretty/table format
+fn output_pretty(data: &VariableData) {
+    let all_vars = collect_all_variables(data);
 
     // Calculate maximum key length
     let max_key_len = all_vars.iter().map(|(k, _)| k.len()).max().unwrap_or(20);
@@ -284,42 +323,22 @@ fn output_pretty(data: &VariableData) {
     let system_vars: Vec<_> = all_vars
         .iter()
         .filter(|(k, _)| k.starts_with("system."))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let guisu_vars: Vec<_> = all_vars
         .iter()
         .filter(|(k, _)| k.starts_with("guisu."))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let user_vars: Vec<_> = all_vars
         .iter()
         .filter(|(k, _)| !k.starts_with("system.") && !k.starts_with("guisu."))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    // Display system variables
-    if !system_vars.is_empty() {
-        println!("\n{}", "System variables:".bright_cyan().bold());
-        println!("{}", "─".repeat(60).dimmed());
-        for (key, value) in system_vars {
-            print_variable_aligned(key, value, max_key_len);
-        }
-    }
-
-    // Display guisu variables
-    if !guisu_vars.is_empty() {
-        println!("\n{}", "Guisu variables:".bright_cyan().bold());
-        println!("{}", "─".repeat(60).dimmed());
-        for (key, value) in guisu_vars {
-            print_variable_aligned(key, value, max_key_len);
-        }
-    }
-
-    // Display user variables
-    if !user_vars.is_empty() {
-        println!("\n{}", "User variables:".bright_cyan().bold());
-        println!("{}", "─".repeat(60).dimmed());
-        for (key, value) in user_vars {
-            print_variable_aligned(key, value, max_key_len);
-        }
-    }
+    display_variable_section("System variables:", &system_vars, max_key_len);
+    display_variable_section("Guisu variables:", &guisu_vars, max_key_len);
+    display_variable_section("User variables:", &user_vars, max_key_len);
 
     println!();
 }
@@ -335,7 +354,7 @@ fn flatten_json_map(
         let full_key = if prefix.is_empty() {
             key.clone()
         } else {
-            format!("{}.{}", prefix, key)
+            format!("{prefix}.{key}")
         };
 
         match value {
@@ -379,6 +398,302 @@ fn print_variable_aligned(key: &str, value: &serde_json::Value, width: usize) {
 fn output_json(data: &VariableData) -> Result<()> {
     let json =
         serde_json::to_string_pretty(data).context("Failed to serialize variables to JSON")?;
-    println!("{}", json);
+    println!("{json}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_variable_filter_values() {
+        assert_eq!(VariableFilter::All, VariableFilter::All);
+        assert_ne!(VariableFilter::All, VariableFilter::BuiltinOnly);
+        assert_ne!(VariableFilter::BuiltinOnly, VariableFilter::UserOnly);
+    }
+
+    #[test]
+    fn test_flatten_json_map_empty() {
+        let map = BTreeMap::new();
+        let result = flatten_json_map(&map, "");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_flatten_json_map_simple() {
+        let mut map = BTreeMap::new();
+        map.insert("name".to_string(), json!("John"));
+        map.insert("age".to_string(), json!(30));
+
+        let result = flatten_json_map(&map, "");
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get("name"), Some(&json!("John")));
+        assert_eq!(result.get("age"), Some(&json!(30)));
+    }
+
+    #[test]
+    fn test_flatten_json_map_nested() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "user".to_string(),
+            json!({
+                "name": "Alice",
+                "email": "alice@example.com"
+            }),
+        );
+
+        let result = flatten_json_map(&map, "");
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get("user.name"), Some(&json!("Alice")));
+        assert_eq!(result.get("user.email"), Some(&json!("alice@example.com")));
+    }
+
+    #[test]
+    fn test_flatten_json_map_deeply_nested() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "config".to_string(),
+            json!({
+                "server": {
+                    "host": "localhost",
+                    "port": 8080
+                },
+                "database": {
+                    "name": "mydb"
+                }
+            }),
+        );
+
+        let result = flatten_json_map(&map, "");
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.get("config.server.host"), Some(&json!("localhost")));
+        assert_eq!(result.get("config.server.port"), Some(&json!(8080)));
+        assert_eq!(result.get("config.database.name"), Some(&json!("mydb")));
+    }
+
+    #[test]
+    fn test_flatten_json_map_with_prefix() {
+        let mut map = BTreeMap::new();
+        map.insert("name".to_string(), json!("Bob"));
+        map.insert("role".to_string(), json!("admin"));
+
+        let result = flatten_json_map(&map, "user");
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get("user.name"), Some(&json!("Bob")));
+        assert_eq!(result.get("user.role"), Some(&json!("admin")));
+    }
+
+    #[test]
+    fn test_flatten_json_map_mixed_types() {
+        let mut map = BTreeMap::new();
+        map.insert("string".to_string(), json!("text"));
+        map.insert("number".to_string(), json!(42));
+        map.insert("bool".to_string(), json!(true));
+        map.insert("null".to_string(), json!(null));
+        map.insert("array".to_string(), json!([1, 2, 3]));
+
+        let result = flatten_json_map(&map, "");
+
+        assert_eq!(result.len(), 5);
+        assert_eq!(result.get("string"), Some(&json!("text")));
+        assert_eq!(result.get("number"), Some(&json!(42)));
+        assert_eq!(result.get("bool"), Some(&json!(true)));
+        assert_eq!(result.get("null"), Some(&json!(null)));
+        assert_eq!(result.get("array"), Some(&json!([1, 2, 3])));
+    }
+
+    #[test]
+    fn test_flatten_json_map_preserves_order() {
+        let mut map = BTreeMap::new();
+        // BTreeMap maintains sorted order
+        map.insert("zebra".to_string(), json!("last"));
+        map.insert("apple".to_string(), json!("first"));
+        map.insert("banana".to_string(), json!("second"));
+
+        let result = flatten_json_map(&map, "");
+
+        // BTreeMap should maintain alphabetical order
+        let keys: Vec<_> = result.keys().collect();
+        assert_eq!(keys, vec!["apple", "banana", "zebra"]);
+    }
+
+    #[test]
+    fn test_flatten_json_map_empty_nested_object() {
+        let mut map = BTreeMap::new();
+        map.insert("empty".to_string(), json!({}));
+        map.insert("value".to_string(), json!("test"));
+
+        let result = flatten_json_map(&map, "");
+
+        // Empty object produces no flattened keys
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("value"), Some(&json!("test")));
+        assert!(result.get("empty").is_none());
+    }
+
+    #[test]
+    fn test_system_variables_serialization() {
+        let sys_vars = SystemVariables {
+            os: "darwin".to_string(),
+            os_family: "unix".to_string(),
+            distro: String::new(),
+            distro_id: String::new(),
+            distro_version: String::new(),
+            arch: "aarch64".to_string(),
+            hostname: "test-host".to_string(),
+            username: "testuser".to_string(),
+            uid: "1000".to_string(),
+            gid: "1000".to_string(),
+            group: "staff".to_string(),
+            home_dir: "/home/testuser".to_string(),
+        };
+
+        let json = serde_json::to_value(&sys_vars).expect("Failed to serialize");
+
+        assert_eq!(json["os"], "darwin");
+        assert_eq!(json["arch"], "aarch64");
+        // Empty strings should be skipped
+        assert!(json.get("distro").is_none());
+        assert!(json.get("distroId").is_none());
+    }
+
+    #[test]
+    fn test_guisu_variables_serialization() {
+        let guisu_vars = GuisuVariables {
+            src_dir: "/path/to/src".to_string(),
+            working_tree: "/path/to/repo".to_string(),
+            dst_dir: "/home/user".to_string(),
+            root_entry: Some("home".to_string()),
+        };
+
+        let json = serde_json::to_value(&guisu_vars).expect("Failed to serialize");
+
+        assert_eq!(json["srcDir"], "/path/to/src");
+        assert_eq!(json["workingTree"], "/path/to/repo");
+        assert_eq!(json["dstDir"], "/home/user");
+        assert_eq!(json["rootEntry"], "home");
+    }
+
+    #[test]
+    fn test_guisu_variables_serialization_no_root_entry() {
+        let guisu_vars = GuisuVariables {
+            src_dir: "/path/to/src".to_string(),
+            working_tree: "/path/to/repo".to_string(),
+            dst_dir: "/home/user".to_string(),
+            root_entry: None,
+        };
+
+        let json = serde_json::to_value(&guisu_vars).expect("Failed to serialize");
+
+        // None root_entry should be skipped
+        assert!(json.get("rootEntry").is_none());
+    }
+
+    #[test]
+    fn test_variable_data_serialization_complete() {
+        let mut vars = BTreeMap::new();
+        vars.insert("email".to_string(), json!("user@example.com"));
+
+        let data = VariableData {
+            system: Some(SystemVariables {
+                os: "linux".to_string(),
+                os_family: "unix".to_string(),
+                distro: "Ubuntu".to_string(),
+                distro_id: "ubuntu".to_string(),
+                distro_version: "22.04".to_string(),
+                arch: "x86_64".to_string(),
+                hostname: "myhost".to_string(),
+                username: "myuser".to_string(),
+                uid: "1000".to_string(),
+                gid: "1000".to_string(),
+                group: "myuser".to_string(),
+                home_dir: "/home/myuser".to_string(),
+            }),
+            guisu: Some(GuisuVariables {
+                src_dir: "/src".to_string(),
+                working_tree: "/repo".to_string(),
+                dst_dir: "/home".to_string(),
+                root_entry: Some("home".to_string()),
+            }),
+            variables: vars,
+        };
+
+        let json = serde_json::to_value(&data).expect("Failed to serialize");
+
+        assert!(json.get("system").is_some());
+        assert!(json.get("guisu").is_some());
+        assert_eq!(json["email"], "user@example.com");
+    }
+
+    #[test]
+    fn test_variable_data_serialization_user_only() {
+        let mut vars = BTreeMap::new();
+        vars.insert("name".to_string(), json!("Test"));
+
+        let data = VariableData {
+            system: None,
+            guisu: None,
+            variables: vars,
+        };
+
+        let json = serde_json::to_value(&data).expect("Failed to serialize");
+
+        // None values should be skipped
+        assert!(json.get("system").is_none());
+        assert!(json.get("guisu").is_none());
+        assert_eq!(json["name"], "Test");
+    }
+
+    #[test]
+    fn test_flatten_json_map_with_array_values() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "config".to_string(),
+            json!({
+                "tags": ["dev", "prod"],
+                "ports": [8080, 8443]
+            }),
+        );
+
+        let result = flatten_json_map(&map, "");
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get("config.tags"), Some(&json!(["dev", "prod"])));
+        assert_eq!(result.get("config.ports"), Some(&json!([8080, 8443])));
+    }
+
+    #[test]
+    fn test_flatten_json_map_complex_nested_structure() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "app".to_string(),
+            json!({
+                "name": "myapp",
+                "server": {
+                    "host": "localhost",
+                    "ports": {
+                        "http": 8080,
+                        "https": 8443
+                    }
+                },
+                "enabled": true
+            }),
+        );
+
+        let result = flatten_json_map(&map, "");
+
+        assert_eq!(result.len(), 5);
+        assert_eq!(result.get("app.name"), Some(&json!("myapp")));
+        assert_eq!(result.get("app.server.host"), Some(&json!("localhost")));
+        assert_eq!(result.get("app.server.ports.http"), Some(&json!(8080)));
+        assert_eq!(result.get("app.server.ports.https"), Some(&json!(8443)));
+        assert_eq!(result.get("app.enabled"), Some(&json!(true)));
+    }
 }

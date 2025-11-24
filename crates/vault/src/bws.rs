@@ -13,11 +13,13 @@ use std::process::Command;
 pub struct BwsCli;
 
 impl BwsCli {
+    /// Create a new Bitwarden Secrets Manager CLI provider
+    #[must_use]
     pub fn new() -> Self {
         Self
     }
 
-    fn check_access_token(&self) -> Result<()> {
+    fn check_access_token() -> Result<()> {
         if std::env::var("BWS_ACCESS_TOKEN").is_err() {
             return Err(Error::AuthenticationRequired(
                 "BWS_ACCESS_TOKEN environment variable not set.\n\
@@ -40,7 +42,7 @@ impl Default for BwsCli {
 }
 
 impl SecretProvider for BwsCli {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "bws"
     }
 
@@ -51,7 +53,7 @@ impl SecretProvider for BwsCli {
             ));
         }
 
-        self.check_access_token()?;
+        Self::check_access_token()?;
 
         // Build command with --output json flag
         let mut cmd_args: Vec<&str> = args.to_vec();
@@ -84,7 +86,7 @@ impl SecretProvider for BwsCli {
             .unwrap_or(false)
     }
 
-    fn help(&self) -> &str {
+    fn help(&self) -> &'static str {
         "Bitwarden Secrets Manager CLI (bws)\n\
          \n\
          Requirements:\n\

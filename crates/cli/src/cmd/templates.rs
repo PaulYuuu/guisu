@@ -20,6 +20,10 @@ use guisu_config::Config;
 /// This includes templates from:
 /// - .guisu/templates/ (common templates)
 /// - .guisu/templates/`<platform>`/ (platform-specific templates)
+///
+/// # Errors
+///
+/// Currently never returns an error (Result is for future compatibility)
 pub fn run_list(source_dir: &Path, _config: &Config) -> Result<()> {
     let platform = CURRENT_PLATFORM.os;
     println!(
@@ -106,6 +110,15 @@ pub fn run_list(source_dir: &Path, _config: &Config) -> Result<()> {
 /// 2. .guisu/templates/ (fallback)
 ///
 /// The template is rendered with all available variables and guisu context.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The specified template is not found
+/// - Reading the template file fails
+/// - Loading variables from .guisu/variables/ fails
+/// - Creating the template engine fails
+/// - Template rendering fails
 pub fn run_show(
     source_dir: &Path,
     dest_dir: &Path,
@@ -128,8 +141,7 @@ pub fn run_show(
         common_template
     } else {
         anyhow::bail!(
-            "Template '{}' not found.\n\nRun 'guisu templates list' to see available templates.",
-            template_name
+            "Template '{template_name}' not found.\n\nRun 'guisu templates list' to see available templates."
         );
     };
 
@@ -153,7 +165,7 @@ pub fn run_show(
     all_variables.extend(config.variables.iter().map(|(k, v)| (k.clone(), v.clone())));
 
     // Create template context
-    let context = create_template_context(config, source_dir, dest_dir, all_variables)?;
+    let context = create_template_context(config, source_dir, dest_dir, all_variables);
 
     // Render the template
     let rendered = render_template(
@@ -166,7 +178,7 @@ pub fn run_show(
     )?;
 
     // Output the rendered content
-    print!("{}", rendered);
+    print!("{rendered}");
 
     // Ensure output ends with newline (POSIX standard)
     if !rendered.ends_with('\n') {
@@ -182,22 +194,20 @@ fn create_template_context(
     source_dir: &Path,
     dest_dir: &Path,
     variables: indexmap::IndexMap<String, serde_json::Value>,
-) -> Result<TemplateContext> {
+) -> TemplateContext {
     let dotfiles_dir_str = crate::path_to_string(&config.dotfiles_dir(source_dir));
     let root_entry_str = crate::path_to_string(&config.general.root_entry);
     let working_tree = guisu_engine::git::find_working_tree(source_dir)
         .unwrap_or_else(|| source_dir.to_path_buf());
 
-    let context = TemplateContext::new()
+    TemplateContext::new()
         .with_guisu_info(
             dotfiles_dir_str,
             crate::path_to_string(&working_tree),
             crate::path_to_string(dest_dir),
             root_entry_str,
         )
-        .with_variables(variables);
-
-    Ok(context)
+        .with_variables(variables)
 }
 
 /// Render a template with the given context
@@ -210,8 +220,11 @@ fn render_template(
     config: &guisu_config::Config,
 ) -> Result<String> {
     // Create engine with template directory support for includes and bitwarden provider
-    let engine =
-        crate::create_template_engine(source_dir, std::sync::Arc::new(identities.to_vec()), config);
+    let engine = crate::create_template_engine(
+        source_dir,
+        &std::sync::Arc::new(identities.to_vec()),
+        config,
+    );
 
     // Render the template
     engine
@@ -220,7 +233,7 @@ fn render_template(
             // Enhance error message with source line content
             let error_msg = e.to_string();
             let enhanced_msg = enhance_template_error(&error_msg, template);
-            anyhow::anyhow!("{}", enhanced_msg)
+            anyhow::anyhow!("{enhanced_msg}")
         })
 }
 
@@ -243,7 +256,7 @@ fn enhance_template_error(error_msg: &str, template_source: &str) -> String {
         // Extract digits until non-digit
         let num_str: String = after_line
             .chars()
-            .take_while(|c| c.is_ascii_digit())
+            .take_while(char::is_ascii_digit)
             .collect();
         num_str.parse::<usize>().ok()
     } else {
@@ -256,13 +269,163 @@ fn enhance_template_error(error_msg: &str, template_source: &str) -> String {
         if line_no > 0 && line_no <= lines.len() {
             let source_line = lines[line_no - 1]; // lines are 1-indexed
             // Show the full line content (no truncation)
-            return format!(
-                "{}\\nSource line {}:\\n  {}",
-                cleaned_msg, line_no, source_line
-            );
+            return format!("{cleaned_msg}\\nSource line {line_no}:\\n  {source_line}");
         }
     }
 
     // If we couldn't enhance the message, return the cleaned version
     cleaned_msg
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+
+    // Tests for enhance_template_error
+
+    #[test]
+    fn test_enhance_template_error_with_line_number() {
+        let error_msg = "undefined variable 'foo' at line 3";
+        let template = "line 1\nline 2\nline 3 has {{ foo }}\nline 4";
+
+        let result = enhance_template_error(error_msg, template);
+
+        assert!(result.contains("undefined variable 'foo' at line 3"));
+        assert!(result.contains("Source line 3:"));
+        assert!(result.contains("line 3 has {{ foo }}"));
+    }
+
+    #[test]
+    fn test_enhance_template_error_with_line_and_column() {
+        let error_msg = "syntax error at line 2, column 5";
+        let template = "line 1\nline 2 error here\nline 3";
+
+        let result = enhance_template_error(error_msg, template);
+
+        assert!(result.contains("syntax error at line 2"));
+        assert!(result.contains("Source line 2:"));
+        assert!(result.contains("line 2 error here"));
+    }
+
+    #[test]
+    fn test_enhance_template_error_removes_redundant_path() {
+        let error_msg = "error message (in template.j2:5)";
+        let template = "1\n2\n3\n4\n5 error\n6";
+
+        let result = enhance_template_error(error_msg, template);
+
+        // Should remove the "(in template.j2:5)" part
+        assert!(!result.contains("(in template.j2:5)"));
+        assert!(result.contains("error message"));
+    }
+
+    #[test]
+    fn test_enhance_template_error_no_line_number() {
+        let error_msg = "general error with no line info";
+        let template = "some\ntemplate\ncontent";
+
+        let result = enhance_template_error(error_msg, template);
+
+        // Should just return the error message unchanged (since no line number)
+        assert_eq!(result, "general error with no line info");
+    }
+
+    #[test]
+    fn test_enhance_template_error_line_number_out_of_bounds() {
+        let error_msg = "error at line 100";
+        let template = "only\nthree\nlines";
+
+        let result = enhance_template_error(error_msg, template);
+
+        // Should return cleaned message without source line (line 100 doesn't exist)
+        assert_eq!(result, "error at line 100");
+        assert!(!result.contains("Source line"));
+    }
+
+    #[test]
+    fn test_enhance_template_error_line_zero() {
+        let error_msg = "error at line 0";
+        let template = "line 1\nline 2";
+
+        let result = enhance_template_error(error_msg, template);
+
+        // Line 0 is invalid (lines are 1-indexed)
+        assert_eq!(result, "error at line 0");
+        assert!(!result.contains("Source line"));
+    }
+
+    #[test]
+    fn test_enhance_template_error_first_line() {
+        let error_msg = "error at line 1";
+        let template = "first line with error\nsecond line";
+
+        let result = enhance_template_error(error_msg, template);
+
+        assert!(result.contains("Source line 1:"));
+        assert!(result.contains("first line with error"));
+    }
+
+    #[test]
+    fn test_enhance_template_error_last_line() {
+        let error_msg = "error at line 3";
+        let template = "line 1\nline 2\nline 3 is last";
+
+        let result = enhance_template_error(error_msg, template);
+
+        assert!(result.contains("Source line 3:"));
+        assert!(result.contains("line 3 is last"));
+    }
+
+    #[test]
+    fn test_enhance_template_error_empty_template() {
+        let error_msg = "error at line 1";
+        let template = "";
+
+        let result = enhance_template_error(error_msg, template);
+
+        // Can't show source line from empty template
+        assert_eq!(result, "error at line 1");
+    }
+
+    #[test]
+    fn test_enhance_template_error_complex_error_message() {
+        let error_msg =
+            "template error: undefined filter 'missing' at line 5, column 10 (in my_template.j2:5)";
+        let template = "line 1\nline 2\nline 3\nline 4\nline 5 {{ value | missing }}\nline 6";
+
+        let result = enhance_template_error(error_msg, template);
+
+        // Should clean the path suffix
+        assert!(!result.contains("(in my_template.j2:5)"));
+        // Should show original error
+        assert!(result.contains("undefined filter 'missing'"));
+        // Should include source line
+        assert!(result.contains("Source line 5:"));
+        assert!(result.contains("line 5 {{ value | missing }}"));
+    }
+
+    #[test]
+    fn test_enhance_template_error_multiple_line_keywords() {
+        // Test that we extract the first "line" keyword
+        let error_msg = "error on line 2, see line 5 for details";
+        let template = "line 1\nline 2 has error\nline 3";
+
+        let result = enhance_template_error(error_msg, template);
+
+        // Should use the first line number (2)
+        assert!(result.contains("Source line 2:"));
+        assert!(result.contains("line 2 has error"));
+    }
+
+    #[test]
+    fn test_enhance_template_error_preserves_special_characters() {
+        let error_msg = "error at line 2";
+        let template = "line 1\nline 2: {{ special }} <>&\nline 3";
+
+        let result = enhance_template_error(error_msg, template);
+
+        // Should preserve all special characters in source line
+        assert!(result.contains("line 2: {{ special }} <>&"));
+    }
 }

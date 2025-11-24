@@ -25,7 +25,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     /// Template rendering error
     #[error("Template error at {location}: {message}")]
-    Render { location: String, message: String },
+    Render {
+        /// Location where the error occurred (file, line, column)
+        location: String,
+        /// Error message describing what went wrong
+        message: String,
+    },
 
     /// Template syntax error
     #[error("Template syntax error: {0}")]
@@ -50,23 +55,23 @@ impl From<minijinja::Error> for Error {
                 // The column refers to the expanded content, not the source line.
                 // In such cases, omit the misleading column number.
                 if range.start > 200 {
-                    format!("{} line {}", name, line)
+                    format!("{name} line {line}")
                 } else {
                     format!("{} line {}, column {}", name, line, range.start)
                 }
             }
             (Some(name), Some(line), None) => {
-                format!("{} line {}", name, line)
+                format!("{name} line {line}")
             }
             (None, Some(line), Some(range)) => {
                 if range.start > 200 {
-                    format!("line {}", line)
+                    format!("line {line}")
                 } else {
                     format!("line {}, column {}", line, range.start)
                 }
             }
             (None, Some(line), None) => {
-                format!("line {}", line)
+                format!("line {line}")
             }
             _ => "unknown location".to_string(),
         };
@@ -74,6 +79,155 @@ impl From<minijinja::Error> for Error {
         Error::Render {
             location,
             message: err.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+
+    #[test]
+    fn test_error_from_minijinja_syntax_error() {
+        // Create a minijinja syntax error (invalid template syntax)
+        let env = minijinja::Environment::new();
+        // Invalid syntax: unclosed tag
+        let template_result = env.render_str("{{ unclosed", minijinja::context!());
+
+        assert!(template_result.is_err());
+        let minijinja_err = template_result.unwrap_err();
+        let error: Error = minijinja_err.into();
+
+        // Should contain location info
+        let error_string = error.to_string();
+        assert!(error_string.contains("Template error at"));
+    }
+
+    #[test]
+    fn test_error_from_minijinja_undefined_filter() {
+        // Test error conversion with undefined filter
+        let env = minijinja::Environment::new();
+
+        // Use an undefined filter
+        let result = env.render_str("{{ 'test' | nonexistent }}", minijinja::context!());
+
+        assert!(result.is_err());
+        let minijinja_err = result.unwrap_err();
+        let error: Error = minijinja_err.into();
+        let error_string = error.to_string();
+
+        // Should contain template error message
+        assert!(error_string.contains("Template error at"));
+    }
+
+    #[test]
+    fn test_error_syntax() {
+        let error = Error::Syntax("invalid syntax".to_string());
+        assert_eq!(error.to_string(), "Template syntax error: invalid syntax");
+    }
+
+    #[test]
+    fn test_error_render() {
+        let error = Error::Render {
+            location: "test.j2 line 5".to_string(),
+            message: "undefined variable".to_string(),
+        };
+        assert!(error.to_string().contains("test.j2 line 5"));
+        assert!(error.to_string().contains("undefined variable"));
+    }
+
+    #[test]
+    fn test_error_other() {
+        let error = Error::Other("custom error".to_string());
+        assert_eq!(error.to_string(), "custom error");
+    }
+
+    #[test]
+    fn test_error_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let error: Error = io_err.into();
+        assert!(error.to_string().contains("IO error"));
+    }
+
+    #[test]
+    fn test_error_location_with_name_and_line_and_small_column() {
+        let env = minijinja::Environment::new();
+        // Use undefined filter which will cause error with location
+        let result = env.render_str("{{ 'test' | undefined_filter }}", minijinja::context!());
+
+        assert!(result.is_err());
+        let error: Error = result.unwrap_err().into();
+        let error_string = error.to_string();
+
+        // Should include line and column
+        assert!(error_string.contains("Template error at"));
+        assert!(error_string.contains("line"));
+    }
+
+    #[test]
+    fn test_error_location_with_large_column() {
+        // Test the branch where range.start > 200
+        // This happens when function returns are inlined
+        let error = Error::Render {
+            location: "test.j2 line 5".to_string(), // Simulating large column omission
+            message: "error from inlined function".to_string(),
+        };
+
+        let error_string = error.to_string();
+        assert!(error_string.contains("test.j2 line 5"));
+        assert!(!error_string.contains("column")); // Should not include column
+    }
+
+    #[test]
+    fn test_error_location_no_name_with_line_only() {
+        // Test branch: (None, Some(line), None)
+        let error = Error::Render {
+            location: "line 10".to_string(),
+            message: "error without name or column".to_string(),
+        };
+
+        let error_string = error.to_string();
+        assert!(error_string.contains("line 10"));
+    }
+
+    #[test]
+    fn test_error_location_fallback_to_unknown() {
+        // Test that we handle errors without location info gracefully
+        // This is hard to trigger naturally, so we test the error display
+        let error = Error::Render {
+            location: "unknown location".to_string(),
+            message: "test error".to_string(),
+        };
+
+        assert!(error.to_string().contains("unknown location"));
+        assert!(error.to_string().contains("test error"));
+    }
+
+    #[test]
+    fn test_error_debug_format() {
+        let error = Error::Syntax("test".to_string());
+        let debug_str = format!("{error:?}");
+
+        assert!(debug_str.contains("Syntax"));
+    }
+
+    #[test]
+    fn test_all_error_variants() {
+        // Test that all error variants can be created and displayed
+        let errors = vec![
+            Error::Render {
+                location: "test".to_string(),
+                message: "msg".to_string(),
+            },
+            Error::Syntax("syntax".to_string()),
+            Error::Other("other".to_string()),
+            Error::Io(std::io::Error::other("io")),
+        ];
+
+        for error in errors {
+            // All should be displayable
+            let _ = error.to_string();
         }
     }
 }

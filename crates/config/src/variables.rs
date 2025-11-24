@@ -11,6 +11,10 @@ use std::path::Path;
 /// Loading order:
 /// 1. Load all *.toml from variables/ (all platforms)
 /// 2. Load all *.toml from variables/{platform}/ (platform-specific, overwrites same keys)
+///
+/// # Errors
+///
+/// Returns error if TOML files cannot be read or parsed
 pub fn load_variables(guisu_dir: &Path, platform: &str) -> Result<IndexMap<String, JsonValue>> {
     use rayon::prelude::*;
 
@@ -93,9 +97,8 @@ fn load_variable_file(path: &Path) -> Result<Option<(String, IndexMap<String, Js
         ))
     })?;
 
-    let json_value = serde_json::to_value(value).map_err(|e| {
-        guisu_core::Error::Message(format!("Failed to convert TOML to JSON: {}", e))
-    })?;
+    let json_value = serde_json::to_value(value)
+        .map_err(|e| guisu_core::Error::Message(format!("Failed to convert TOML to JSON: {e}")))?;
 
     if let JsonValue::Object(map) = json_value {
         Ok(Some((file_stem, map.into_iter().collect())))
@@ -121,6 +124,336 @@ fn merge_variables(base: &mut IndexMap<String, JsonValue>, overlay: IndexMap<Str
                 // Overwrite with new value
                 base.insert(key, value);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_load_variables_empty_directory() {
+        let temp = TempDir::new().unwrap();
+        let guisu_dir = temp.path();
+
+        let result = load_variables(guisu_dir, "linux").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_load_variables_nonexistent_directory() {
+        let temp = TempDir::new().unwrap();
+        let nonexistent = temp.path().join("nonexistent");
+
+        let result = load_variables(&nonexistent, "linux").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_load_variables_single_file() {
+        let temp = TempDir::new().unwrap();
+        let guisu_dir = temp.path();
+        let vars_dir = guisu_dir.join("variables");
+        fs::create_dir_all(&vars_dir).unwrap();
+
+        // Create a simple TOML file
+        fs::write(
+            vars_dir.join("app.toml"),
+            r#"
+name = "test-app"
+version = "1.0"
+"#,
+        )
+        .unwrap();
+
+        let result = load_variables(guisu_dir, "linux").unwrap();
+
+        assert!(result.contains_key("app"));
+        let app = &result["app"];
+        assert_eq!(app["name"], json!("test-app"));
+        assert_eq!(app["version"], json!("1.0"));
+    }
+
+    #[test]
+    fn test_load_variables_multiple_files() {
+        let temp = TempDir::new().unwrap();
+        let guisu_dir = temp.path();
+        let vars_dir = guisu_dir.join("variables");
+        fs::create_dir_all(&vars_dir).unwrap();
+
+        fs::write(vars_dir.join("app.toml"), "name = 'app1'").unwrap();
+        fs::write(vars_dir.join("db.toml"), "host = 'localhost'").unwrap();
+        fs::write(vars_dir.join("api.toml"), "port = 8080").unwrap();
+
+        let result = load_variables(guisu_dir, "linux").unwrap();
+
+        assert_eq!(result.len(), 3);
+        assert!(result.contains_key("app"));
+        assert!(result.contains_key("db"));
+        assert!(result.contains_key("api"));
+    }
+
+    #[test]
+    fn test_load_variables_platform_specific() {
+        let temp = TempDir::new().unwrap();
+        let guisu_dir = temp.path();
+        let vars_dir = guisu_dir.join("variables");
+        fs::create_dir_all(&vars_dir).unwrap();
+
+        // Common variable
+        fs::write(
+            vars_dir.join("app.toml"),
+            r#"
+name = "app"
+env = "default"
+"#,
+        )
+        .unwrap();
+
+        // Platform-specific override
+        let linux_dir = vars_dir.join("linux");
+        fs::create_dir_all(&linux_dir).unwrap();
+        fs::write(
+            linux_dir.join("app.toml"),
+            r#"
+env = "linux"
+platform_key = "linux-specific"
+"#,
+        )
+        .unwrap();
+
+        let result = load_variables(guisu_dir, "linux").unwrap();
+
+        assert!(result.contains_key("app"));
+        let app = &result["app"];
+        assert_eq!(app["name"], json!("app"));
+        assert_eq!(app["env"], json!("linux")); // Overridden
+        assert_eq!(app["platform_key"], json!("linux-specific"));
+    }
+
+    #[test]
+    fn test_load_variables_ignores_non_toml() {
+        let temp = TempDir::new().unwrap();
+        let guisu_dir = temp.path();
+        let vars_dir = guisu_dir.join("variables");
+        fs::create_dir_all(&vars_dir).unwrap();
+
+        fs::write(vars_dir.join("app.toml"), "name = 'test'").unwrap();
+        fs::write(vars_dir.join("README.md"), "# Variables").unwrap();
+        fs::write(vars_dir.join("config.json"), "{}").unwrap();
+        fs::write(vars_dir.join("data.txt"), "text").unwrap();
+
+        let result = load_variables(guisu_dir, "linux").unwrap();
+
+        // Only .toml file should be loaded
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key("app"));
+    }
+
+    #[test]
+    fn test_load_variable_file_valid() {
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("test.toml");
+
+        fs::write(&file_path, "key = 'value'\nnumber = 42").unwrap();
+
+        let result = load_variable_file(&file_path).unwrap();
+        assert!(result.is_some());
+
+        let (stem, vars) = result.unwrap();
+        assert_eq!(stem, "test");
+        assert_eq!(vars.get("key"), Some(&json!("value")));
+        assert_eq!(vars.get("number"), Some(&json!(42)));
+    }
+
+    #[test]
+    fn test_load_variable_file_non_toml() {
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("test.txt");
+
+        fs::write(&file_path, "text content").unwrap();
+
+        let result = load_variable_file(&file_path).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_variable_file_invalid_toml() {
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("invalid.toml");
+
+        fs::write(&file_path, "invalid toml [[[").unwrap();
+
+        let result = load_variable_file(&file_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("parse") || err.contains("TOML"));
+    }
+
+    #[test]
+    fn test_load_variable_file_nonexistent() {
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("nonexistent.toml");
+
+        let result = load_variable_file(&file_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_merge_variables_simple_overwrite() {
+        let mut base = IndexMap::new();
+        base.insert("key1".to_string(), json!("value1"));
+        base.insert("key2".to_string(), json!(42));
+
+        let mut overlay = IndexMap::new();
+        overlay.insert("key2".to_string(), json!(100)); // Overwrite
+        overlay.insert("key3".to_string(), json!("new")); // Add new
+
+        merge_variables(&mut base, overlay);
+
+        assert_eq!(base.get("key1"), Some(&json!("value1"))); // Unchanged
+        assert_eq!(base.get("key2"), Some(&json!(100))); // Overwritten
+        assert_eq!(base.get("key3"), Some(&json!("new"))); // Added
+    }
+
+    #[test]
+    fn test_merge_variables_deep_merge_objects() {
+        let mut base = IndexMap::new();
+        base.insert(
+            "app".to_string(),
+            json!({
+                "name": "base-app",
+                "settings": {
+                    "debug": false,
+                    "port": 8080
+                }
+            }),
+        );
+
+        let mut overlay = IndexMap::new();
+        overlay.insert(
+            "app".to_string(),
+            json!({
+                "settings": {
+                    "debug": true,
+                    "host": "localhost"
+                }
+            }),
+        );
+
+        merge_variables(&mut base, overlay);
+
+        let app = &base["app"];
+        assert_eq!(app["name"], json!("base-app")); // Preserved
+        assert_eq!(app["settings"]["debug"], json!(true)); // Overwritten
+        assert_eq!(app["settings"]["port"], json!(8080)); // Preserved
+        assert_eq!(app["settings"]["host"], json!("localhost")); // Added
+    }
+
+    #[test]
+    fn test_merge_variables_overwrite_with_different_type() {
+        let mut base = IndexMap::new();
+        base.insert("key".to_string(), json!({"nested": "object"}));
+
+        let mut overlay = IndexMap::new();
+        overlay.insert("key".to_string(), json!("simple string"));
+
+        merge_variables(&mut base, overlay);
+
+        // Object should be completely replaced with string
+        assert_eq!(base.get("key"), Some(&json!("simple string")));
+    }
+
+    #[test]
+    fn test_merge_variables_empty_overlay() {
+        let mut base = IndexMap::new();
+        base.insert("key".to_string(), json!("value"));
+
+        let overlay = IndexMap::new();
+
+        merge_variables(&mut base, overlay);
+
+        // Base should remain unchanged
+        assert_eq!(base.get("key"), Some(&json!("value")));
+    }
+
+    #[test]
+    fn test_merge_variables_empty_base() {
+        let mut base = IndexMap::new();
+
+        let mut overlay = IndexMap::new();
+        overlay.insert("key".to_string(), json!("value"));
+
+        merge_variables(&mut base, overlay);
+
+        // Overlay values should be added to empty base
+        assert_eq!(base.get("key"), Some(&json!("value")));
+    }
+
+    #[test]
+    fn test_load_variables_nested_structures() {
+        let temp = TempDir::new().unwrap();
+        let guisu_dir = temp.path();
+        let vars_dir = guisu_dir.join("variables");
+        fs::create_dir_all(&vars_dir).unwrap();
+
+        fs::write(
+            vars_dir.join("complex.toml"),
+            r#"
+[database]
+host = "localhost"
+port = 5432
+
+[database.credentials]
+user = "admin"
+password = "secret"
+
+[[servers]]
+name = "web1"
+ip = "192.168.1.1"
+
+[[servers]]
+name = "web2"
+ip = "192.168.1.2"
+"#,
+        )
+        .unwrap();
+
+        let result = load_variables(guisu_dir, "linux").unwrap();
+
+        assert!(result.contains_key("complex"));
+        let complex = &result["complex"];
+        assert_eq!(complex["database"]["host"], json!("localhost"));
+        assert_eq!(complex["database"]["credentials"]["user"], json!("admin"));
+        assert!(complex["servers"].is_array());
+    }
+
+    #[test]
+    fn test_load_variables_parallel_loading() {
+        let temp = TempDir::new().unwrap();
+        let guisu_dir = temp.path();
+        let vars_dir = guisu_dir.join("variables");
+        fs::create_dir_all(&vars_dir).unwrap();
+
+        // Create multiple files to test parallel loading
+        for i in 0..10 {
+            fs::write(
+                vars_dir.join(format!("file{i}.toml")),
+                format!("value = {i}"),
+            )
+            .unwrap();
+        }
+
+        let result = load_variables(guisu_dir, "linux").unwrap();
+
+        assert_eq!(result.len(), 10);
+        for i in 0..10 {
+            let key = format!("file{i}");
+            assert!(result.contains_key(&key));
         }
     }
 }

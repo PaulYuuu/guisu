@@ -19,10 +19,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 use walkdir::WalkDir;
 
-/// Custom serde module for SystemTime serialization
+/// Custom serde module for `SystemTime` serialization
 mod systemtime_serde {
-    use super::*;
+    use super::{Deserialize, Deserializer, Duration, Serializer, SystemTime, UNIX_EPOCH};
 
+    // This signature is required by serde's `#[serde(with)]` attribute
+    #[allow(clippy::ref_option)]
     pub fn serialize<S>(
         time: &Option<SystemTime>,
         serializer: S,
@@ -50,8 +52,10 @@ mod systemtime_serde {
     }
 }
 
+/// State tracking for hook execution
 #[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct HookState {
+    /// Last time hooks were executed
     #[serde(with = "systemtime_serde")]
     #[bincode(with_serde)]
     pub last_executed: Option<std::time::SystemTime>,
@@ -72,6 +76,7 @@ pub struct HookState {
 
 impl HookState {
     /// Create new hook state
+    #[must_use]
     pub fn new() -> Self {
         Self {
             last_executed: None,
@@ -83,6 +88,7 @@ impl HookState {
     }
 
     /// Check if a hook with mode=once has already been executed
+    #[must_use]
     pub fn has_executed_once(&self, hook_name: &str) -> bool {
         self.once_executed.contains(hook_name)
     }
@@ -97,6 +103,7 @@ impl HookState {
     /// Returns true if:
     /// - No hash is stored (first run)
     /// - The stored hash differs from the provided hash
+    #[must_use]
     pub fn hook_content_changed(&self, hook_name: &str, content_hash: &[u8]) -> bool {
         match self.onchange_hashes.get(hook_name) {
             None => true, // First run
@@ -112,8 +119,12 @@ impl HookState {
     /// Update the state from a hooks directory
     ///
     /// This computes a hash of all files in the hooks directory and updates
-    /// the last_executed timestamp.
+    /// the `last_executed` timestamp.
     /// Optionally saves the current hook collections for diff display.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory hash cannot be computed (e.g., I/O error, permission denied)
     pub fn update(&mut self, hooks_dir: &Path) -> Result<()> {
         self.content_hash = Some(Self::compute_directory_hash(hooks_dir)?);
         self.last_executed = Some(std::time::SystemTime::now());
@@ -121,6 +132,10 @@ impl HookState {
     }
 
     /// Update state and save current hook collections
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory hash cannot be computed (e.g., I/O error, permission denied)
     pub fn update_with_collections(
         &mut self,
         hooks_dir: &Path,
@@ -139,6 +154,10 @@ impl HookState {
     /// - The directory doesn't exist
     /// - No hash is stored (first run)
     /// - The hash has changed
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory hash cannot be computed (e.g., I/O error, permission denied)
     pub fn has_changed(&self, hooks_dir: &Path) -> Result<bool> {
         // If directory doesn't exist, consider it unchanged
         if !hooks_dir.exists() {
@@ -159,7 +178,7 @@ impl HookState {
     /// Compute a hash of all files in a directory
     ///
     /// This creates a combined hash by:
-    /// 1. Collecting all file paths (sequential - required by WalkDir)
+    /// 1. Collecting all file paths (sequential - required by `WalkDir`)
     /// 2. Reading files and computing hashes in parallel
     /// 3. Sorting by path for deterministic ordering
     /// 4. Computing a final combined hash
@@ -170,7 +189,7 @@ impl HookState {
         let file_paths: Vec<std::path::PathBuf> = WalkDir::new(dir)
             .follow_links(false)
             .into_iter()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| e.file_type().is_file())
             .map(|e| e.path().to_path_buf())
             .collect();
@@ -215,12 +234,17 @@ impl HookState {
     }
 
     /// Serialize to bytes for database storage using bincode
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization fails (e.g., encoding error)
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         bincode::encode_to_vec(self, bincode::config::standard())
-            .map_err(|e| Error::State(format!("Failed to serialize HookState: {}", e)))
+            .map_err(|e| Error::State(format!("Failed to serialize HookState: {e}")))
     }
 
     /// Deserialize from bytes using bincode
+    #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         bincode::decode_from_slice(bytes, bincode::config::standard())
             .ok()
@@ -241,13 +265,18 @@ pub struct HookStatePersistence<'a, T: PersistentState> {
 
 impl<'a, T: PersistentState> HookStatePersistence<'a, T> {
     /// Create new hook state persistence
+    #[must_use]
     pub fn new(db: &'a T) -> Self {
         Self { db }
     }
 
     /// Load hook state from database
     ///
-    /// Returns a new HookState if no state is stored.
+    /// Returns a new `HookState` if no state is stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the state cannot be loaded or deserialized (e.g., database error, corrupted data)
     pub fn load(&self) -> Result<HookState> {
         const HOOK_STATE_KEY: &[u8] = b"hooks";
 
@@ -260,6 +289,10 @@ impl<'a, T: PersistentState> HookStatePersistence<'a, T> {
     }
 
     /// Save hook state to database
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the state cannot be serialized or saved (e.g., serialization error, database error)
     pub fn save(&self, state: &HookState) -> Result<()> {
         const HOOK_STATE_KEY: &[u8] = b"hooks";
 
@@ -269,6 +302,7 @@ impl<'a, T: PersistentState> HookStatePersistence<'a, T> {
     }
 }
 
+/// State of destination directory (actual files on disk)
 #[derive(Debug)]
 pub struct DestinationState {
     /// Root directory (typically home directory)
@@ -280,6 +314,7 @@ pub struct DestinationState {
 
 impl DestinationState {
     /// Create a new destination state
+    #[must_use]
     pub fn new(root: AbsPath) -> Self {
         Self {
             root,
@@ -288,6 +323,7 @@ impl DestinationState {
     }
 
     /// Get the root directory
+    #[must_use]
     pub fn root(&self) -> &AbsPath {
         &self.root
     }
@@ -295,10 +331,18 @@ impl DestinationState {
     /// Read the current state of a file from the filesystem
     ///
     /// This reads the actual file and caches the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read from the filesystem (e.g., permission denied, I/O error)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cache entry cannot be retrieved after insertion (should never happen)
     pub fn read<S: System>(&mut self, path: &RelPath, system: &S) -> Result<&DestEntry> {
         if !self.cache.contains_key(path) {
             let abs_path = self.root.join(path);
-            let entry = self.read_entry(path, &abs_path, system)?;
+            let entry = Self::read_entry(path, &abs_path, system)?;
             self.cache.insert(path.clone(), entry);
         }
 
@@ -310,7 +354,6 @@ impl DestinationState {
 
     /// Read an entry from the filesystem
     fn read_entry<S: System>(
-        &self,
         rel_path: &RelPath,
         abs_path: &AbsPath,
         system: &S,
@@ -354,6 +397,7 @@ impl DestinationState {
     }
 
     /// Get a cached entry
+    #[must_use]
     pub fn get(&self, path: &RelPath) -> Option<&DestEntry> {
         self.cache.get(path)
     }
@@ -364,6 +408,7 @@ impl DestinationState {
     }
 }
 
+/// Metadata configuration from .guisu/metadata.toml
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Metadata {
     /// Files that should only be created once and not tracked afterwards
@@ -381,6 +426,14 @@ pub struct CreateOnceConfig {
 
 impl Metadata {
     /// Load state from `.guisu/state.toml`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the state file cannot be read or parsed (e.g., file not found, permission denied, invalid TOML syntax)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the canonicalized path cannot be converted to an absolute path (should never happen for valid canonicalized paths)
     pub fn load(source_dir: &Path) -> Result<Self> {
         let metadata_path = source_dir.join(".guisu/state.toml");
 
@@ -403,18 +456,25 @@ impl Metadata {
         })?;
 
         toml::from_str(&content).map_err(|e| Error::InvalidConfig {
-            message: format!("Failed to parse .guisu/state.toml: {}", e),
+            message: format!("Failed to parse .guisu/state.toml: {e}"),
         })
     }
 
     /// Save state to `.guisu/state.toml`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the state file cannot be written (e.g., permission denied, disk full, serialization error)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the canonicalized path cannot be converted to an absolute path (should never happen for valid canonicalized paths)
     pub fn save(&self, source_dir: &Path) -> Result<()> {
         let guisu_dir = source_dir.join(".guisu");
 
         // Make paths absolute for better error messages
-        let abs_guisu_dir = fs::canonicalize(source_dir)
-            .map(|p| p.join(".guisu"))
-            .unwrap_or_else(|_| guisu_dir.clone());
+        let abs_guisu_dir =
+            fs::canonicalize(source_dir).map_or_else(|_| guisu_dir.clone(), |p| p.join(".guisu"));
 
         // Create .guisu directory if it doesn't exist
         if !guisu_dir.exists() {
@@ -432,7 +492,7 @@ impl Metadata {
         let abs_metadata_path = abs_guisu_dir.join("state.toml");
 
         let content = toml::to_string_pretty(self).map_err(|e| Error::InvalidConfig {
-            message: format!("Failed to serialize metadata: {}", e),
+            message: format!("Failed to serialize metadata: {e}"),
         })?;
 
         fs::write(&metadata_path, content).map_err(|e| {
@@ -453,6 +513,7 @@ impl Metadata {
     }
 
     /// Check if a file is in the create-once list
+    #[must_use]
     pub fn is_create_once(&self, file_path: &str) -> bool {
         self.create_once.files.contains(file_path)
     }
@@ -463,32 +524,61 @@ impl Metadata {
     }
 }
 
+/// Database bucket name for entry state (tracks file content hashes and modes)
 pub const ENTRY_STATE_BUCKET: &str = "entryState";
+/// Database bucket name for script state (tracks script execution hashes)
 pub const SCRIPT_STATE_BUCKET: &str = "scriptState";
+/// Database bucket name for config state
 pub const CONFIG_STATE_BUCKET: &str = "configState";
+/// Database bucket name for package state
 pub const PACKAGE_STATE_BUCKET: &str = "packageState";
+/// Database bucket name for hook state (tracks hook execution and hashes)
 pub const HOOK_STATE_BUCKET: &str = "hookState";
 
 /// Trait for persistent state storage
 pub trait PersistentState: Send + Sync {
     /// Get a value from a bucket
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the value cannot be retrieved (e.g., database error, read failure)
     fn get(&self, bucket: &str, key: &[u8]) -> Result<Option<Vec<u8>>>;
 
     /// Set a value in a bucket
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the value cannot be stored (e.g., database error, write failure, transaction error)
     fn set(&self, bucket: &str, key: &[u8], value: &[u8]) -> Result<()>;
 
     /// Delete a key from a bucket
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the key cannot be deleted (e.g., database error, write failure, transaction error)
     fn delete(&self, bucket: &str, key: &[u8]) -> Result<()>;
 
     /// Delete an entire bucket
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the bucket cannot be deleted (e.g., database error, transaction error)
     fn delete_bucket(&self, bucket: &str) -> Result<()>;
 
     /// Iterate over all key-value pairs in a bucket
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if iteration fails or the callback returns an error (e.g., database error, read failure, callback error)
     fn for_each<F>(&self, bucket: &str, f: F) -> Result<()>
     where
         F: FnMut(&[u8], &[u8]) -> Result<()>;
 
     /// Close the database
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be closed properly (e.g., outstanding transactions, I/O error)
     fn close(self) -> Result<()>;
 }
 
@@ -518,22 +608,30 @@ const _: () = {
 /// Cache for dynamic bucket names to prevent memory leaks
 ///
 /// This cache ensures that each unique bucket name is only leaked once,
-/// rather than on every call to table_def_with_storage.
+/// rather than on every call to `table_def_with_storage`.
 static BUCKET_CACHE: LazyLock<RwLock<HashMap<String, &'static str>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 impl RedbPersistentState {
     /// Create or open a persistent state database
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be created or opened (e.g., permission denied, disk full, corrupted database)
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let db = Database::create(path)
-            .map_err(|e| crate::Error::State(format!("Failed to create database: {}", e)))?;
+            .map_err(|e| crate::Error::State(format!("Failed to create database: {e}")))?;
         Ok(Self { db })
     }
 
     /// Open in read-only mode
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be opened (e.g., file not found, permission denied, corrupted database)
     pub fn read_only(path: impl AsRef<Path>) -> Result<Self> {
         let db = Database::open(path)
-            .map_err(|e| crate::Error::State(format!("Failed to open database: {}", e)))?;
+            .map_err(|e| crate::Error::State(format!("Failed to open database: {e}")))?;
         Ok(Self { db })
     }
 
@@ -588,70 +686,73 @@ impl PersistentState for RedbPersistentState {
         let read_txn = self
             .db
             .begin_read()
-            .map_err(|e| crate::Error::State(format!("Failed to begin read transaction: {}", e)))?;
+            .map_err(|e| crate::Error::State(format!("Failed to begin read transaction: {e}")))?;
         let table_def = Self::table_def_with_storage(bucket);
 
-        let table = match read_txn.open_table(table_def) {
-            Ok(t) => t,
-            Err(_) => return Ok(None), // Table doesn't exist yet
+        // Table doesn't exist yet
+        let Ok(table) = read_txn.open_table(table_def) else {
+            return Ok(None);
         };
 
         match table.get(key) {
             Ok(Some(value)) => Ok(Some(value.value().to_vec())),
             Ok(None) => Ok(None),
-            Err(e) => Err(crate::Error::State(format!("Failed to get value: {}", e))),
+            Err(e) => Err(crate::Error::State(format!("Failed to get value: {e}"))),
         }
     }
 
     fn set(&self, bucket: &str, key: &[u8], value: &[u8]) -> Result<()> {
-        let write_txn = self.db.begin_write().map_err(|e| {
-            crate::Error::State(format!("Failed to begin write transaction: {}", e))
-        })?;
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| crate::Error::State(format!("Failed to begin write transaction: {e}")))?;
         {
             let table_def = Self::table_def_with_storage(bucket);
             let mut table = write_txn
                 .open_table(table_def)
-                .map_err(|e| crate::Error::State(format!("Failed to open table: {}", e)))?;
+                .map_err(|e| crate::Error::State(format!("Failed to open table: {e}")))?;
             table
                 .insert(key, value)
-                .map_err(|e| crate::Error::State(format!("Failed to insert value: {}", e)))?;
+                .map_err(|e| crate::Error::State(format!("Failed to insert value: {e}")))?;
         }
         write_txn
             .commit()
-            .map_err(|e| crate::Error::State(format!("Failed to commit transaction: {}", e)))?;
+            .map_err(|e| crate::Error::State(format!("Failed to commit transaction: {e}")))?;
         Ok(())
     }
 
     fn delete(&self, bucket: &str, key: &[u8]) -> Result<()> {
-        let write_txn = self.db.begin_write().map_err(|e| {
-            crate::Error::State(format!("Failed to begin write transaction: {}", e))
-        })?;
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| crate::Error::State(format!("Failed to begin write transaction: {e}")))?;
         {
             let table_def = Self::table_def_with_storage(bucket);
             let mut table = write_txn
                 .open_table(table_def)
-                .map_err(|e| crate::Error::State(format!("Failed to open table: {}", e)))?;
+                .map_err(|e| crate::Error::State(format!("Failed to open table: {e}")))?;
             table
                 .remove(key)
-                .map_err(|e| crate::Error::State(format!("Failed to remove value: {}", e)))?;
+                .map_err(|e| crate::Error::State(format!("Failed to remove value: {e}")))?;
         }
         write_txn
             .commit()
-            .map_err(|e| crate::Error::State(format!("Failed to commit transaction: {}", e)))?;
+            .map_err(|e| crate::Error::State(format!("Failed to commit transaction: {e}")))?;
         Ok(())
     }
 
     fn delete_bucket(&self, bucket: &str) -> Result<()> {
-        let write_txn = self.db.begin_write().map_err(|e| {
-            crate::Error::State(format!("Failed to begin write transaction: {}", e))
-        })?;
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| crate::Error::State(format!("Failed to begin write transaction: {e}")))?;
         let table_def = Self::table_def_with_storage(bucket);
         write_txn
             .delete_table(table_def)
-            .map_err(|e| crate::Error::State(format!("Failed to delete table: {}", e)))?;
+            .map_err(|e| crate::Error::State(format!("Failed to delete table: {e}")))?;
         write_txn
             .commit()
-            .map_err(|e| crate::Error::State(format!("Failed to commit transaction: {}", e)))?;
+            .map_err(|e| crate::Error::State(format!("Failed to commit transaction: {e}")))?;
         Ok(())
     }
 
@@ -662,21 +763,21 @@ impl PersistentState for RedbPersistentState {
         let read_txn = self
             .db
             .begin_read()
-            .map_err(|e| crate::Error::State(format!("Failed to begin read transaction: {}", e)))?;
+            .map_err(|e| crate::Error::State(format!("Failed to begin read transaction: {e}")))?;
         let table_def = Self::table_def_with_storage(bucket);
 
-        let table = match read_txn.open_table(table_def) {
-            Ok(t) => t,
-            Err(_) => return Ok(()), // No bucket yet
+        // No bucket yet
+        let Ok(table) = read_txn.open_table(table_def) else {
+            return Ok(());
         };
 
         let iter = table
             .iter()
-            .map_err(|e| crate::Error::State(format!("Failed to iterate table: {}", e)))?;
+            .map_err(|e| crate::Error::State(format!("Failed to iterate table: {e}")))?;
 
         for item in iter {
             let (key, value) =
-                item.map_err(|e| crate::Error::State(format!("Failed to read item: {}", e)))?;
+                item.map_err(|e| crate::Error::State(format!("Failed to read item: {e}")))?;
             f(key.value(), value.value())?;
         }
 
@@ -692,6 +793,7 @@ impl PersistentState for RedbPersistentState {
 
 /// Compute SHA256 hash of data
 #[inline]
+#[must_use]
 pub fn hash_data(data: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -701,12 +803,15 @@ pub fn hash_data(data: &[u8]) -> Vec<u8> {
 /// Entry state - tracks file state
 #[derive(Debug, Clone, PartialEq, Eq, bincode::Encode, bincode::Decode)]
 pub struct EntryState {
+    /// SHA256 hash of the file content
     pub content_hash: Vec<u8>,
+    /// File mode/permissions (Unix only)
     pub mode: Option<u32>,
 }
 
 impl EntryState {
     /// Create a new entry state from content and mode
+    #[must_use]
     pub fn new(content: &[u8], mode: Option<u32>) -> Self {
         Self {
             content_hash: hash_data(content),
@@ -715,12 +820,17 @@ impl EntryState {
     }
 
     /// Serialize to bytes using bincode
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization fails (e.g., encoding error)
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         bincode::encode_to_vec(self, bincode::config::standard())
-            .map_err(|e| Error::State(format!("Failed to serialize EntryState: {}", e)))
+            .map_err(|e| Error::State(format!("Failed to serialize EntryState: {e}")))
     }
 
     /// Deserialize from bytes using bincode
+    #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         bincode::decode_from_slice(bytes, bincode::config::standard())
             .ok()
@@ -731,11 +841,13 @@ impl EntryState {
 /// Script state - tracks script execution
 #[derive(Debug, Clone, PartialEq, Eq, bincode::Encode, bincode::Decode)]
 pub struct ScriptState {
+    /// SHA256 hash of the script content
     pub content_hash: Vec<u8>,
 }
 
 impl ScriptState {
     /// Create a new script state from content
+    #[must_use]
     pub fn new(content: &[u8]) -> Self {
         Self {
             content_hash: hash_data(content),
@@ -743,12 +855,17 @@ impl ScriptState {
     }
 
     /// Serialize to bytes using bincode
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization fails (e.g., encoding error)
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         bincode::encode_to_vec(self, bincode::config::standard())
-            .map_err(|e| Error::State(format!("Failed to serialize ScriptState: {}", e)))
+            .map_err(|e| Error::State(format!("Failed to serialize ScriptState: {e}")))
     }
 
     /// Deserialize from bytes using bincode
+    #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         bincode::decode_from_slice(bytes, bincode::config::standard())
             .ok()
@@ -769,6 +886,7 @@ pub struct MockPersistentState {
 
 impl MockPersistentState {
     /// Create a new mock persistent state
+    #[must_use]
     pub fn new() -> Self {
         Self {
             data: RwLock::new(HashMap::new()),
@@ -843,6 +961,9 @@ impl PersistentState for MockPersistentState {
     }
 }
 
+/// State of source directory (files in the guisu repository)
+///
+/// Tracks all files in the source directory with their attributes and target paths.
 #[derive(Debug)]
 pub struct SourceState {
     /// Root directory of the source files
@@ -861,18 +982,26 @@ impl SourceState {
     ///
     /// * `root` - The root directory to read from
     /// * `matcher` - Optional ignore matcher to filter files
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be read or files cannot be processed (e.g., permission denied, I/O error, invalid attributes)
     pub fn read(root: AbsPath) -> Result<Self> {
         Self::read_with_matcher(root, None)
     }
 
     /// Read the source state from a directory with ignore matcher
     ///
-    /// This version allows filtering files using an IgnoreMatcher.
+    /// This version allows filtering files using an `IgnoreMatcher`.
     ///
     /// # Arguments
     ///
     /// * `root` - The root directory to read from
     /// * `matcher` - Optional ignore matcher to filter files based on patterns
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be read or files cannot be processed (e.g., permission denied, I/O error, invalid attributes, invalid path structure)
     pub fn read_with_matcher(
         root: AbsPath,
         matcher: Option<&guisu_config::IgnoreMatcher>,
@@ -885,7 +1014,7 @@ impl SourceState {
         let file_paths: Vec<std::path::PathBuf> = WalkDir::new(root_path)
             .follow_links(false)
             .into_iter()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter_map(|entry| {
                 let path = entry.path();
 
@@ -921,7 +1050,7 @@ impl SourceState {
                 let rel_path =
                     path.strip_prefix(root_path)
                         .map_err(|_| Error::InvalidPathPrefix {
-                            path: std::sync::Arc::new(path.to_path_buf()),
+                            path: std::sync::Arc::new(path.clone()),
                             base: std::sync::Arc::new(root_path.to_path_buf()),
                         })?;
 
@@ -991,32 +1120,41 @@ impl SourceState {
     }
 
     /// Get a source entry by target path
+    #[must_use]
     pub fn get(&self, target_path: &RelPath) -> Option<&SourceEntry> {
         self.entries.get(target_path)
     }
 
     /// Get the root directory
+    #[must_use]
     pub fn root(&self) -> &AbsPath {
         &self.root
     }
 
     /// Get the number of entries
+    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Check if there are no entries
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Get the absolute path to a source file
+    #[must_use]
     pub fn source_file_path(&self, source_path: &SourceRelPath) -> AbsPath {
         // Convert SourceRelPath to RelPath first, then join
         self.root.join(&source_path.to_rel_path())
     }
 }
 
+/// State of target files (after processing templates and encryption)
+///
+/// Represents the final state of files after applying all transformations
+/// (template rendering, decryption) but before writing to destination.
 #[derive(Debug)]
 pub struct TargetState {
     /// Map of target paths to target entries
@@ -1025,6 +1163,7 @@ pub struct TargetState {
 
 impl TargetState {
     /// Create a new empty target state
+    #[must_use]
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
@@ -1057,6 +1196,10 @@ impl TargetState {
     /// let context = json!({});
     /// let target = TargetState::from_source(&source, &processor, &context)?;
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if processing fails (e.g., file read error, decryption failure, template rendering error, invalid UTF-8)
     pub fn from_source<D, R>(
         source: &SourceState,
         processor: &ContentProcessor<D, R>,
@@ -1111,14 +1254,15 @@ impl TargetState {
                 // Process the file contents through the decrypt→render pipeline
                 // Note: process_file already provides detailed error context,
                 // so we don't wrap it here to avoid redundant error messages
-                let content = processor.process_file(&abs_source_path, attributes, context)?;
+                let processed_content =
+                    processor.process_file(&abs_source_path, attributes, context)?;
 
                 // Get the file mode from attributes
                 let mode = attributes.mode();
 
                 Ok(TargetEntry::File {
                     path: target_path.clone(),
-                    content,
+                    content: processed_content,
                     mode,
                 })
             }
@@ -1161,6 +1305,7 @@ impl TargetState {
     }
 
     /// Get a target entry by path
+    #[must_use]
     pub fn get(&self, path: &RelPath) -> Option<&TargetEntry> {
         self.entries.get(path)
     }
@@ -1171,11 +1316,13 @@ impl TargetState {
     }
 
     /// Get the number of entries
+    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Check if the target state is empty
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

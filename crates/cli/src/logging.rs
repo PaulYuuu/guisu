@@ -23,6 +23,20 @@ use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::Subs
 /// // Write logs to file
 /// init(true, Some(Path::new("debug.log")))?;
 /// ```
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The log file cannot be created or opened for writing
+/// - The tracing subscriber fails to initialize
+///
+/// # Panics
+///
+/// Panics if:
+/// - The default environment filter cannot be created (hardcoded filter string is invalid)
+/// - The hardcoded "debug" filter string is invalid for file logging
+///
+/// These panics should never happen as the filter strings are validated at compile time.
 pub fn init(verbose: bool, log_file: Option<&Path>) -> Result<()> {
     // Determine log level based on verbose flag
     let level = if verbose { "debug" } else { "info" };
@@ -32,8 +46,7 @@ pub fn init(verbose: bool, log_file: Option<&Path>) -> Result<()> {
     let env_filter = EnvFilter::try_from_default_env()
         .or_else(|_| {
             EnvFilter::try_new(format!(
-                "guisu={},engine={},crypto={},template={}",
-                level, level, level, level
+                "guisu={level},engine={level},crypto={level},template={level}"
             ))
         })
         .expect("failed to create default env filter");

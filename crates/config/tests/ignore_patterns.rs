@@ -1,5 +1,7 @@
 //! Integration tests for ignore pattern matching
 
+#![allow(clippy::unwrap_used, clippy::panic)]
+
 use guisu_config::IgnoreMatcher;
 use std::path::Path;
 
@@ -111,8 +113,7 @@ darwin = [
         let is_ignored = matcher.is_ignored(Path::new(path));
         assert_eq!(
             is_ignored, expected_ignored,
-            "Failed: {} | path={} | ignored={} (expected={})",
-            description, path, is_ignored, expected_ignored
+            "Failed: {description} | path={path} | ignored={is_ignored} (expected={expected_ignored})"
         );
     }
 
@@ -187,8 +188,7 @@ global = [
         let is_ignored = matcher.is_ignored(Path::new(path));
         assert_eq!(
             is_ignored, expected_ignored,
-            "Failed: {} | path={} | ignored={} (expected={})",
-            description, path, is_ignored, expected_ignored
+            "Failed: {description} | path={path} | ignored={is_ignored} (expected={expected_ignored})"
         );
     }
 

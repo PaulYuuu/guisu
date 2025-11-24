@@ -22,7 +22,7 @@ pub struct TemplateContext {
 
     /// Custom user-defined variables
     /// These are flattened so they can be accessed directly in templates
-    /// e.g., {{ my_var }} instead of {{ variables.my_var }}
+    /// e.g., {{ `my_var` }} instead of {{ `variables.my_var` }}
     #[serde(flatten)]
     pub variables: IndexMap<String, serde_json::Value>,
 }
@@ -30,7 +30,7 @@ pub struct TemplateContext {
 /// Guisu-specific runtime information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuisuInfo {
-    /// Source directory path (includes root_entry)
+    /// Source directory path (includes `root_entry`)
     #[serde(rename = "srcDir")]
     pub src_dir: String,
 
@@ -73,7 +73,7 @@ pub struct SystemInfo {
     #[serde(rename = "distroVersion")]
     pub distro_version: String,
 
-    /// Architecture (e.g., "x86_64", "aarch64")
+    /// Architecture (e.g., "`x86_64`", "aarch64")
     pub arch: String,
 
     /// Hostname
@@ -98,6 +98,7 @@ pub struct SystemInfo {
 
 impl TemplateContext {
     /// Create a new template context with system information
+    #[must_use]
     pub fn new() -> Self {
         Self {
             system: SystemInfo::detect(),
@@ -111,6 +112,7 @@ impl TemplateContext {
     ///
     /// For cases where you already have an owned `IndexMap`, this moves it without cloning.
     /// If you need to borrow the variables, use `with_variables_ref` instead.
+    #[must_use]
     pub fn with_variables(mut self, variables: IndexMap<String, serde_json::Value>) -> Self {
         self.variables = variables;
         self
@@ -120,12 +122,14 @@ impl TemplateContext {
     ///
     /// This is a convenience method that accepts a reference and clones it internally.
     /// Use this when you need to preserve the original `IndexMap`.
+    #[must_use]
     pub fn with_variables_ref(mut self, variables: &IndexMap<String, serde_json::Value>) -> Self {
-        self.variables = variables.clone();
+        Clone::clone_from(&mut self.variables, variables);
         self
     }
 
     /// Set guisu-specific information (source and destination directories, rootEntry)
+    #[must_use]
     pub fn with_guisu_info(
         mut self,
         src_dir: String,
@@ -144,6 +148,7 @@ impl TemplateContext {
     }
 
     /// Set guisu-specific information with config
+    #[must_use]
     pub fn with_guisu_info_and_config(
         mut self,
         src_dir: String,
@@ -182,6 +187,10 @@ impl TemplateContext {
     /// # Returns
     ///
     /// Self with all variables loaded and merged
+    ///
+    /// # Errors
+    ///
+    /// Returns error if variables cannot be loaded from the source directory
     pub fn with_loaded_variables(
         mut self,
         source_dir: &std::path::Path,
@@ -206,6 +215,7 @@ impl TemplateContext {
     }
 
     /// Get an environment variable
+    #[must_use]
     pub fn get_env(&self, key: &str) -> Option<&String> {
         self.env.get(key)
     }
@@ -224,6 +234,7 @@ impl Default for TemplateContext {
 
 impl SystemInfo {
     /// Detect system information
+    #[must_use]
     pub fn detect() -> Self {
         let (distro, distro_id, distro_version) = Self::detect_distro();
 
@@ -330,13 +341,13 @@ impl SystemInfo {
 
     fn detect_home_dir() -> String {
         dirs::home_dir()
-            .and_then(|p| p.to_str().map(|s| s.to_string()))
+            .and_then(|p| p.to_str().map(std::string::ToString::to_string))
             .unwrap_or_default()
     }
 
     /// Detect Linux distribution information
     ///
-    /// Returns (distro_name, distro_id, distro_version)
+    /// Returns (`distro_name`, `distro_id`, `distro_version`)
     ///
     /// On Linux, reads /etc/os-release file to determine the distribution.
     /// On non-Linux systems, returns empty strings.
@@ -400,5 +411,454 @@ impl SystemInfo {
         } else {
             s.to_string()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_template_context_new() {
+        let ctx = TemplateContext::new();
+
+        assert!(ctx.guisu.is_none());
+        assert!(!ctx.env.is_empty()); // Should have some env vars
+        assert!(ctx.variables.is_empty());
+    }
+
+    #[test]
+    fn test_template_context_default() {
+        let ctx = TemplateContext::default();
+
+        assert!(ctx.guisu.is_none());
+        assert!(ctx.variables.is_empty());
+    }
+
+    #[test]
+    fn test_with_variables_owned() {
+        let mut vars = IndexMap::new();
+        vars.insert("key1".to_string(), json!("value1"));
+        vars.insert("key2".to_string(), json!(42));
+
+        let ctx = TemplateContext::new().with_variables(vars.clone());
+
+        assert_eq!(ctx.variables.get("key1"), Some(&json!("value1")));
+        assert_eq!(ctx.variables.get("key2"), Some(&json!(42)));
+    }
+
+    #[test]
+    fn test_with_variables_ref() {
+        let mut vars = IndexMap::new();
+        vars.insert("test".to_string(), json!("data"));
+
+        let ctx = TemplateContext::new().with_variables_ref(&vars);
+
+        assert_eq!(ctx.variables.get("test"), Some(&json!("data")));
+        // Original should still exist
+        assert!(vars.contains_key("test"));
+    }
+
+    #[test]
+    fn test_add_variable() {
+        let mut ctx = TemplateContext::new();
+
+        ctx.add_variable("name".to_string(), json!("Alice"));
+        ctx.add_variable("age".to_string(), json!(30));
+
+        assert_eq!(ctx.variables.get("name"), Some(&json!("Alice")));
+        assert_eq!(ctx.variables.get("age"), Some(&json!(30)));
+    }
+
+    #[test]
+    fn test_with_guisu_info() {
+        let ctx = TemplateContext::new().with_guisu_info(
+            "/source".to_string(),
+            "/working".to_string(),
+            "/dest".to_string(),
+            "home".to_string(),
+        );
+
+        assert!(ctx.guisu.is_some());
+        let guisu = ctx.guisu.unwrap();
+        assert_eq!(guisu.src_dir, "/source");
+        assert_eq!(guisu.working_tree, "/working");
+        assert_eq!(guisu.dst_dir, "/dest");
+        assert_eq!(guisu.root_entry, "home");
+        assert!(guisu.config.is_none());
+    }
+
+    #[test]
+    fn test_with_guisu_info_and_config() {
+        let config_info = crate::info::ConfigInfo {
+            age: crate::info::AgeConfigInfo { derive: true },
+            bitwarden: crate::info::BitwardenConfigInfo {
+                provider: "bw".to_string(),
+            },
+            ui: crate::info::UiConfigInfo {
+                icons: "auto".to_string(),
+                diff_format: "unified".to_string(),
+                context_lines: 3,
+                preview_lines: 20,
+            },
+        };
+
+        let ctx = TemplateContext::new().with_guisu_info_and_config(
+            "/src".to_string(),
+            "/work".to_string(),
+            "/dst".to_string(),
+            "root".to_string(),
+            config_info,
+        );
+
+        assert!(ctx.guisu.is_some());
+        let guisu = ctx.guisu.unwrap();
+        assert_eq!(guisu.src_dir, "/src");
+        assert!(guisu.config.is_some());
+        let config = guisu.config.unwrap();
+        assert_eq!(config.bitwarden.provider, "bw");
+    }
+
+    #[test]
+    fn test_get_env() {
+        let ctx = TemplateContext::new();
+
+        // PATH should exist on all systems
+        if let Ok(path_val) = env::var("PATH") {
+            assert_eq!(ctx.get_env("PATH"), Some(&path_val));
+        }
+
+        // Non-existent var
+        assert_eq!(ctx.get_env("NONEXISTENT_VAR_12345"), None);
+    }
+
+    #[test]
+    fn test_system_info_detect() {
+        let sys = SystemInfo::detect();
+
+        // Basic assertions that should work on all platforms
+        assert!(!sys.os.is_empty());
+        assert!(!sys.os_family.is_empty());
+        assert!(!sys.arch.is_empty());
+        assert!(!sys.hostname.is_empty());
+        assert!(!sys.username.is_empty());
+        assert!(!sys.home_dir.is_empty());
+
+        // Platform-specific checks
+        #[cfg(target_os = "linux")]
+        assert_eq!(sys.os, "linux");
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(sys.os, "darwin");
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(sys.os, "windows");
+
+        #[cfg(unix)]
+        assert_eq!(sys.os_family, "unix");
+
+        #[cfg(windows)]
+        assert_eq!(sys.os_family, "windows");
+    }
+
+    #[test]
+    fn test_system_info_os_detection() {
+        let os = SystemInfo::detect_os();
+
+        #[cfg(target_os = "linux")]
+        assert_eq!(os, "linux");
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(os, "darwin");
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(os, "windows");
+    }
+
+    #[test]
+    fn test_system_info_os_family() {
+        let family = SystemInfo::detect_os_family();
+
+        #[cfg(unix)]
+        assert_eq!(family, "unix");
+
+        #[cfg(windows)]
+        assert_eq!(family, "windows");
+    }
+
+    #[test]
+    fn test_system_info_arch() {
+        let arch = SystemInfo::detect_arch();
+
+        assert!(!arch.is_empty());
+        assert!(["x86_64", "aarch64", "arm", "x86"].contains(&arch.as_str()));
+    }
+
+    #[test]
+    fn test_system_info_hostname() {
+        let hostname = SystemInfo::detect_hostname();
+
+        assert!(!hostname.is_empty());
+        assert_ne!(hostname, "unknown"); // Should detect actual hostname
+    }
+
+    #[test]
+    fn test_system_info_username() {
+        let username = SystemInfo::detect_username();
+
+        assert!(!username.is_empty());
+    }
+
+    #[test]
+    fn test_system_info_home_dir() {
+        let home = SystemInfo::detect_home_dir();
+
+        assert!(!home.is_empty());
+        #[cfg(unix)]
+        assert!(home.starts_with('/'));
+
+        #[cfg(windows)]
+        assert!(home.contains('\\') || home.contains(':'));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_system_info_uid_gid() {
+        let sys = SystemInfo::detect();
+
+        // UID and GID should be non-empty on Unix
+        assert!(!sys.uid.is_empty());
+        assert!(!sys.gid.is_empty());
+
+        // Should be parseable as numbers
+        assert!(sys.uid.parse::<u32>().is_ok());
+        assert!(sys.gid.parse::<u32>().is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_system_info_group() {
+        let group = SystemInfo::detect_group();
+
+        // Group name should be detected (though it might be empty in some edge cases)
+        // Just verify it doesn't panic
+        let _ = group;
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_unquote_double_quotes() {
+        assert_eq!(SystemInfo::unquote("\"Ubuntu\""), "Ubuntu");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_unquote_single_quotes() {
+        assert_eq!(SystemInfo::unquote("'Fedora'"), "Fedora");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_unquote_no_quotes() {
+        assert_eq!(SystemInfo::unquote("Arch"), "Arch");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_unquote_with_spaces() {
+        assert_eq!(SystemInfo::unquote("  \"Debian\"  "), "Debian");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_detect_distro() {
+        let (name, id, version) = SystemInfo::detect_distro();
+
+        // On Linux, should detect some distribution info
+        // At minimum, one of these should be non-empty
+        assert!(
+            !name.is_empty() || !id.is_empty(),
+            "Should detect at least distro name or ID on Linux"
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn test_detect_distro_non_linux() {
+        let (name, id, version) = SystemInfo::detect_distro();
+
+        // On non-Linux, should all be empty
+        assert_eq!(name, "");
+        assert_eq!(id, "");
+        assert_eq!(version, "");
+    }
+
+    #[test]
+    fn test_context_serialization() {
+        let ctx = TemplateContext::new()
+            .with_variables({
+                let mut vars = IndexMap::new();
+                vars.insert("test".to_string(), json!("value"));
+                vars
+            })
+            .with_guisu_info(
+                "/src".to_string(),
+                "/work".to_string(),
+                "/dst".to_string(),
+                "home".to_string(),
+            );
+
+        // Should be able to serialize
+        let serialized = serde_json::to_string(&ctx).expect("Serialization failed");
+        assert!(serialized.contains("test"));
+        assert!(serialized.contains("value"));
+
+        // Should be able to deserialize
+        let deserialized: TemplateContext =
+            serde_json::from_str(&serialized).expect("Deserialization failed");
+
+        assert_eq!(deserialized.variables.get("test"), Some(&json!("value")));
+        assert!(deserialized.guisu.is_some());
+    }
+
+    #[test]
+    fn test_guisu_info_serialization() {
+        let guisu = GuisuInfo {
+            src_dir: "/source".to_string(),
+            working_tree: "/work".to_string(),
+            dst_dir: "/dest".to_string(),
+            root_entry: "home".to_string(),
+            config: None,
+        };
+
+        let serialized = serde_json::to_string(&guisu).expect("Serialization failed");
+
+        // Check renamed fields
+        assert!(serialized.contains("srcDir"));
+        assert!(serialized.contains("workingTree"));
+        assert!(serialized.contains("dstDir"));
+        assert!(serialized.contains("rootEntry"));
+
+        // Should not contain Rust field names
+        assert!(!serialized.contains("src_dir"));
+        assert!(!serialized.contains("dst_dir"));
+    }
+
+    #[test]
+    fn test_system_info_serialization() {
+        let sys = SystemInfo::detect();
+
+        let serialized = serde_json::to_string(&sys).expect("Serialization failed");
+
+        // Check renamed fields
+        assert!(serialized.contains("osFamily"));
+        assert!(serialized.contains("homeDir"));
+
+        // Check regular fields
+        assert!(serialized.contains("hostname"));
+        assert!(serialized.contains("username"));
+    }
+
+    #[test]
+    fn test_with_loaded_variables() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path();
+        let guisu_dir = source_dir.join(".guisu");
+        let variables_dir = guisu_dir.join("variables");
+
+        // Create .guisu/variables directory structure
+        fs::create_dir_all(&variables_dir).unwrap();
+
+        // Create a common variable file
+        let common_toml = r#"
+common_var = "common_value"
+shared = "from_file"
+"#;
+        fs::write(variables_dir.join("common.toml"), common_toml).unwrap();
+
+        // Create platform-specific variable
+        let platform_name = guisu_core::platform::CURRENT_PLATFORM.os;
+        let platform_dir = variables_dir.join(platform_name);
+        fs::create_dir_all(&platform_dir).unwrap();
+
+        let platform_toml = r#"
+platform_var = "platform_value"
+"#;
+        fs::write(platform_dir.join("platform.toml"), platform_toml).unwrap();
+
+        // Create config with variables that should override
+        let mut config = guisu_config::Config::default();
+        config
+            .variables
+            .insert("shared".to_string(), json!("from_config"));
+        config
+            .variables
+            .insert("config_only".to_string(), json!("config_value"));
+
+        let ctx = TemplateContext::new()
+            .with_loaded_variables(source_dir, &config)
+            .expect("Failed to load variables");
+
+        // Variables are wrapped by file stem
+        // common.toml becomes {"common": {"common_var": "...", "shared": "..."}}
+        assert!(ctx.variables.contains_key("common"));
+        let common = &ctx.variables["common"];
+        assert_eq!(common["common_var"], json!("common_value"));
+
+        // Platform variables are also wrapped
+        assert!(ctx.variables.contains_key("platform"));
+        let platform = &ctx.variables["platform"];
+        assert_eq!(platform["platform_var"], json!("platform_value"));
+
+        // Config variables are flat (not wrapped)
+        assert_eq!(ctx.variables.get("shared"), Some(&json!("from_config")));
+        assert_eq!(
+            ctx.variables.get("config_only"),
+            Some(&json!("config_value"))
+        );
+    }
+
+    #[test]
+    fn test_with_loaded_variables_no_guisu_dir() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path();
+
+        // No .guisu directory exists
+        let config = guisu_config::Config::default();
+
+        let ctx = TemplateContext::new()
+            .with_loaded_variables(source_dir, &config)
+            .expect("Should succeed even without .guisu dir");
+
+        // Should have empty variables (only from config, which is also empty)
+        assert!(ctx.variables.is_empty());
+    }
+
+    #[test]
+    fn test_with_loaded_variables_empty_guisu_dir() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path();
+        let guisu_dir = source_dir.join(".guisu");
+
+        // Create empty .guisu directory (no variables/ subdirectory)
+        fs::create_dir_all(&guisu_dir).unwrap();
+
+        let config = guisu_config::Config::default();
+
+        let ctx = TemplateContext::new()
+            .with_loaded_variables(source_dir, &config)
+            .expect("Should succeed with empty .guisu dir");
+
+        assert!(ctx.variables.is_empty());
     }
 }

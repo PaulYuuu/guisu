@@ -12,14 +12,14 @@ use owo_colors::OwoColorize;
 use rayon::prelude::*;
 use std::fs;
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use tracing::{debug, info, warn};
 
-use crate::cmd::conflict::{ChangeType, ConflictHandler};
 use crate::command::Command;
 use crate::common::RuntimeContext;
+use crate::conflict::{ChangeType, ConflictHandler};
 use crate::stats::ApplyStats;
 use crate::ui::ConflictAction;
 use crate::ui::progress;
@@ -69,6 +69,495 @@ fn get_last_written_hash(entry: &TargetEntry) -> Option<Vec<u8>> {
     }
 }
 
+/// Load and prepare all variables for template rendering
+fn load_all_variables(
+    source_dir: &std::path::Path,
+    config: &guisu_config::Config,
+) -> Result<indexmap::IndexMap<String, serde_json::Value>> {
+    use guisu_config::variables;
+
+    let guisu_dir = source_dir.join(".guisu");
+    let platform_name = guisu_core::platform::CURRENT_PLATFORM.os;
+
+    let guisu_variables = if guisu_dir.exists() {
+        variables::load_variables(&guisu_dir, platform_name)
+            .context("Failed to load variables from .guisu/variables/")?
+    } else {
+        indexmap::IndexMap::new()
+    };
+
+    // Merge variables: guisu variables + config variables (config overrides)
+    let mut all_variables = guisu_variables;
+    all_variables.extend(config.variables.iter().map(|(k, v)| (k.clone(), v.clone())));
+
+    Ok(all_variables)
+}
+
+/// Setup content processor with decryptor and template renderer
+fn setup_content_processor(
+    source_dir: &std::path::Path,
+    identities: &Arc<Vec<guisu_crypto::Identity>>,
+    config: &guisu_config::Config,
+) -> ContentProcessor<
+    guisu_engine::adapters::crypto::CryptoDecryptorAdapter,
+    guisu_engine::adapters::template::TemplateRendererAdapter,
+> {
+    use guisu_engine::adapters::crypto::CryptoDecryptorAdapter;
+    use guisu_engine::adapters::template::TemplateRendererAdapter;
+
+    let template_engine = crate::create_template_engine(source_dir, identities, config);
+
+    // Use Arc to share identity without cloning
+    let identity_arc = if let Some(first) = identities.first() {
+        Arc::new(first.clone())
+    } else {
+        Arc::new(guisu_crypto::Identity::generate())
+    };
+
+    let decryptor = CryptoDecryptorAdapter::from_arc(identity_arc);
+    let renderer = TemplateRendererAdapter::new(template_engine);
+    ContentProcessor::new(decryptor, renderer)
+}
+
+/// Read source state with optional ignore filtering
+fn read_source_state(
+    source_abs: AbsPath,
+    source_dir: &std::path::Path,
+    is_single_file: bool,
+) -> Result<SourceState> {
+    let spinner = if is_single_file {
+        None
+    } else {
+        Some(progress::create_spinner("Reading source state..."))
+    };
+
+    let matcher = guisu_config::IgnoreMatcher::from_ignores_toml(source_dir).ok();
+
+    let source_state = if let Some(ref matcher) = matcher {
+        SourceState::read_with_matcher(source_abs, Some(matcher))
+            .context("Failed to read source state with ignore matcher")?
+    } else {
+        SourceState::read(source_abs).context("Failed to read source state")?
+    };
+
+    if let Some(spinner) = spinner {
+        spinner.finish_and_clear();
+    }
+
+    Ok(source_state)
+}
+
+/// Build target state from source state (process templates, decrypt files)
+#[allow(clippy::too_many_arguments)]
+fn build_target_state(
+    filtered_source_state: &SourceState,
+    processor: &ContentProcessor<
+        guisu_engine::adapters::crypto::CryptoDecryptorAdapter,
+        guisu_engine::adapters::template::TemplateRendererAdapter,
+    >,
+    source_abs: &AbsPath,
+    dest_abs: &AbsPath,
+    working_tree: &Path,
+    config: &guisu_config::Config,
+    all_variables: indexmap::IndexMap<String, serde_json::Value>,
+    is_single_file: bool,
+) -> Result<TargetState> {
+    let spinner = if is_single_file {
+        None
+    } else {
+        Some(progress::create_spinner(
+            "Processing templates and encrypted files...",
+        ))
+    };
+
+    let template_context = guisu_template::TemplateContext::new()
+        .with_variables(all_variables)
+        .with_guisu_info(
+            source_abs.to_string(),
+            working_tree.display().to_string(),
+            dest_abs.to_string(),
+            config.general.root_entry.display().to_string(),
+        );
+
+    let template_context_value =
+        serde_json::to_value(&template_context).context("Failed to serialize template context")?;
+
+    let target_state =
+        TargetState::from_source(filtered_source_state, processor, &template_context_value)?;
+
+    if let Some(spinner) = spinner {
+        spinner.finish_and_clear();
+    }
+
+    Ok(target_state)
+}
+
+/// Filter entries to apply based on file paths, ignore patterns, and create-once status
+fn filter_entries_to_apply<'a>(
+    target_state: &'a TargetState,
+    filter_paths: Option<&Vec<guisu_core::path::RelPath>>,
+    ignore_matcher: &guisu_config::IgnoreMatcher,
+    metadata: &guisu_engine::state::Metadata,
+    dest_abs: &AbsPath,
+) -> Vec<&'a TargetEntry> {
+    let mut entries: Vec<&TargetEntry> = target_state
+        .entries()
+        .filter(|entry| {
+            let path_str = entry.path().to_string();
+            let target_path = entry.path();
+
+            // If filtering by specific files, skip entries not in the filter
+            if let Some(filter) = filter_paths
+                && !filter.iter().any(|p| p == target_path)
+            {
+                return false;
+            }
+
+            // Skip if file is ignored
+            if ignore_matcher.is_ignored(entry.path().as_path()) {
+                debug!(
+                    path = %path_str,
+                    "Skipping ignored file"
+                );
+                return false;
+            }
+
+            // If file is marked as create-once and already exists, skip it
+            if metadata.is_create_once(&path_str) {
+                let dest_path = dest_abs.join(entry.path());
+                if dest_path.as_path().exists() {
+                    debug!(
+                        path = %path_str,
+                        "Skipping create-once file that already exists"
+                    );
+                    return false;
+                }
+            }
+
+            true
+        })
+        .collect();
+
+    // Sort entries by path for consistent output
+    entries.sort_by(|a, b| a.path().as_path().cmp(b.path().as_path()));
+    entries
+}
+
+/// Display drift warnings for files modified both locally and in source
+fn display_drift_warnings(drift_warnings: &[String]) {
+    if !drift_warnings.is_empty() {
+        println!("\n{}", "Configuration Drift Detected".yellow().bold());
+        println!(
+            "{}",
+            "The following files have been modified both locally and in the source:".yellow()
+        );
+        for warning in drift_warnings {
+            println!("  {} {}", "•".yellow(), warning.bright_white());
+        }
+        println!();
+        println!(
+            "{}",
+            "These local changes will be overwritten during apply.".yellow()
+        );
+        println!(
+            "{}",
+            "Consider backing up modified files or using interactive mode (-i) for control."
+                .dimmed()
+        );
+        println!();
+    }
+}
+
+/// Handle dry run mode for a single entry
+fn handle_dry_run_entry(
+    entry: &TargetEntry,
+    dest_path: &AbsPath,
+    identities: &[guisu_crypto::Identity],
+    stats: &ApplyStats,
+    show_icons: bool,
+) -> bool {
+    if !needs_update(entry, dest_path, identities) {
+        debug!(path = %entry.path(), "File is already up to date, skipping");
+        return false;
+    }
+
+    debug!(path = %entry.path(), "Would apply entry");
+    print_dry_run_entry(entry, show_icons);
+    stats.record_dry_run(entry);
+    true
+}
+
+/// Handle interactive conflict resolution
+fn handle_interactive_conflict(
+    entry: &TargetEntry,
+    dest_abs: &AbsPath,
+    dest_path: &AbsPath,
+    identities: &[guisu_crypto::Identity],
+    handler: &mut ConflictHandler,
+) -> Result<bool> {
+    let last_written_hash = get_last_written_hash(entry);
+    let change_type = ConflictHandler::detect_change_type(
+        entry,
+        dest_abs,
+        last_written_hash.as_deref(),
+        identities,
+    )?;
+
+    if let Some(change_type) = change_type {
+        match handler.prompt_action(entry, dest_abs, None, change_type)? {
+            ConflictAction::Override => Ok(true),
+            ConflictAction::Skip => {
+                debug!(path = %entry.path(), "Skipping due to user choice");
+                println!("  {} {}", "⏭".yellow(), entry.path().bright_white());
+                Ok(false)
+            }
+            ConflictAction::Quit => {
+                info!("Apply operation cancelled by user");
+                Ok(false)
+            }
+            _ => unreachable!("Unexpected action returned from prompt_action"),
+        }
+    } else {
+        Ok(needs_update(entry, dest_path, identities))
+    }
+}
+
+/// Handle non-interactive conflict resolution with user confirmation
+fn handle_non_interactive_conflict(
+    entry: &TargetEntry,
+    dest_abs: &AbsPath,
+    dest_path: &AbsPath,
+    identities: &[guisu_crypto::Identity],
+) -> Result<bool> {
+    if !needs_update(entry, dest_path, identities) {
+        return Ok(false);
+    }
+
+    let last_written_hash = get_last_written_hash(entry);
+    let change_type = ConflictHandler::detect_change_type(
+        entry,
+        dest_abs,
+        last_written_hash.as_deref(),
+        identities,
+    )?;
+
+    if let Some(change_type) = change_type {
+        match change_type {
+            ChangeType::LocalModification | ChangeType::TrueConflict => {
+                use dialoguer::{Confirm, theme::ColorfulTheme};
+                let change_label = match change_type {
+                    ChangeType::LocalModification => "Local modification",
+                    ChangeType::TrueConflict => "Conflict (both local and source modified)",
+                    ChangeType::SourceUpdate => {
+                        unreachable!("SourceUpdate filtered by outer match")
+                    }
+                };
+
+                println!("\n{} {}", "⚠".yellow(), change_label.yellow().bold());
+                println!("  File: {}", entry.path().bright_white());
+                println!("  {}", "This file has been modified locally.".yellow());
+                println!(
+                    "  {}",
+                    "Applying will overwrite your local changes.".yellow()
+                );
+
+                let theme = ColorfulTheme::default();
+                Confirm::with_theme(&theme)
+                    .with_prompt("Continue and overwrite local changes?")
+                    .default(false)
+                    .interact()
+                    .context("Failed to read user input")
+            }
+            ChangeType::SourceUpdate => Ok(true),
+        }
+    } else {
+        Ok(true)
+    }
+}
+
+/// Apply entry and handle errors
+fn apply_entry_with_error_handling(
+    entry: &TargetEntry,
+    dest_path: &AbsPath,
+    identities: &[guisu_crypto::Identity],
+    stats: &ApplyStats,
+    show_icons: bool,
+) {
+    match apply_target_entry(entry, dest_path, identities) {
+        Ok(()) => {
+            debug!(path = %entry.path(), "Applied entry successfully");
+            match save_entry_state_to_db(entry) {
+                Ok(()) => {
+                    print_success_entry(entry, show_icons);
+                    stats.record_success(entry);
+                }
+                Err(e) => {
+                    warn!(path = %entry.path(), error = %e, "Failed to save state to database");
+                    print_error_entry(entry, &e, show_icons);
+                    stats.record_failure();
+                }
+            }
+        }
+        Err(e) => {
+            warn!(path = %entry.path(), error = %e, "Failed to apply entry");
+            print_error_entry(entry, &e, show_icons);
+            stats.record_failure();
+        }
+    }
+}
+
+/// Process entries sequentially (for interactive mode or dry run)
+#[allow(clippy::too_many_arguments)]
+fn process_entries_sequential(
+    entries: Vec<&TargetEntry>,
+    dest_abs: &AbsPath,
+    identities: &[guisu_crypto::Identity],
+    conflict_handler: &mut Option<ConflictHandler>,
+    stats: &ApplyStats,
+    show_icons: bool,
+    dry_run: bool,
+) -> Result<()> {
+    for entry in entries {
+        let dest_path = dest_abs.join(entry.path());
+
+        if dry_run {
+            handle_dry_run_entry(entry, &dest_path, identities, stats, show_icons);
+        } else {
+            let should_apply = if let Some(handler) = conflict_handler {
+                handle_interactive_conflict(entry, dest_abs, &dest_path, identities, handler)?
+            } else {
+                handle_non_interactive_conflict(entry, dest_abs, &dest_path, identities)?
+            };
+
+            if should_apply {
+                apply_entry_with_error_handling(entry, &dest_path, identities, stats, show_icons);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Process entries in parallel (for non-interactive mode)
+fn process_entries_parallel(
+    entries: &[&TargetEntry],
+    dest_abs: &AbsPath,
+    identities: &[guisu_crypto::Identity],
+    stats: &ApplyStats,
+    show_icons: bool,
+) -> Result<()> {
+    use dialoguer::{Confirm, theme::ColorfulTheme};
+    use std::collections::HashSet;
+
+    let mut confirmed_paths = HashSet::new();
+    let mut has_warnings = false;
+
+    // Pre-scan for local modifications and get confirmations
+    for entry in entries {
+        let dest_path = dest_abs.join(entry.path());
+
+        if !needs_update(entry, &dest_path, identities) {
+            continue;
+        }
+
+        let last_written_hash = get_last_written_hash(entry);
+
+        if let Ok(Some(change_type)) = ConflictHandler::detect_change_type(
+            entry,
+            dest_abs,
+            last_written_hash.as_deref(),
+            identities,
+        ) {
+            match change_type {
+                ChangeType::LocalModification | ChangeType::TrueConflict => {
+                    has_warnings = true;
+
+                    let change_label = match change_type {
+                        ChangeType::LocalModification => "Local modification",
+                        ChangeType::TrueConflict => "Conflict (both local and source modified)",
+                        ChangeType::SourceUpdate => {
+                            unreachable!("SourceUpdate filtered by outer match")
+                        }
+                    };
+
+                    println!("\n{} {}", "⚠".yellow(), change_label.yellow().bold());
+                    println!("  File: {}", entry.path().bright_white());
+                    println!("  {}", "This file has been modified locally.".yellow());
+                    println!(
+                        "  {}",
+                        "Applying will overwrite your local changes.".yellow()
+                    );
+
+                    let theme = ColorfulTheme::default();
+                    let confirmed = Confirm::with_theme(&theme)
+                        .with_prompt("Continue and overwrite local changes?")
+                        .default(false)
+                        .interact()
+                        .context("Failed to read user input")?;
+
+                    if confirmed {
+                        confirmed_paths.insert(entry.path().to_string());
+                    }
+                }
+                ChangeType::SourceUpdate => {
+                    confirmed_paths.insert(entry.path().to_string());
+                }
+            }
+        } else {
+            confirmed_paths.insert(entry.path().to_string());
+        }
+    }
+
+    if has_warnings {
+        println!();
+    }
+
+    // Process confirmed files in parallel
+    let results: Vec<Result<()>> = entries
+        .par_iter()
+        .filter(|entry| confirmed_paths.contains(&entry.path().to_string()))
+        .map(|entry| {
+            let dest_path = dest_abs.join(entry.path());
+
+            if !needs_update(entry, &dest_path, identities) {
+                debug!(path = %entry.path(), "File is already up to date, skipping");
+                return Ok(());
+            }
+
+            match apply_target_entry(entry, &dest_path, identities) {
+                Ok(()) => {
+                    debug!(path = %entry.path(), "Applied entry successfully");
+                    match save_entry_state_to_db(entry) {
+                        Ok(()) => {
+                            print_success_entry(entry, show_icons);
+                            stats.record_success(entry);
+                            Ok(())
+                        }
+                        Err(e) => {
+                            warn!(path = %entry.path(), error = %e, "Failed to save state to database");
+                            print_error_entry(entry, &e, show_icons);
+                            stats.record_failure();
+                            Err(e)
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(path = %entry.path(), error = %e, "Failed to apply entry");
+                    print_error_entry(entry, &e, show_icons);
+                    stats.record_failure();
+                    Err(e)
+                }
+            }
+        })
+        .collect();
+
+    // Check for any errors in parallel execution
+    for result in results {
+        result?;
+    }
+
+    Ok(())
+}
+
 impl Command for ApplyCommand {
     type Output = ApplyStats;
     fn execute(&self, context: &RuntimeContext) -> crate::error::Result<ApplyStats> {
@@ -100,47 +589,15 @@ impl Command for ApplyCommand {
         let is_tty = std::io::stdout().is_terminal();
         let show_icons = config.ui.icons.should_show_icons(is_tty);
 
-        // Load variables from .guisu/variables/ directory
-        let guisu_dir = source_dir.join(".guisu");
-        let platform_name = guisu_core::platform::CURRENT_PLATFORM.os;
-
-        let guisu_variables = if guisu_dir.exists() {
-            guisu_config::variables::load_variables(&guisu_dir, platform_name)
-                .context("Failed to load variables from .guisu/variables/")?
-        } else {
-            indexmap::IndexMap::new()
-        };
-
-        // Merge variables: guisu variables + config variables (config overrides)
-        let mut all_variables = guisu_variables;
-        all_variables.extend(config.variables.iter().map(|(k, v)| (k.clone(), v.clone())));
-
-        // Create template engine with identities, template directory, and bitwarden provider
-        let template_engine =
-            crate::create_template_engine(source_dir, Arc::clone(&identities), config);
-
-        // Create content processor with real decryptor and renderer
-        use guisu_engine::adapters::crypto::CryptoDecryptorAdapter;
-        use guisu_engine::adapters::template::TemplateRendererAdapter;
-
-        // Use Arc to share identity without cloning
-        let identity_arc = if let Some(first) = identities.first() {
-            // Share the first identity from the Arc<Vec>
-            Arc::new(first.clone())
-        } else {
-            // Generate a new identity if none configured
-            Arc::new(guisu_crypto::Identity::generate())
-        };
-        let decryptor = CryptoDecryptorAdapter::from_arc(identity_arc);
-        let renderer = TemplateRendererAdapter::new(template_engine);
-        let processor = ContentProcessor::new(decryptor, renderer);
+        // Load variables and create processor
+        let all_variables = load_all_variables(source_dir, config)?;
+        let processor = setup_content_processor(source_dir, &identities, config);
 
         // Load metadata for create-once tracking
         let metadata =
             guisu_engine::state::Metadata::load(source_dir).context("Failed to load metadata")?;
 
         // Create ignore matcher from .guisu/ignores.toml
-        // Use dotfiles_dir as the match root so patterns match relative to the dotfiles directory
         let ignore_matcher = guisu_config::IgnoreMatcher::from_ignores_toml(source_dir)
             .context("Failed to load ignore patterns from .guisu/ignores.toml")?;
 
@@ -148,33 +605,14 @@ impl Command for ApplyCommand {
         let is_single_file = !self.files.is_empty() && self.files.len() == 1;
 
         // Build filter paths if specific files requested
-        let filter_paths = if !self.files.is_empty() {
+        let filter_paths = if self.files.is_empty() {
+            None
+        } else {
             Some(crate::build_filter_paths(&self.files, dest_abs)?)
-        } else {
-            None
         };
 
-        // Read source state with ignore matcher from config
-        let spinner = if !is_single_file {
-            Some(progress::create_spinner("Reading source state..."))
-        } else {
-            None
-        };
-
-        // Load ignore matcher if .guisu/ignores.toml exists
-        let matcher = guisu_config::IgnoreMatcher::from_ignores_toml(source_dir).ok();
-
-        // Read source state with optional ignore filtering
-        let source_state = if let Some(ref matcher) = matcher {
-            SourceState::read_with_matcher(source_abs.to_owned(), Some(matcher))
-                .context("Failed to read source state with ignore matcher")?
-        } else {
-            SourceState::read(source_abs.to_owned()).context("Failed to read source state")?
-        };
-
-        if let Some(spinner) = spinner {
-            spinner.finish_and_clear();
-        }
+        // Read source state
+        let source_state = read_source_state(source_abs.to_owned(), source_dir, is_single_file)?;
 
         if source_state.is_empty() {
             if !is_single_file {
@@ -183,78 +621,27 @@ impl Command for ApplyCommand {
             return Ok(ApplyStats::new());
         }
 
-        // Use the full source state - we'll filter later
-        let filtered_source_state = source_state;
-
-        // Build target state from filtered source state (processes templates and decrypts files)
-        let spinner = if !is_single_file {
-            Some(progress::create_spinner(
-                "Processing templates and encrypted files...",
-            ))
-        } else {
-            None
-        };
-        // Create template context with system variables and guisu info
+        // Build target state
         let working_tree = context.working_tree();
-        let template_context = guisu_template::TemplateContext::new()
-            .with_variables(all_variables)
-            .with_guisu_info(
-                source_abs.to_string(),
-                working_tree.display().to_string(),
-                dest_abs.to_string(),
-                config.general.root_entry.display().to_string(),
-            );
-        let template_context_value = serde_json::to_value(&template_context)
-            .context("Failed to serialize template context")?;
-        let target_state =
-            TargetState::from_source(&filtered_source_state, &processor, &template_context_value)?;
-        if let Some(spinner) = spinner {
-            spinner.finish_and_clear();
-        }
+        let target_state = build_target_state(
+            &source_state,
+            &processor,
+            source_abs,
+            dest_abs,
+            &working_tree,
+            config,
+            all_variables,
+            is_single_file,
+        )?;
 
-        // Filter out create-once files that already exist at the destination
-        // Also filter out ignored files
-        // Also filter by specific file paths if requested
-        let mut entries_to_apply: Vec<&TargetEntry> = target_state
-            .entries()
-            .filter(|entry| {
-                let path_str = entry.path().to_string();
-                let target_path = entry.path();
-
-                // If filtering by specific files, skip entries not in the filter
-                if let Some(ref filter) = filter_paths
-                    && !filter.iter().any(|p| p == target_path)
-                {
-                    return false;
-                }
-
-                // Skip if file is ignored
-                if ignore_matcher.is_ignored(entry.path().as_path()) {
-                    debug!(
-                        path = %path_str,
-                        "Skipping ignored file"
-                    );
-                    return false;
-                }
-
-                // If file is marked as create-once and already exists, skip it
-                if metadata.is_create_once(&path_str) {
-                    let dest_path = dest_abs.join(entry.path());
-                    if dest_path.as_path().exists() {
-                        debug!(
-                            path = %path_str,
-                            "Skipping create-once file that already exists"
-                        );
-                        return false;
-                    }
-                }
-
-                true
-            })
-            .collect();
-
-        // Sort entries by path for consistent output
-        entries_to_apply.sort_by(|a, b| a.path().as_path().cmp(b.path().as_path()));
+        // Filter entries to apply
+        let entries_to_apply = filter_entries_to_apply(
+            &target_state,
+            filter_paths.as_ref(),
+            &ignore_matcher,
+            &metadata,
+            dest_abs,
+        );
 
         if entries_to_apply.is_empty() {
             info!("No matching files to apply");
@@ -268,29 +655,8 @@ impl Command for ApplyCommand {
 
         // Check for configuration drift (files modified by user AND source updated)
         if !self.dry_run && !is_single_file {
-            let drift_warnings = detect_config_drift(&entries_to_apply, dest_abs)?;
-            if !drift_warnings.is_empty() {
-                println!("\n{}", "Configuration Drift Detected".yellow().bold());
-                println!(
-                    "{}",
-                    "The following files have been modified both locally and in the source:"
-                        .yellow()
-                );
-                for warning in &drift_warnings {
-                    println!("  {} {}", "•".yellow(), warning.bright_white());
-                }
-                println!();
-                println!(
-                    "{}",
-                    "These local changes will be overwritten during apply.".yellow()
-                );
-                println!(
-                    "{}",
-                    "Consider backing up modified files or using interactive mode (-i) for control."
-                        .dimmed()
-                );
-                println!();
-            }
+            let drift_warnings = detect_config_drift(&entries_to_apply, dest_abs);
+            display_drift_warnings(&drift_warnings);
         }
 
         // Create conflict handler for interactive mode
@@ -308,274 +674,17 @@ impl Command for ApplyCommand {
 
         // Use parallel processing only when NOT in interactive mode
         if self.interactive || self.dry_run {
-            // Sequential processing for interactive mode or dry run
-            for entry in entries_to_apply {
-                let dest_path = dest_abs.join(entry.path());
-
-                if self.dry_run {
-                    // Skip if file doesn't need update
-                    if !needs_update(entry, &dest_path, &identities) {
-                        debug!(path = %entry.path(), "File is already up to date, skipping");
-                        continue;
-                    }
-
-                    debug!(path = %entry.path(), "Would apply entry");
-                    print_dry_run_entry(entry, show_icons);
-                    stats.record_dry_run(entry);
-                } else {
-                    // Check for conflicts if interactive mode is enabled
-                    let should_apply = if let Some(ref mut handler) = conflict_handler {
-                        // Load last written state from database
-                        let last_written_hash = get_last_written_hash(entry);
-
-                        // Detect type of change
-                        let change_type = ConflictHandler::detect_change_type(
-                            entry,
-                            dest_abs,
-                            last_written_hash.as_deref(),
-                            &identities,
-                        )?;
-
-                        if let Some(change_type) = change_type {
-                            // Prompt user for action with change type information
-                            // Note: We don't store full content in DB, only hash, so last_written_content is None
-                            // This means merge operations will use two-way merge instead of three-way
-                            match handler.prompt_action(entry, dest_abs, None, change_type)? {
-                                ConflictAction::Override => true,
-                                ConflictAction::Skip => {
-                                    debug!(path = %entry.path(), "Skipping due to user choice");
-                                    println!("  {} {}", "⏭".yellow(), entry.path().bright_white());
-                                    false
-                                }
-                                ConflictAction::Quit => {
-                                    info!("Apply operation cancelled by user");
-                                    return Ok(ApplyStats::new());
-                                }
-                                // Merge and Edit are handled internally by prompt_action and return Override when done
-                                // Diff continues the prompt loop internally
-                                _ => unreachable!("Unexpected action returned from prompt_action"),
-                            }
-                        } else {
-                            // No change detected, but check if file actually needs update
-                            needs_update(entry, &dest_path, &identities)
-                        }
-                    } else {
-                        // Non-interactive mode: check for local modifications and warn user
-                        if !needs_update(entry, &dest_path, &identities) {
-                            false
-                        } else {
-                            // Load last written state to detect change type
-                            let last_written_hash = get_last_written_hash(entry);
-
-                            // Detect type of change
-                            let change_type = ConflictHandler::detect_change_type(
-                                entry,
-                                dest_abs,
-                                last_written_hash.as_deref(),
-                                &identities,
-                            )?;
-
-                            // If local modification or true conflict detected, warn user
-                            if let Some(change_type) = change_type {
-                                match change_type {
-                                    ChangeType::LocalModification | ChangeType::TrueConflict => {
-                                        // Show warning
-                                        let change_label = match change_type {
-                                            ChangeType::LocalModification => "Local modification",
-                                            ChangeType::TrueConflict => {
-                                                "Conflict (both local and source modified)"
-                                            }
-                                            _ => unreachable!(),
-                                        };
-
-                                        println!(
-                                            "\n{} {}",
-                                            "⚠".yellow(),
-                                            change_label.yellow().bold()
-                                        );
-                                        println!("  File: {}", entry.path().bright_white());
-                                        println!(
-                                            "  {}",
-                                            "This file has been modified locally.".yellow()
-                                        );
-                                        println!(
-                                            "  {}",
-                                            "Applying will overwrite your local changes.".yellow()
-                                        );
-
-                                        // Ask for confirmation
-                                        use dialoguer::{Confirm, theme::ColorfulTheme};
-                                        let theme = ColorfulTheme::default();
-
-                                        Confirm::with_theme(&theme)
-                                            .with_prompt("Continue and overwrite local changes?")
-                                            .default(false)
-                                            .interact()
-                                            .context("Failed to read user input")?
-                                    }
-                                    ChangeType::SourceUpdate => {
-                                        // Source update only, safe to apply
-                                        true
-                                    }
-                                }
-                            } else {
-                                // No change detected by change_type, but needs_update said yes
-                                // This can happen for new files or permission changes
-                                true
-                            }
-                        }
-                    };
-
-                    if should_apply {
-                        match apply_target_entry(entry, &dest_path, &identities) {
-                            Ok(_) => {
-                                debug!(path = %entry.path(), "Applied entry successfully");
-
-                                // Save state to database after successful application
-                                // If state save fails, treat the entire operation as failed
-                                match save_entry_state_to_db(entry) {
-                                    Ok(_) => {
-                                        print_success_entry(entry, show_icons);
-                                        stats.record_success(entry);
-                                    }
-                                    Err(e) => {
-                                        warn!(path = %entry.path(), error = %e, "Failed to save state to database");
-                                        print_error_entry(entry, &e, show_icons);
-                                        stats.record_failure();
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                warn!(path = %entry.path(), error = %e, "Failed to apply entry");
-                                print_error_entry(entry, &e, show_icons);
-                                stats.record_failure();
-                            }
-                        }
-                    }
-                }
-            }
+            process_entries_sequential(
+                entries_to_apply,
+                dest_abs,
+                &identities,
+                &mut conflict_handler,
+                &stats,
+                show_icons,
+                self.dry_run,
+            )?;
         } else {
-            // Parallel processing for non-interactive mode
-            // First, pre-scan for local modifications and get confirmations
-            use std::collections::HashSet;
-            let mut confirmed_paths = HashSet::new();
-            let mut has_warnings = false;
-
-            for entry in &entries_to_apply {
-                let dest_path = dest_abs.join(entry.path());
-
-                // Skip if file doesn't need update
-                if !needs_update(entry, &dest_path, &identities) {
-                    continue;
-                }
-
-                // Load last written state to detect change type
-                let last_written_hash = get_last_written_hash(entry);
-
-                // Detect type of change
-                if let Ok(Some(change_type)) = ConflictHandler::detect_change_type(
-                    entry,
-                    dest_abs,
-                    last_written_hash.as_deref(),
-                    &identities,
-                ) {
-                    match change_type {
-                        ChangeType::LocalModification | ChangeType::TrueConflict => {
-                            has_warnings = true;
-
-                            // Show warning
-                            let change_label = match change_type {
-                                ChangeType::LocalModification => "Local modification",
-                                ChangeType::TrueConflict => {
-                                    "Conflict (both local and source modified)"
-                                }
-                                _ => unreachable!(),
-                            };
-
-                            println!("\n{} {}", "⚠".yellow(), change_label.yellow().bold());
-                            println!("  File: {}", entry.path().bright_white());
-                            println!("  {}", "This file has been modified locally.".yellow());
-                            println!(
-                                "  {}",
-                                "Applying will overwrite your local changes.".yellow()
-                            );
-
-                            // Ask for confirmation
-                            use dialoguer::{Confirm, theme::ColorfulTheme};
-                            let theme = ColorfulTheme::default();
-
-                            let confirmed = Confirm::with_theme(&theme)
-                                .with_prompt("Continue and overwrite local changes?")
-                                .default(false)
-                                .interact()
-                                .context("Failed to read user input")?;
-
-                            if confirmed {
-                                confirmed_paths.insert(entry.path().to_string());
-                            }
-                        }
-                        ChangeType::SourceUpdate => {
-                            // Source update only, safe to apply
-                            confirmed_paths.insert(entry.path().to_string());
-                        }
-                    }
-                } else {
-                    // No change detected or error - apply by default
-                    confirmed_paths.insert(entry.path().to_string());
-                }
-            }
-
-            if has_warnings {
-                println!();
-            }
-
-            // Now process confirmed files in parallel
-            let results: Vec<Result<()>> = entries_to_apply
-                .par_iter()
-                .filter(|entry| confirmed_paths.contains(&entry.path().to_string()))
-                .map(|entry| {
-                    let dest_path = dest_abs.join(entry.path());
-
-                    // Skip if file doesn't need update
-                    if !needs_update(entry, &dest_path, &identities) {
-                        debug!(path = %entry.path(), "File is already up to date, skipping");
-                        return Ok(());
-                    }
-
-                    match apply_target_entry(entry, &dest_path, &identities) {
-                        Ok(_) => {
-                            debug!(path = %entry.path(), "Applied entry successfully");
-
-                            // Save state to database after successful application
-                            // If state save fails, treat the entire operation as failed
-                            match save_entry_state_to_db(entry) {
-                                Ok(_) => {
-                                    print_success_entry(entry, show_icons);
-                                    stats.record_success(entry);
-                                    Ok(())
-                                }
-                                Err(e) => {
-                                    warn!(path = %entry.path(), error = %e, "Failed to save state to database");
-                                    print_error_entry(entry, &e, show_icons);
-                                    stats.record_failure();
-                                    Err(e)
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(path = %entry.path(), error = %e, "Failed to apply entry");
-                            print_error_entry(entry, &e, show_icons);
-                            stats.record_failure();
-                            Err(e)
-                        }
-                    }
-                })
-                .collect();
-
-            // Check for any errors in parallel execution
-            for result in results {
-                result?;
-            }
+            process_entries_parallel(&entries_to_apply, dest_abs, &identities, &stats, show_icons)?;
         }
 
         // Return stats instead of printing here
@@ -583,7 +692,7 @@ impl Command for ApplyCommand {
 
         let failed_count = stats.failed();
         if failed_count > 0 {
-            return Err(anyhow::anyhow!("Failed to apply {} entries", failed_count).into());
+            return Err(anyhow::anyhow!("Failed to apply {failed_count} entries").into());
         }
 
         Ok(stats.snapshot())
@@ -611,8 +720,7 @@ impl std::str::FromStr for EntryType {
             "templates" | "template" => Ok(EntryType::Templates),
             "encrypted" | "encrypt" => Ok(EntryType::Encrypted),
             _ => anyhow::bail!(
-                "Invalid entry type: {}. Valid types: files, dirs, symlinks, templates, encrypted",
-                s
+                "Invalid entry type: {s}. Valid types: files, dirs, symlinks, templates, encrypted"
             ),
         }
     }
@@ -641,8 +749,7 @@ fn needs_update(
 
             // Decrypt inline age values in target content before comparing
             // This matches the behavior in detect_change_type and apply_target_entry
-            let target_content_decrypted =
-                decrypt_inline_age_values(content, identities).unwrap_or_else(|_| content.to_vec());
+            let target_content_decrypted = decrypt_inline_age_values(content, identities);
 
             // Check if content differs
             if let Ok(existing_content) = fs::read(dest_path.as_path()) {
@@ -740,8 +847,9 @@ fn apply_target_entry(
         TargetEntry::File { content, mode, .. } => {
             // Ensure parent directory exists
             if let Some(parent) = dest_path.as_path().parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create parent directory: {:?}", parent))?;
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("Failed to create parent directory: {}", parent.display())
+                })?;
             }
 
             // Check if file exists and save its permissions
@@ -758,7 +866,7 @@ fn apply_target_entry(
             // Decrypt inline age values before writing to destination
             // This allows source files to contain age:... encrypted values
             // but destination files get plaintext (for applications to use)
-            let final_content = decrypt_inline_age_values(content, identities)?;
+            let final_content = decrypt_inline_age_values(content, identities);
 
             // Write file with atomic permission setting to avoid TOCTOU race condition
             #[cfg(unix)]
@@ -779,10 +887,10 @@ fn apply_target_entry(
                     .truncate(true)
                     .mode(mode_to_use)
                     .open(dest_path.as_path())
-                    .with_context(|| format!("Failed to create file: {:?}", dest_path))?;
+                    .with_context(|| format!("Failed to create file: {dest_path:?}"))?;
 
                 file.write_all(&final_content)
-                    .with_context(|| format!("Failed to write file content: {:?}", dest_path))?;
+                    .with_context(|| format!("Failed to write file content: {dest_path:?}"))?;
             }
 
             #[cfg(not(unix))]
@@ -798,7 +906,7 @@ fn apply_target_entry(
         TargetEntry::Directory { mode, .. } => {
             // Create directory
             fs::create_dir_all(dest_path.as_path())
-                .with_context(|| format!("Failed to create directory: {:?}", dest_path))?;
+                .with_context(|| format!("Failed to create directory: {dest_path:?}"))?;
 
             // Set permissions
             #[cfg(unix)]
@@ -806,7 +914,7 @@ fn apply_target_entry(
                 use std::os::unix::fs::PermissionsExt;
                 let permissions = fs::Permissions::from_mode(*mode);
                 fs::set_permissions(dest_path.as_path(), permissions)
-                    .with_context(|| format!("Failed to set permissions: {:?}", dest_path))?;
+                    .with_context(|| format!("Failed to set permissions: {dest_path:?}"))?;
             }
 
             Ok(())
@@ -815,19 +923,20 @@ fn apply_target_entry(
         TargetEntry::Symlink { target, .. } => {
             // Ensure parent directory exists
             if let Some(parent) = dest_path.as_path().parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create parent directory: {:?}", parent))?;
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("Failed to create parent directory: {}", parent.display())
+                })?;
             }
 
             // Remove existing symlink/file if it exists
             if dest_path.as_path().exists() || dest_path.as_path().is_symlink() {
                 if dest_path.as_path().is_dir() && !dest_path.as_path().is_symlink() {
                     fs::remove_dir_all(dest_path.as_path()).with_context(|| {
-                        format!("Failed to remove existing directory: {:?}", dest_path)
+                        format!("Failed to remove existing directory: {dest_path:?}")
                     })?;
                 } else {
                     fs::remove_file(dest_path.as_path()).with_context(|| {
-                        format!("Failed to remove existing file/symlink: {:?}", dest_path)
+                        format!("Failed to remove existing file/symlink: {dest_path:?}")
                     })?;
                 }
             }
@@ -837,7 +946,7 @@ fn apply_target_entry(
             {
                 use std::os::unix::fs::symlink;
                 symlink(target, dest_path.as_path())
-                    .with_context(|| format!("Failed to create symlink: {:?}", dest_path))?;
+                    .with_context(|| format!("Failed to create symlink: {dest_path:?}"))?;
             }
 
             #[cfg(windows)]
@@ -855,10 +964,10 @@ fn apply_target_entry(
             if dest_path.as_path().exists() {
                 if dest_path.as_path().is_dir() {
                     fs::remove_dir_all(dest_path.as_path())
-                        .with_context(|| format!("Failed to remove directory: {:?}", dest_path))?;
+                        .with_context(|| format!("Failed to remove directory: {dest_path:?}"))?;
                 } else {
                     fs::remove_file(dest_path.as_path())
-                        .with_context(|| format!("Failed to remove file: {:?}", dest_path))?;
+                        .with_context(|| format!("Failed to remove file: {dest_path:?}"))?;
                 }
             }
             Ok(())
@@ -872,7 +981,7 @@ fn save_entry_state_to_db(entry: &TargetEntry) -> Result<()> {
     if let TargetEntry::File { content, mode, .. } = entry {
         let path = entry.path().to_string();
         guisu_engine::database::save_entry_state(&path, content, *mode)
-            .with_context(|| format!("Failed to save state for {}", path))?;
+            .with_context(|| format!("Failed to save state for {path}"))?;
     }
     Ok(())
 }
@@ -903,14 +1012,13 @@ fn print_dry_run_entry(entry: &TargetEntry, use_nerd_fonts: bool) {
 
     let lscolors = LsColors::from_env().unwrap_or_default();
     let path = entry.path();
-    let display_path = format!("~/{}", path);
+    let display_path = format!("~/{path}");
 
     // Get file icon
     let (is_directory, is_symlink) = match entry {
-        TargetEntry::File { .. } => (false, false),
+        TargetEntry::File { .. } | TargetEntry::Remove { .. } => (false, false),
         TargetEntry::Directory { .. } => (true, false),
         TargetEntry::Symlink { .. } => (false, true),
-        TargetEntry::Remove { .. } => (false, false),
     };
 
     let icon_info = crate::ui::icons::FileIconInfo {
@@ -938,14 +1046,13 @@ fn print_success_entry(entry: &TargetEntry, use_nerd_fonts: bool) {
 
     let lscolors = LsColors::from_env().unwrap_or_default();
     let path = entry.path();
-    let display_path = format!("~/{}", path);
+    let display_path = format!("~/{path}");
 
     // Get file icon
     let (is_directory, is_symlink) = match entry {
-        TargetEntry::File { .. } => (false, false),
+        TargetEntry::File { .. } | TargetEntry::Remove { .. } => (false, false),
         TargetEntry::Directory { .. } => (true, false),
         TargetEntry::Symlink { .. } => (false, true),
-        TargetEntry::Remove { .. } => (false, false),
     };
 
     let icon_info = crate::ui::icons::FileIconInfo {
@@ -973,14 +1080,13 @@ fn print_error_entry(entry: &TargetEntry, error: &anyhow::Error, use_nerd_fonts:
 
     let lscolors = LsColors::from_env().unwrap_or_default();
     let path = entry.path();
-    let display_path = format!("~/{}", path);
+    let display_path = format!("~/{path}");
 
     // Get file icon
     let (is_directory, is_symlink) = match entry {
-        TargetEntry::File { .. } => (false, false),
+        TargetEntry::File { .. } | TargetEntry::Remove { .. } => (false, false),
         TargetEntry::Directory { .. } => (true, false),
         TargetEntry::Symlink { .. } => (false, true),
-        TargetEntry::Remove { .. } => (false, false),
     };
 
     let icon_info = crate::ui::icons::FileIconInfo {
@@ -1011,21 +1117,24 @@ fn print_error_entry(entry: &TargetEntry, error: &anyhow::Error, use_nerd_fonts:
 /// Detect configuration drift for files
 ///
 /// Returns a list of file paths where:
-/// 1. The user has modified the file locally (actual != last_written)
-/// 2. The source has also been updated (target != last_written)
+/// 1. The user has modified the file locally (actual != `last_written`)
+/// 2. The source has also been updated (target != `last_written`)
 ///
 /// This indicates potential conflict where both local and source changes exist.
-fn detect_config_drift(entries: &[&TargetEntry], dest_abs: &AbsPath) -> Result<Vec<String>> {
+fn detect_config_drift(entries: &[&TargetEntry], dest_abs: &AbsPath) -> Vec<String> {
     use sha2::{Digest, Sha256};
 
     // Parallel processing of drift detection (3x SHA256 per file = CPU-intensive)
-    let drift_files: Vec<String> = entries
+    entries
         .par_iter()
         .filter_map(|entry| {
             // Only check files
-            let target_content = match entry {
-                TargetEntry::File { content, .. } => content,
-                _ => return None,
+            let TargetEntry::File {
+                content: target_content,
+                ..
+            } = entry
+            else {
+                return None;
             };
 
             let dest_path = dest_abs.join(entry.path());
@@ -1081,9 +1190,7 @@ fn detect_config_drift(entries: &[&TargetEntry], dest_abs: &AbsPath) -> Result<V
                 None
             }
         })
-        .collect();
-
-    Ok(drift_files)
+        .collect()
 }
 
 /// Decrypt inline age: encrypted values in file content
@@ -1096,29 +1203,25 @@ fn detect_config_drift(entries: &[&TargetEntry], dest_abs: &AbsPath) -> Result<V
 /// - Destination: password: my-secret-password
 ///
 /// If decryption fails or no identities are available, returns the original content unchanged.
-fn decrypt_inline_age_values(
-    content: &[u8],
-    identities: &[guisu_crypto::Identity],
-) -> Result<Vec<u8>> {
+fn decrypt_inline_age_values(content: &[u8], identities: &[guisu_crypto::Identity]) -> Vec<u8> {
     // Convert to string (if not valid UTF-8, return original)
-    let content_str = match String::from_utf8(content.to_vec()) {
-        Ok(s) => s,
-        Err(_) => return Ok(content.to_vec()), // Binary file, return as-is
+    let Ok(content_str) = String::from_utf8(content.to_vec()) else {
+        return content.to_vec(); // Binary file, return as-is
     };
 
     // Check if content contains age: prefix (quick check before decrypting)
     if !content_str.contains("age:") {
-        return Ok(content.to_vec()); // No encrypted values, return as-is
+        return content.to_vec(); // No encrypted values, return as-is
     }
 
     // If no identities available, return original content
     if identities.is_empty() {
-        return Ok(content.to_vec());
+        return content.to_vec();
     }
 
     // Decrypt all inline age values
     match guisu_crypto::decrypt_file_content(&content_str, identities) {
-        Ok(decrypted) => Ok(decrypted.into_bytes()),
+        Ok(decrypted) => decrypted.into_bytes(),
         Err(e) => {
             // Log the error with context
             warn!(
@@ -1135,7 +1238,276 @@ fn decrypt_inline_age_values(
             //
             // NOTE: Future enhancement - add config option to fail loudly
             // See CLAUDE.md: "Encryption Failure Handling Configuration"
-            Ok(content.to_vec())
+            content.to_vec()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+
+    // Tests for EntryType
+
+    #[test]
+    fn test_entry_type_from_str_files() {
+        assert_eq!("files".parse::<EntryType>().unwrap(), EntryType::Files);
+        assert_eq!("file".parse::<EntryType>().unwrap(), EntryType::Files);
+        assert_eq!("FILES".parse::<EntryType>().unwrap(), EntryType::Files);
+    }
+
+    #[test]
+    fn test_entry_type_from_str_dirs() {
+        assert_eq!("dirs".parse::<EntryType>().unwrap(), EntryType::Dirs);
+        assert_eq!("dir".parse::<EntryType>().unwrap(), EntryType::Dirs);
+        assert_eq!("directories".parse::<EntryType>().unwrap(), EntryType::Dirs);
+        assert_eq!("DIRS".parse::<EntryType>().unwrap(), EntryType::Dirs);
+    }
+
+    #[test]
+    fn test_entry_type_from_str_symlinks() {
+        assert_eq!(
+            "symlinks".parse::<EntryType>().unwrap(),
+            EntryType::Symlinks
+        );
+        assert_eq!("symlink".parse::<EntryType>().unwrap(), EntryType::Symlinks);
+        assert_eq!(
+            "SYMLINKS".parse::<EntryType>().unwrap(),
+            EntryType::Symlinks
+        );
+    }
+
+    #[test]
+    fn test_entry_type_from_str_templates() {
+        assert_eq!(
+            "templates".parse::<EntryType>().unwrap(),
+            EntryType::Templates
+        );
+        assert_eq!(
+            "template".parse::<EntryType>().unwrap(),
+            EntryType::Templates
+        );
+        assert_eq!(
+            "TEMPLATES".parse::<EntryType>().unwrap(),
+            EntryType::Templates
+        );
+    }
+
+    #[test]
+    fn test_entry_type_from_str_encrypted() {
+        assert_eq!(
+            "encrypted".parse::<EntryType>().unwrap(),
+            EntryType::Encrypted
+        );
+        assert_eq!(
+            "encrypt".parse::<EntryType>().unwrap(),
+            EntryType::Encrypted
+        );
+        assert_eq!(
+            "ENCRYPTED".parse::<EntryType>().unwrap(),
+            EntryType::Encrypted
+        );
+    }
+
+    #[test]
+    fn test_entry_type_from_str_invalid() {
+        let result = "invalid".parse::<EntryType>();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid entry type")
+        );
+    }
+
+    #[test]
+    fn test_entry_type_equality() {
+        assert_eq!(EntryType::Files, EntryType::Files);
+        assert_eq!(EntryType::Dirs, EntryType::Dirs);
+        assert_ne!(EntryType::Files, EntryType::Dirs);
+    }
+
+    #[test]
+    fn test_entry_type_clone() {
+        let entry_type = EntryType::Files;
+        let cloned = entry_type;
+        assert_eq!(entry_type, cloned);
+    }
+
+    #[test]
+    fn test_entry_type_copy() {
+        let entry_type = EntryType::Templates;
+        let copied = entry_type;
+        // After copy, original should still be usable
+        assert_eq!(entry_type, EntryType::Templates);
+        assert_eq!(copied, EntryType::Templates);
+    }
+
+    // Tests for decrypt_inline_age_values
+
+    #[test]
+    fn test_decrypt_inline_age_values_no_age_prefix() {
+        let content = b"password: my-secret";
+        let identities = vec![];
+
+        let result = decrypt_inline_age_values(content, &identities);
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_decrypt_inline_age_values_empty_identities() {
+        let content = b"password: age:encrypted-value";
+        let identities = vec![];
+
+        let result = decrypt_inline_age_values(content, &identities);
+        // Should return original content when no identities
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_decrypt_inline_age_values_binary_content() {
+        // Binary content (invalid UTF-8)
+        let content = b"\xFF\xFE\xFD\xFC";
+        let identities = vec![guisu_crypto::Identity::generate()];
+
+        let result = decrypt_inline_age_values(content, &identities);
+        // Should return original binary content as-is
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_decrypt_inline_age_values_empty_content() {
+        let content = b"";
+        let identities = vec![];
+
+        let result = decrypt_inline_age_values(content, &identities);
+        assert_eq!(result, b"");
+    }
+
+    #[test]
+    fn test_decrypt_inline_age_values_no_encrypted_values() {
+        let content = b"username: john\npassword: plain-text";
+        let identities = vec![guisu_crypto::Identity::generate()];
+
+        let result = decrypt_inline_age_values(content, &identities);
+        // Should return original content when no age: prefix found
+        assert_eq!(result, content);
+    }
+
+    // Tests for ApplyCommand structure
+
+    #[test]
+    fn test_apply_command_default_fields() {
+        let cmd = ApplyCommand {
+            files: vec![],
+            dry_run: false,
+            force: false,
+            interactive: false,
+            include: vec![],
+            exclude: vec![],
+        };
+
+        assert!(cmd.files.is_empty());
+        assert!(!cmd.dry_run);
+        assert!(!cmd.force);
+        assert!(!cmd.interactive);
+        assert!(cmd.include.is_empty());
+        assert!(cmd.exclude.is_empty());
+    }
+
+    #[test]
+    fn test_apply_command_with_files() {
+        let cmd = ApplyCommand {
+            files: vec![PathBuf::from("file1.txt"), PathBuf::from("file2.txt")],
+            dry_run: false,
+            force: false,
+            interactive: false,
+            include: vec![],
+            exclude: vec![],
+        };
+
+        assert_eq!(cmd.files.len(), 2);
+        assert_eq!(cmd.files[0], PathBuf::from("file1.txt"));
+    }
+
+    #[test]
+    fn test_apply_command_dry_run() {
+        let cmd = ApplyCommand {
+            files: vec![],
+            dry_run: true,
+            force: false,
+            interactive: false,
+            include: vec![],
+            exclude: vec![],
+        };
+
+        assert!(cmd.dry_run);
+    }
+
+    #[test]
+    fn test_apply_command_force() {
+        let cmd = ApplyCommand {
+            files: vec![],
+            dry_run: false,
+            force: true,
+            interactive: false,
+            include: vec![],
+            exclude: vec![],
+        };
+
+        assert!(cmd.force);
+    }
+
+    #[test]
+    fn test_apply_command_interactive() {
+        let cmd = ApplyCommand {
+            files: vec![],
+            dry_run: false,
+            force: false,
+            interactive: true,
+            include: vec![],
+            exclude: vec![],
+        };
+
+        assert!(cmd.interactive);
+    }
+
+    #[test]
+    fn test_apply_command_with_filters() {
+        let cmd = ApplyCommand {
+            files: vec![],
+            dry_run: false,
+            force: false,
+            interactive: false,
+            include: vec!["files".to_string(), "dirs".to_string()],
+            exclude: vec!["encrypted".to_string()],
+        };
+
+        assert_eq!(cmd.include.len(), 2);
+        assert_eq!(cmd.exclude.len(), 1);
+        assert_eq!(cmd.include[0], "files");
+        assert_eq!(cmd.exclude[0], "encrypted");
+    }
+
+    #[test]
+    fn test_apply_command_clone() {
+        let cmd = ApplyCommand {
+            files: vec![PathBuf::from("test.txt")],
+            dry_run: true,
+            force: false,
+            interactive: false,
+            include: vec!["files".to_string()],
+            exclude: vec![],
+        };
+
+        let cloned = cmd.clone();
+        assert_eq!(cloned.files, cmd.files);
+        assert_eq!(cloned.dry_run, cmd.dry_run);
+        assert_eq!(cloned.force, cmd.force);
+        assert_eq!(cloned.interactive, cmd.interactive);
+        assert_eq!(cloned.include, cmd.include);
+        assert_eq!(cloned.exclude, cmd.exclude);
     }
 }

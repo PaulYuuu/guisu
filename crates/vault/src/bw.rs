@@ -35,11 +35,13 @@ use tracing::info;
 ///
 /// Uses the official Node.js-based `bw` CLI with session-based authentication.
 pub struct BwCli {
-    /// Cached session key (BW_SESSION)
+    /// Cached session key (`BW_SESSION`)
     session_key: Mutex<Option<String>>,
 }
 
 impl BwCli {
+    /// Create a new Bitwarden CLI provider
+    #[must_use]
     pub fn new() -> Self {
         // Try to get session from environment variable
         let session_key = env::var("BW_SESSION").ok();
@@ -78,7 +80,7 @@ impl BwCli {
     }
 
     /// Check vault status using `bw status`
-    fn check_vault_status(&self) -> Result<bool> {
+    fn check_vault_status() -> Result<bool> {
         let output = Command::new("bw")
             .arg("status")
             .stdout(Stdio::piped())
@@ -106,7 +108,7 @@ impl BwCli {
     }
 
     /// Try to unlock the vault interactively
-    fn try_unlock(&self) -> Result<String> {
+    fn try_unlock() -> Result<String> {
         info!("Bitwarden vault is locked. Unlocking...");
 
         let output = Command::new("bw")
@@ -130,9 +132,8 @@ impl BwCli {
                 return Err(Error::AuthenticationRequired(
                     "Failed to unlock. Wrong password?".to_string(),
                 ));
-            } else {
-                return Err(Error::AuthenticationRequired(stderr.trim().to_string()));
             }
+            return Err(Error::AuthenticationRequired(stderr.trim().to_string()));
         }
 
         let session_key = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -149,16 +150,16 @@ impl BwCli {
     /// Execute bw command with auto-unlock
     fn execute_with_unlock(&self, args: &[&str]) -> Result<JsonValue> {
         // Check vault status first using `bw status`
-        let is_unlocked = self.check_vault_status()?;
+        let is_unlocked = Self::check_vault_status()?;
 
         // If vault is locked, unlock it first
-        let session_key = if !is_unlocked {
-            let key = self.try_unlock()?;
-            self.cache_session_key(key.clone());
-            Some(key)
-        } else {
+        let session_key = if is_unlocked {
             // Use cached session key if available
             self.get_session_key()
+        } else {
+            let key = Self::try_unlock()?;
+            self.cache_session_key(key.clone());
+            Some(key)
         };
 
         // Execute the actual command with session key
@@ -188,10 +189,10 @@ impl BwCli {
             )));
         }
 
-        self.parse_json(&stdout)
+        Self::parse_json(&stdout)
     }
 
-    fn parse_json(&self, stdout: &str) -> Result<JsonValue> {
+    fn parse_json(stdout: &str) -> Result<JsonValue> {
         if stdout.trim().is_empty() {
             return Err(Error::ParseError("Empty output".to_string()));
         }
@@ -207,7 +208,7 @@ impl Default for BwCli {
 }
 
 impl SecretProvider for BwCli {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "bw"
     }
 
@@ -229,7 +230,7 @@ impl SecretProvider for BwCli {
             .unwrap_or(false)
     }
 
-    fn help(&self) -> &str {
+    fn help(&self) -> &'static str {
         "Official Bitwarden CLI (bw)\n\
          \n\
          Requirements:\n\
@@ -247,16 +248,17 @@ impl SecretProvider for BwCli {
 ///
 /// Uses the Rust-based `rbw` CLI with daemon-based authentication.
 ///
-/// # Important differences from BwCli:
+/// # Important differences from `BwCli`:
 ///
 /// - Daemon-based: rbw uses a background daemon (`rbw-agent`) that handles vault state
-/// - No session keys: The daemon manages authentication, no BW_SESSION env var needed
+/// - No session keys: The daemon manages authentication, no `BW_SESSION` env var needed
 /// - Different JSON format: rbw outputs `data` field instead of `login`, requires mapping
 /// - Unlock check: Use `rbw unlocked` to check vault status
 pub struct RbwCli;
 
 impl RbwCli {
     /// Create a new rbw provider instance
+    #[must_use]
     pub fn new() -> Self {
         Self
     }
@@ -273,15 +275,15 @@ impl RbwCli {
     /// - bw: `login.username`, `login.password`
     ///
     /// For SSH keys (type 5):
-    /// - rbw: `data.public_key`, `data.fingerprint` (snake_case)
-    /// - bw: `sshKey.privateKey`, `sshKey.publicKey` (camelCase)
+    /// - rbw: `data.public_key`, `data.fingerprint` (`snake_case`)
+    /// - bw: `sshKey.privateKey`, `sshKey.publicKey` (`camelCase`)
     ///
     /// # Known Limitations
     ///
     /// rbw does NOT provide `private_key` for SSH items - only `public_key`
     /// and `fingerprint`. If you need SSH private keys in templates, use
     /// the bw CLI instead.
-    fn transform_to_bw_format(&self, json: &mut JsonValue) -> Result<()> {
+    fn transform_to_bw_format(json: &mut JsonValue) {
         if let Some(obj) = json.as_object_mut()
             && let Some(data) = obj.get("data").cloned()
         {
@@ -321,7 +323,6 @@ impl RbwCli {
                 obj.insert("login".to_string(), data);
             }
         }
-        Ok(())
     }
 
     /// Execute rbw command and return parsed JSON in bw-compatible format
@@ -346,10 +347,10 @@ impl RbwCli {
     ///
     /// # Known Limitations
     ///
-    /// - SSH private keys: rbw does not return private_key field for SSH items.
-    ///   Only public_key and fingerprint are available. Use bw CLI if you need
+    /// - SSH private keys: rbw does not return `private_key` field for SSH items.
+    ///   Only `public_key` and `fingerprint` are available. Use bw CLI if you need
     ///   to access SSH private keys in templates.
-    fn execute_rbw(&self, args: &[&str]) -> Result<JsonValue> {
+    fn execute_rbw(args: &[&str]) -> Result<JsonValue> {
         // Execute rbw - it handles daemon startup and unlocking automatically
         let output = Command::new("rbw")
             .args(args)
@@ -380,23 +381,23 @@ impl RbwCli {
         }
 
         // Parse and transform to bw-compatible format
-        self.parse_and_transform(&stdout)
+        Self::parse_and_transform(&stdout)
     }
 
     /// Parse rbw JSON output and transform to bw-compatible format
     ///
     /// This method handles all format conversions internally, so external
     /// code can treat rbw output the same as bw output.
-    fn parse_and_transform(&self, stdout: &str) -> Result<JsonValue> {
+    fn parse_and_transform(stdout: &str) -> Result<JsonValue> {
         if stdout.trim().is_empty() {
             return Err(Error::ParseError("Empty output from rbw".to_string()));
         }
 
         let mut json: JsonValue = serde_json::from_str(stdout)
-            .map_err(|e| Error::ParseError(format!("Failed to parse rbw JSON: {}", e)))?;
+            .map_err(|e| Error::ParseError(format!("Failed to parse rbw JSON: {e}")))?;
 
         // Transform rbw format to bw-compatible format internally
-        self.transform_to_bw_format(&mut json)?;
+        Self::transform_to_bw_format(&mut json);
 
         Ok(json)
     }
@@ -409,7 +410,7 @@ impl Default for RbwCli {
 }
 
 impl SecretProvider for RbwCli {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "rbw"
     }
 
@@ -420,7 +421,7 @@ impl SecretProvider for RbwCli {
             ));
         }
 
-        self.execute_rbw(args)
+        Self::execute_rbw(args)
     }
 
     fn is_available(&self) -> bool {
@@ -434,7 +435,7 @@ impl SecretProvider for RbwCli {
             .unwrap_or(false)
     }
 
-    fn help(&self) -> &str {
+    fn help(&self) -> &'static str {
         "Unofficial Rust Bitwarden CLI (rbw)\n\
          \n\
          Requirements:\n\
@@ -454,7 +455,7 @@ impl SecretProvider for RbwCli {
 
 // Implement VaultProvider trait for BwCli
 impl guisu_core::VaultProvider for BwCli {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "bitwarden (bw)"
     }
 
@@ -467,15 +468,13 @@ impl guisu_core::VaultProvider for BwCli {
     }
 
     fn unlock(&mut self) -> guisu_core::Result<()> {
-        match self.check_vault_status() {
-            Ok(true) => Ok(()), // Already unlocked
-            _ => {
-                let session = self
-                    .try_unlock()
-                    .map_err(|e| guisu_core::Error::Message(e.to_string()))?;
-                self.cache_session_key(session);
-                Ok(())
-            }
+        if let Ok(true) = Self::check_vault_status() {
+            Ok(()) // Already unlocked
+        } else {
+            let session =
+                Self::try_unlock().map_err(|e| guisu_core::Error::Message(e.to_string()))?;
+            self.cache_session_key(session);
+            Ok(())
         }
     }
 
@@ -483,8 +482,8 @@ impl guisu_core::VaultProvider for BwCli {
         self.execute(&["get", "item", key])
             .and_then(|v| {
                 v.as_str()
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| Error::ParseError("Expected string value".to_string()))
+                    .map(std::string::ToString::to_string)
+                    .ok_or(Error::ParseError("Expected string value".to_string()))
             })
             .map_err(|e| guisu_core::Error::Message(e.to_string()))
     }
@@ -492,7 +491,7 @@ impl guisu_core::VaultProvider for BwCli {
 
 // Implement VaultProvider trait for RbwCli
 impl guisu_core::VaultProvider for RbwCli {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "bitwarden (rbw)"
     }
 
@@ -512,8 +511,8 @@ impl guisu_core::VaultProvider for RbwCli {
         self.execute(&["get", key])
             .and_then(|v| {
                 v.as_str()
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| Error::ParseError("Expected string value".to_string()))
+                    .map(std::string::ToString::to_string)
+                    .ok_or(Error::ParseError("Expected string value".to_string()))
             })
             .map_err(|e| guisu_core::Error::Message(e.to_string()))
     }

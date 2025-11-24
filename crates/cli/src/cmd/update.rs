@@ -39,21 +39,8 @@ impl Command for UpdateCommand {
     }
 }
 
-/// Run the update command implementation
-///
-/// Pulls the latest changes from the remote repository and optionally applies them.
-fn run_impl(
-    source_dir: &Path,
-    dest_dir: &Path,
-    apply: bool,
-    rebase: bool,
-    config: &Config,
-) -> Result<()> {
-    let dotfiles_dir = config.dotfiles_dir(source_dir);
-
-    info!(path = %source_dir.display(), "Updating repository");
-    println!("Updating from: {}", source_dir.display());
-
+/// Validate source directory and open repository
+fn validate_and_open_repository(source_dir: &Path) -> Result<Repository> {
     // Verify source directory exists
     if !source_dir.exists() {
         return Err(anyhow!(
@@ -63,13 +50,16 @@ fn run_impl(
     }
 
     // Open the repository
-    let repo = Repository::open(source_dir).with_context(|| {
+    Repository::open(source_dir).with_context(|| {
         format!(
             "Failed to open git repository at {}. Did you initialize with 'guisu init'?",
             source_dir.display()
         )
-    })?;
+    })
+}
 
+/// Setup and perform fetch with progress bar
+fn setup_fetch_with_progress(repo: &Repository) -> Result<()> {
     // Get the remote (default to "origin")
     let mut remote = repo
         .find_remote("origin")
@@ -91,14 +81,20 @@ fn run_impl(
         let total = stats.total_objects();
 
         if total > 0 {
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss
+            )]
             let percentage = (received as f64 / total as f64 * 100.0) as u64;
             progress_bar.set_position(percentage);
 
             if stats.received_bytes() > 0 {
+                #[allow(clippy::cast_precision_loss)]
                 let mb = stats.received_bytes() as f64 / 1_048_576.0;
-                progress_bar.set_message(format!("{}/{} objects ({:.2} MiB)", received, total, mb));
+                progress_bar.set_message(format!("{received}/{total} objects ({mb:.2} MiB)"));
             } else {
-                progress_bar.set_message(format!("{}/{} objects", received, total));
+                progress_bar.set_message(format!("{received}/{total} objects"));
             }
         }
 
@@ -120,18 +116,30 @@ fn run_impl(
 
     progress_bar.finish_and_clear();
 
+    Ok(())
+}
+
+/// Analyze fetch result and return merge analysis
+fn analyze_fetch_result(repo: &Repository) -> Result<AnnotatedCommit<'_>> {
     // Get FETCH_HEAD to analyze what was fetched
     let fetch_head = repo
         .find_reference("FETCH_HEAD")
         .context("Failed to find FETCH_HEAD after fetch")?;
 
-    let fetch_commit = repo
-        .reference_to_annotated_commit(&fetch_head)
-        .context("Failed to get fetch commit")?;
+    repo.reference_to_annotated_commit(&fetch_head)
+        .context("Failed to get fetch commit")
+}
 
+/// Handle different merge scenarios
+fn handle_merge_scenarios(
+    repo: &Repository,
+    fetch_commit: &AnnotatedCommit,
+    source_dir: &Path,
+    rebase: bool,
+) -> Result<()> {
     // Analyze the fetch
     let analysis = repo
-        .merge_analysis(&[&fetch_commit])
+        .merge_analysis(&[fetch_commit])
         .context("Failed to analyze merge")?;
 
     // Handle different merge scenarios
@@ -144,10 +152,9 @@ fn run_impl(
     if analysis.0.is_fast_forward() {
         // Fast-forward merge
         debug!("Performing fast-forward merge");
-        perform_fast_forward(&repo, &fetch_commit)
-            .context("Failed to perform fast-forward merge")?;
+        perform_fast_forward(repo, fetch_commit).context("Failed to perform fast-forward merge")?;
 
-        let commit_count = count_new_commits(&repo, &fetch_commit)?;
+        let commit_count = count_new_commits(repo, fetch_commit)?;
         info!(commits = commit_count, "Successfully updated");
         println!(
             "✓ Updated successfully ({} new commit{})",
@@ -161,9 +168,9 @@ fn run_impl(
             debug!("Performing rebase");
             println!("Branches have diverged. Rebasing local changes...");
 
-            perform_rebase(&repo, &fetch_commit).context("Failed to perform rebase")?;
+            perform_rebase(repo, fetch_commit).context("Failed to perform rebase")?;
 
-            let commit_count = count_new_commits(&repo, &fetch_commit)?;
+            let commit_count = count_new_commits(repo, fetch_commit)?;
             info!(commits = commit_count, "Successfully rebased and updated");
             println!(
                 "✓ Rebased successfully ({} new commit{})",
@@ -191,25 +198,57 @@ fn run_impl(
         ));
     }
 
+    Ok(())
+}
+
+/// Apply changes after update
+fn apply_changes_after_update(config: &Config, dotfiles_dir: &Path, dest_dir: &Path) -> Result<()> {
+    println!("\nApplying changes...");
+
+    // Create ApplyCommand with default options (all files)
+    let apply_cmd = crate::cmd::apply::ApplyCommand {
+        files: vec![],
+        dry_run: false,
+        force: false,
+        interactive: false,
+        include: vec![],
+        exclude: vec![],
+    };
+
+    // Create RuntimeContext and execute
+    let context = crate::common::RuntimeContext::new(config.clone(), dotfiles_dir, dest_dir)?;
+    apply_cmd
+        .execute(&context)
+        .context("Failed to apply changes")
+        .map(|_| ()) // Discard ApplyStats, return ()
+}
+
+/// Run the update command implementation
+///
+/// Pulls the latest changes from the remote repository and optionally applies them.
+fn run_impl(
+    source_dir: &Path,
+    dest_dir: &Path,
+    apply: bool,
+    rebase: bool,
+    config: &Config,
+) -> Result<()> {
+    let dotfiles_dir = config.dotfiles_dir(source_dir);
+
+    info!(path = %source_dir.display(), "Updating repository");
+    println!("Updating from: {}", source_dir.display());
+
+    let repo = validate_and_open_repository(source_dir)?;
+
+    setup_fetch_with_progress(&repo)?;
+
+    let fetch_commit = analyze_fetch_result(&repo)?;
+
+    handle_merge_scenarios(&repo, &fetch_commit, source_dir, rebase)?;
+
     // Apply changes if requested
     if apply {
-        println!("\nApplying changes...");
-
-        // Create ApplyCommand with default options (all files)
-        let apply_cmd = crate::cmd::apply::ApplyCommand {
-            files: vec![],
-            dry_run: false,
-            force: false,
-            interactive: false,
-            include: vec![],
-            exclude: vec![],
-        };
-
-        // Create RuntimeContext and execute
-        let context = crate::common::RuntimeContext::new(config.clone(), &dotfiles_dir, dest_dir)?;
-        apply_cmd
-            .execute(&context)
-            .context("Failed to apply changes")?;
+        apply_changes_after_update(config, &dotfiles_dir, dest_dir)?;
     } else {
         println!("\nTo apply these changes, run:");
         println!("  guisu apply");
@@ -224,8 +263,8 @@ fn perform_fast_forward(repo: &Repository, fetch_commit: &AnnotatedCommit) -> Re
     let commit_id = fetch_commit.id();
 
     // Update HEAD to point to the new commit
-    let refname = "refs/heads/main";
-    let refname_alt = "refs/heads/master";
+    let main_ref_name = "refs/heads/main";
+    let master_ref_name = "refs/heads/master";
 
     // Try to find the current branch reference
     let reference = repo
@@ -236,21 +275,21 @@ fn perform_fast_forward(repo: &Repository, fetch_commit: &AnnotatedCommit) -> Re
         reference
     } else {
         // Detached HEAD, try to find main or master branch
-        repo.find_reference(refname)
-            .or_else(|_| repo.find_reference(refname_alt))
+        repo.find_reference(main_ref_name)
+            .or_else(|_| repo.find_reference(master_ref_name))
             .context("Failed to find main/master branch")?
     };
 
-    let ref_name = reference
+    let current_ref_name = reference
         .name()
         .ok_or_else(|| anyhow!("Invalid reference name"))?;
 
     // Update the reference to point to the new commit
     repo.reference(
-        ref_name,
+        current_ref_name,
         commit_id,
         true, // force
-        &format!("guisu update: fast-forward to {}", commit_id),
+        &format!("guisu update: fast-forward to {commit_id}"),
     )
     .context("Failed to update reference")?;
 
@@ -307,7 +346,7 @@ fn perform_rebase(repo: &Repository, fetch_commit: &AnnotatedCommit) -> Result<(
         // Perform the rebase operation (apply the commit)
         rebase
             .commit(None, &repo.signature()?, None)
-            .with_context(|| format!("Failed to apply commit {} during rebase", commit_id))?;
+            .with_context(|| format!("Failed to apply commit {commit_id} during rebase"))?;
     }
 
     // Finish the rebase

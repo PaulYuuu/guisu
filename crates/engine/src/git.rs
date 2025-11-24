@@ -10,15 +10,20 @@
 use guisu_core::Result;
 use std::path::Path;
 
-/// Helper function to convert git2 errors to guisu_core errors
+/// Helper function to convert git2 errors to `guisu_core` errors
 #[inline]
+#[allow(clippy::needless_pass_by_value)]
 fn git_err(e: git2::Error) -> guisu_core::Error {
-    guisu_core::Error::Message(format!("Git error: {}", e))
+    guisu_core::Error::Message(format!("Git error: {e}"))
 }
 
 /// Git provider trait defining all git operations needed by guisu
 pub trait GitProvider {
     /// Clone a repository from URL to target path
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if cloning fails (e.g., invalid URL, network error, authentication failure, target exists)
     fn clone(
         &self,
         url: &str,
@@ -29,29 +34,56 @@ pub trait GitProvider {
     ) -> Result<()>;
 
     /// Fetch updates from remote
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if fetching fails (e.g., not a repository, remote not found, network error)
     fn fetch(&self, repo_path: &Path, remote: &str) -> Result<()>;
 
     /// Perform fast-forward merge
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if fast-forward fails (e.g., conflicts, not a fast-forward, repository issues)
     fn fast_forward(&self, repo_path: &Path) -> Result<usize>;
 
     /// Perform rebase
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if rebase fails (e.g., conflicts, repository issues, invalid state)
     fn rebase(&self, repo_path: &Path) -> Result<()>;
 
     /// Check if repository is up to date
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the check fails (e.g., not a repository, `FETCH_HEAD` not found)
     fn is_up_to_date(&self, repo_path: &Path) -> Result<bool>;
 
     /// Get repository status (has uncommitted changes, etc.)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if status cannot be determined (e.g., not a repository, I/O error)
     fn status(&self, repo_path: &Path) -> Result<GitStatus>;
 
     /// Get current branch name
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if branch name cannot be determined (e.g., not a repository, detached HEAD)
     fn current_branch(&self, repo_path: &Path) -> Result<String>;
 }
 
 /// Git repository status
 #[derive(Debug, Clone)]
 pub struct GitStatus {
+    /// Whether the repository has uncommitted changes
     pub has_uncommitted_changes: bool,
+    /// Whether the repository has untracked files
     pub has_untracked_files: bool,
+    /// Current branch name
     pub branch: String,
 }
 
@@ -65,6 +97,8 @@ pub struct Git2Provider {
 }
 
 impl Git2Provider {
+    /// Create a new Git2 provider
+    #[must_use]
     pub fn new() -> Self {
         Self {
             progress_callback: None,
@@ -72,6 +106,7 @@ impl Git2Provider {
     }
 
     /// Set progress callback for clone/fetch operations
+    #[must_use]
     pub fn with_progress<F>(mut self, callback: F) -> Self
     where
         F: Fn(usize, usize, f64) + Send + Sync + 'static,
@@ -106,6 +141,7 @@ impl GitProvider for Git2Provider {
             callbacks.transfer_progress(move |stats| {
                 let received = stats.received_objects();
                 let total = stats.total_objects();
+                #[allow(clippy::cast_precision_loss)]
                 let bytes_mb = stats.received_bytes() as f64 / 1_048_576.0;
                 progress_fn(received, total, bytes_mb);
                 true
@@ -117,6 +153,7 @@ impl GitProvider for Git2Provider {
         fetch_options.remote_callbacks(callbacks);
 
         if let Some(d) = depth {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
             fetch_options.depth(d as i32);
         }
 
@@ -131,8 +168,7 @@ impl GitProvider for Git2Provider {
         let repo = builder.clone(url, target)
             .map_err(|e| guisu_core::Error::Message(
                 format!(
-                    "Failed to clone repository from {}. Check the URL and your network connection. Error: {}",
-                    url, e
+                    "Failed to clone repository from {url}. Check the URL and your network connection. Error: {e}"
                 )
             ))?;
 
@@ -157,6 +193,7 @@ impl GitProvider for Git2Provider {
             callbacks.transfer_progress(move |stats| {
                 let received = stats.received_objects();
                 let total = stats.total_objects();
+                #[allow(clippy::cast_precision_loss)]
                 let bytes_mb = stats.received_bytes() as f64 / 1_048_576.0;
                 progress_fn(received, total, bytes_mb);
                 true
@@ -198,7 +235,7 @@ impl GitProvider for Git2Provider {
             ref_name,
             commit_id,
             true,
-            &format!("guisu update: fast-forward to {}", commit_id),
+            &format!("guisu update: fast-forward to {commit_id}"),
         )
         .map_err(git_err)?;
 
@@ -355,6 +392,7 @@ fn count_new_commits(repo: &git2::Repository, new_commit: &git2::AnnotatedCommit
 }
 
 /// Create git provider (uses git2)
+#[must_use]
 pub fn create_provider(_use_builtin: &guisu_config::config::AutoBool) -> Box<dyn GitProvider> {
     Box::new(Git2Provider::new())
 }
@@ -363,6 +401,7 @@ pub fn create_provider(_use_builtin: &guisu_config::config::AutoBool) -> Box<dyn
 ///
 /// Searches upward from the given path to find a .git directory or file.
 /// Returns the working tree root path if found, None otherwise.
+#[must_use]
 pub fn find_working_tree(start_path: &Path) -> Option<std::path::PathBuf> {
     use git2::Repository;
 

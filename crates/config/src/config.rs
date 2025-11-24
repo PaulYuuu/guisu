@@ -15,10 +15,13 @@ use std::path::{Path, PathBuf};
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum AutoBool {
+    /// Automatically determine the appropriate value
     #[default]
     Auto,
+    /// Explicitly enable
     #[serde(rename = "true")]
     True,
+    /// Explicitly disable
     #[serde(rename = "false")]
     False,
 }
@@ -39,6 +42,7 @@ pub enum IconMode {
 
 impl IconMode {
     /// Determine if icons should be shown based on mode and terminal detection
+    #[must_use]
     pub fn should_show_icons(&self, is_tty: bool) -> bool {
         match self {
             Self::Always => true,
@@ -312,20 +316,22 @@ impl Config {
     /// Load configuration from a file
     ///
     /// This is primarily used for testing. In production, use `load_from_source()` instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if file cannot be read or TOML parsing fails
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = fs::read_to_string(path.as_ref()).map_err(|e| {
             guisu_core::Error::Message(format!(
-                "Failed to read config file {:?}: {}",
-                path.as_ref(),
-                e
+                "Failed to read config file {}: {e}",
+                path.as_ref().display()
             ))
         })?;
 
         let mut config: Self = toml::from_str(&content).map_err(|e| {
             guisu_core::Error::Message(format!(
-                "Failed to parse config file {:?}: {}",
-                path.as_ref(),
-                e
+                "Failed to parse config file {}: {e}",
+                path.as_ref().display()
             ))
         })?;
 
@@ -343,10 +349,13 @@ impl Config {
     /// relative to the provided source directory.
     ///
     /// This is useful for loading configuration from rendered templates.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if TOML parsing fails
     pub fn from_toml_str(toml_content: &str, source_dir: &Path) -> Result<Self> {
-        let mut config: Self = toml::from_str(toml_content).map_err(|e| {
-            guisu_core::Error::Message(format!("Failed to parse config TOML: {}", e))
-        })?;
+        let mut config: Self = toml::from_str(toml_content)
+            .map_err(|e| guisu_core::Error::Message(format!("Failed to parse config TOML: {e}")))?;
 
         // Store the source directory for relative path resolution
         config.resolve_relative_paths(source_dir);
@@ -362,6 +371,10 @@ impl Config {
     /// template rendering before calling this method.
     ///
     /// No syncing to ~/.config/guisu - config only exists in the repo.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if config file is missing or cannot be read/parsed
     pub fn load_from_source(source_dir: &Path) -> Result<Self> {
         let config_path = source_dir.join(".guisu.toml");
         let template_path = source_dir.join(".guisu.toml.j2");
@@ -399,8 +412,8 @@ impl Config {
         // Read and parse TOML config
         let content = fs::read_to_string(&config_path).map_err(|e| {
             guisu_core::Error::Message(format!(
-                "Failed to read config file {:?}: {}",
-                config_path, e
+                "Failed to read config file {}: {e}",
+                config_path.display()
             ))
         })?;
 
@@ -500,7 +513,7 @@ impl Config {
     /// use guisu_config::Config;
     /// use std::path::Path;
     ///
-    /// # fn main() -> anyhow::Result<()> {
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// // Load config with variables from default locations
     /// let config = Config::load_with_variables(
     ///     None,
@@ -523,6 +536,10 @@ impl Config {
     ///
     /// Use this method when you need full template variable support across
     /// multiple configuration sources.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if config loading or variable merging fails
     pub fn load_with_variables(_config_path: Option<&Path>, source_dir: &Path) -> Result<Self> {
         // 1. Load config from source directory (.guisu.toml or .guisu.toml.j2)
         // This already includes [variables] from the config file
@@ -568,25 +585,27 @@ impl Config {
     }
 
     /// Save configuration to a file
+    ///
+    /// # Errors
+    ///
+    /// Returns error if serialization or file write fails
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let content = toml::to_string_pretty(self).map_err(|e| {
-            guisu_core::Error::Message(format!("Failed to serialize config: {}", e))
-        })?;
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| guisu_core::Error::Message(format!("Failed to serialize config: {e}")))?;
 
         if let Some(parent) = path.as_ref().parent() {
             fs::create_dir_all(parent).map_err(|e| {
                 guisu_core::Error::Message(format!(
-                    "Failed to create config directory {:?}: {}",
-                    parent, e
+                    "Failed to create config directory {}: {e}",
+                    parent.display()
                 ))
             })?;
         }
 
         fs::write(path.as_ref(), content).map_err(|e| {
             guisu_core::Error::Message(format!(
-                "Failed to write config file {:?}: {}",
-                path.as_ref(),
-                e
+                "Failed to write config file {}: {e}",
+                path.as_ref().display()
             ))
         })?;
 
@@ -625,6 +644,10 @@ impl Config {
     /// recipient = "age1ql3z..."
     /// recipients = ["age1zvk..."]  # Will be merged
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns error if recipient string parsing fails
     pub fn age_recipients(&self) -> Result<Option<Vec<guisu_crypto::Recipient>>> {
         // Collect recipients from both fields
         let mut recipient_strings = Vec::new();
@@ -650,8 +673,7 @@ impl Config {
                 .parse::<guisu_crypto::Recipient>()
                 .map_err(|e| {
                     guisu_core::Error::Message(format!(
-                        "Failed to parse recipient '{}': {}",
-                        recipient_str, e
+                        "Failed to parse recipient '{recipient_str}': {e}"
                     ))
                 })?;
             recipients.push(recipient);
@@ -687,6 +709,10 @@ impl Config {
     ///     "~/.config/guisu/key2.txt",
     /// ]
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns error if no identities are configured or loading fails
     pub fn age_identities(&self) -> Result<Vec<guisu_crypto::Identity>> {
         use guisu_crypto::load_identities;
 
@@ -769,6 +795,7 @@ impl Config {
     /// Age keys (default):
     /// - `~/.config/guisu/key.txt` → Age key
     /// - `/etc/age/key.txt` → Age key (use symmetric=true if it's SSH)
+    #[must_use]
     pub fn is_ssh_identity(path: &Path) -> bool {
         // Simple check: if path contains "/.ssh/" or ends with "/.ssh", it's an SSH key
         let path_str = path.to_string_lossy();
@@ -777,18 +804,21 @@ impl Config {
 
     /// Get the actual dotfiles directory
     ///
-    /// Returns source_dir/root_entry (defaults to source_dir/home).
-    /// This separates dotfiles from repository metadata (.git, .guisu).
+    /// Returns `source_dir/root_entry` (defaults to `source_dir/home`).
+    /// This separates dotfiles from repository metadata (`.git`, `.guisu`).
+    #[must_use]
     pub fn dotfiles_dir(&self, source_dir: &Path) -> PathBuf {
         source_dir.join(&self.general.root_entry)
     }
 
     /// Get the source directory from general config
+    #[must_use]
     pub fn source_dir(&self) -> Option<&PathBuf> {
         self.general.src_dir.as_ref()
     }
 
     /// Get the destination directory from general config
+    #[must_use]
     pub fn dest_dir(&self) -> Option<&PathBuf> {
         self.general.dst_dir.as_ref()
     }
@@ -797,6 +827,7 @@ impl Config {
     ///
     /// Returns None if no editor is configured.
     /// Returns a Vec with the editor command as first element and args following.
+    #[must_use]
     pub fn editor_command(&self) -> Option<Vec<String>> {
         self.general.editor.as_ref().map(|editor| {
             let mut cmd = vec![editor.clone()];
@@ -809,6 +840,7 @@ impl Config {
     ///
     /// Returns the patterns from the ignore section that apply to the current platform.
     /// This combines global patterns with platform-specific patterns.
+    #[must_use]
     pub fn platform_ignore_patterns(&self) -> (Vec<String>, Vec<String>) {
         let platform = CURRENT_PLATFORM.os;
         let platform_patterns = match platform {
@@ -834,5 +866,648 @@ impl guisu_core::ConfigProvider for Config {
 
     fn variables(&self) -> &IndexMap<String, serde_json::Value> {
         &self.variables
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    // Helper function to create a test directory with a config file
+    fn create_test_config(toml_content: &str) -> (TempDir, PathBuf) {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join(".guisu.toml");
+        fs::write(&config_path, toml_content).unwrap();
+        (temp_dir, config_path)
+    }
+
+    #[test]
+    fn test_icon_mode_always() {
+        let mode = IconMode::Always;
+        assert!(mode.should_show_icons(true));
+        assert!(mode.should_show_icons(false));
+    }
+
+    #[test]
+    fn test_icon_mode_never() {
+        let mode = IconMode::Never;
+        assert!(!mode.should_show_icons(true));
+        assert!(!mode.should_show_icons(false));
+    }
+
+    #[test]
+    fn test_icon_mode_auto() {
+        let mode = IconMode::Auto;
+        assert!(mode.should_show_icons(true));
+        assert!(!mode.should_show_icons(false));
+    }
+
+    #[test]
+    fn test_icon_mode_default() {
+        let mode = IconMode::default();
+        assert_eq!(mode, IconMode::Auto);
+    }
+
+    #[test]
+    fn test_auto_bool_default() {
+        let ab = AutoBool::default();
+        matches!(ab, AutoBool::Auto);
+    }
+
+    #[test]
+    fn test_general_config_defaults() {
+        let config = GeneralConfig::default();
+        assert_eq!(config.root_entry, PathBuf::from("home"));
+        assert!(config.color);
+        assert!(config.progress);
+        assert!(config.src_dir.is_none());
+        assert!(config.dst_dir.is_none());
+        assert!(config.editor.is_none());
+        assert!(config.editor_args.is_empty());
+    }
+
+    #[test]
+    fn test_bitwarden_config_default() {
+        let config = BitwardenConfig::default();
+        assert_eq!(config.provider, "bw");
+    }
+
+    #[test]
+    fn test_ui_config_defaults() {
+        let config = UiConfig::default();
+        assert_eq!(config.icons, IconMode::Auto);
+        assert_eq!(config.diff_format, "unified");
+        assert_eq!(config.context_lines, 3);
+        assert_eq!(config.preview_lines, 10);
+    }
+
+    #[test]
+    fn test_age_config_default() {
+        let config = AgeConfig::default();
+        assert!(config.identity.is_none());
+        assert!(config.identities.is_none());
+        assert!(config.recipient.is_none());
+        assert!(config.recipients.is_empty());
+        assert!(!config.derive);
+    }
+
+    #[test]
+    fn test_config_default() {
+        let config = Config::default();
+        assert!(config.general.color);
+        assert!(config.variables.is_empty());
+        assert!(config.base_dir.is_none());
+    }
+
+    #[test]
+    fn test_load_empty_config() {
+        let (_temp_dir, config_path) = create_test_config("");
+        let config = Config::load(&config_path).unwrap();
+
+        // Should use defaults
+        assert_eq!(config.general.root_entry, PathBuf::from("home"));
+        assert!(config.general.color);
+        assert!(config.general.progress);
+    }
+
+    #[test]
+    fn test_load_config_with_general_section() {
+        let toml = r#"
+[general]
+rootEntry = "dotfiles"
+color = false
+progress = false
+"#;
+        let (_temp_dir, config_path) = create_test_config(toml);
+        let config = Config::load(&config_path).unwrap();
+
+        assert_eq!(config.general.root_entry, PathBuf::from("dotfiles"));
+        assert!(!config.general.color);
+        assert!(!config.general.progress);
+    }
+
+    #[test]
+    fn test_load_config_with_age_section() {
+        let toml = r#"
+[age]
+identity = "~/.config/guisu/key.txt"
+recipient = "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"
+"#;
+        let (_temp_dir, config_path) = create_test_config(toml);
+        let config = Config::load(&config_path).unwrap();
+
+        // Path should be expanded
+        assert!(config.age.identity.is_some());
+        assert_eq!(
+            config.age.recipient.as_deref(),
+            Some("age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p")
+        );
+    }
+
+    #[test]
+    fn test_load_config_with_multiple_recipients() {
+        let toml = r#"
+[age]
+identity = "~/.config/guisu/key.txt"
+recipients = [
+    "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p",
+    "age1p3kwk3994wdjked7gn888c6vdljmwjj5admq3cjyp87emtdswc4q294pha",
+]
+"#;
+        let (_temp_dir, config_path) = create_test_config(toml);
+        let config = Config::load(&config_path).unwrap();
+
+        assert_eq!(config.age.recipients.len(), 2);
+    }
+
+    #[test]
+    fn test_load_config_with_symmetric_alias() {
+        let toml = r#"
+[age]
+identity = "~/.config/guisu/key.txt"
+symmetric = true
+"#;
+        let (_temp_dir, config_path) = create_test_config(toml);
+        let config = Config::load(&config_path).unwrap();
+
+        // symmetric is an alias for derive
+        assert!(config.age.derive);
+    }
+
+    #[test]
+    fn test_load_config_with_ui_section() {
+        let toml = r#"
+[ui]
+icons = "always"
+diffFormat = "split"
+contextLines = 5
+previewLines = 20
+"#;
+        let (_temp_dir, config_path) = create_test_config(toml);
+        let config = Config::load(&config_path).unwrap();
+
+        assert_eq!(config.ui.icons, IconMode::Always);
+        assert_eq!(config.ui.diff_format, "split");
+        assert_eq!(config.ui.context_lines, 5);
+        assert_eq!(config.ui.preview_lines, 20);
+    }
+
+    #[test]
+    fn test_load_config_with_bitwarden_section() {
+        let toml = r#"
+[bitwarden]
+provider = "rbw"
+"#;
+        let (_temp_dir, config_path) = create_test_config(toml);
+        let config = Config::load(&config_path).unwrap();
+
+        assert_eq!(config.bitwarden.provider, "rbw");
+    }
+
+    #[test]
+    fn test_load_config_with_ignore_section() {
+        let toml = r#"
+[ignore]
+global = ["*.tmp", "*.log"]
+darwin = [".DS_Store"]
+linux = ["*.swp"]
+windows = ["Thumbs.db"]
+"#;
+        let (_temp_dir, config_path) = create_test_config(toml);
+        let config = Config::load(&config_path).unwrap();
+
+        assert_eq!(config.ignore.global, vec!["*.tmp", "*.log"]);
+        assert_eq!(config.ignore.darwin, vec![".DS_Store"]);
+        assert_eq!(config.ignore.linux, vec!["*.swp"]);
+        assert_eq!(config.ignore.windows, vec!["Thumbs.db"]);
+    }
+
+    #[test]
+    fn test_load_config_with_variables() {
+        let toml = r#"
+[variables]
+email = "user@example.com"
+name = "Test User"
+"#;
+        let (_temp_dir, config_path) = create_test_config(toml);
+        let config = Config::load(&config_path).unwrap();
+
+        assert_eq!(config.variables.len(), 2);
+        assert_eq!(
+            config.variables.get("email").and_then(|v| v.as_str()),
+            Some("user@example.com")
+        );
+        assert_eq!(
+            config.variables.get("name").and_then(|v| v.as_str()),
+            Some("Test User")
+        );
+    }
+
+    #[test]
+    fn test_resolve_tilde_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+
+        let path = PathBuf::from("~/test/file.txt");
+        let resolved = Config::resolve_path(&path, base);
+
+        // Should expand to home directory
+        if let Some(home) = ::dirs::home_dir() {
+            assert_eq!(resolved, home.join("test/file.txt"));
+        }
+    }
+
+    #[test]
+    fn test_resolve_tilde_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+
+        let path = PathBuf::from("~");
+        let resolved = Config::resolve_path(&path, base);
+
+        // Should expand to home directory
+        if let Some(home) = ::dirs::home_dir() {
+            assert_eq!(resolved, home);
+        }
+    }
+
+    #[test]
+    fn test_resolve_relative_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+
+        let path = PathBuf::from("./relative/path");
+        let resolved = Config::resolve_path(&path, base);
+
+        assert_eq!(resolved, base.join("relative/path"));
+    }
+
+    #[test]
+    fn test_resolve_absolute_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+
+        let path = PathBuf::from("/absolute/path");
+        let resolved = Config::resolve_path(&path, base);
+
+        // Absolute paths should remain unchanged
+        assert_eq!(resolved, PathBuf::from("/absolute/path"));
+    }
+
+    #[test]
+    fn test_save_and_load_roundtrip() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("test.toml");
+
+        let mut config = Config::default();
+        config.general.color = false;
+        config.general.root_entry = PathBuf::from("dotfiles");
+        config
+            .variables
+            .insert("test".to_string(), serde_json::json!("value"));
+
+        // Save
+        config.save(&config_path).unwrap();
+
+        // Load
+        let loaded = Config::load(&config_path).unwrap();
+
+        assert!(!loaded.general.color);
+        assert_eq!(loaded.general.root_entry, PathBuf::from("dotfiles"));
+        assert_eq!(
+            loaded.variables.get("test").and_then(|v| v.as_str()),
+            Some("value")
+        );
+    }
+
+    #[test]
+    fn test_is_ssh_identity() {
+        assert!(Config::is_ssh_identity(Path::new(
+            "/home/user/.ssh/id_ed25519"
+        )));
+        assert!(Config::is_ssh_identity(Path::new("~/.ssh/id_rsa")));
+        assert!(Config::is_ssh_identity(Path::new("/Users/user/.ssh/age")));
+
+        assert!(!Config::is_ssh_identity(Path::new(
+            "/home/user/.config/guisu/key.txt"
+        )));
+        assert!(!Config::is_ssh_identity(Path::new("~/key.txt")));
+        assert!(!Config::is_ssh_identity(Path::new("/etc/age/key.txt")));
+    }
+
+    #[test]
+    fn test_dotfiles_dir_default() {
+        let config = Config::default();
+        let source_dir = PathBuf::from("/home/user/dotfiles");
+
+        let dotfiles = config.dotfiles_dir(&source_dir);
+        assert_eq!(dotfiles, PathBuf::from("/home/user/dotfiles/home"));
+    }
+
+    #[test]
+    fn test_dotfiles_dir_custom() {
+        let mut config = Config::default();
+        config.general.root_entry = PathBuf::from("files");
+        let source_dir = PathBuf::from("/home/user/dotfiles");
+
+        let dotfiles = config.dotfiles_dir(&source_dir);
+        assert_eq!(dotfiles, PathBuf::from("/home/user/dotfiles/files"));
+    }
+
+    #[test]
+    fn test_editor_command_none() {
+        let config = Config::default();
+        assert!(config.editor_command().is_none());
+    }
+
+    #[test]
+    fn test_editor_command_no_args() {
+        let mut config = Config::default();
+        config.general.editor = Some("vim".to_string());
+
+        let cmd = config.editor_command().unwrap();
+        assert_eq!(cmd, vec!["vim"]);
+    }
+
+    #[test]
+    fn test_editor_command_with_args() {
+        let mut config = Config::default();
+        config.general.editor = Some("code".to_string());
+        config.general.editor_args = vec!["--wait".to_string(), "--new-window".to_string()];
+
+        let cmd = config.editor_command().unwrap();
+        assert_eq!(cmd, vec!["code", "--wait", "--new-window"]);
+    }
+
+    #[test]
+    fn test_platform_ignore_patterns() {
+        let mut config = Config::default();
+        config.ignore.global = vec!["*.tmp".to_string()];
+        config.ignore.darwin = vec![".DS_Store".to_string()];
+        config.ignore.linux = vec!["*.swp".to_string()];
+        config.ignore.windows = vec!["Thumbs.db".to_string()];
+
+        let (global, platform) = config.platform_ignore_patterns();
+
+        assert_eq!(global, vec!["*.tmp"]);
+
+        // Platform-specific depends on current platform
+        let current_platform = CURRENT_PLATFORM.os;
+        match current_platform {
+            "darwin" => assert_eq!(platform, vec![".DS_Store"]),
+            "linux" => assert_eq!(platform, vec!["*.swp"]),
+            "windows" => assert_eq!(platform, vec!["Thumbs.db"]),
+            _ => assert!(platform.is_empty()),
+        }
+    }
+
+    #[test]
+    fn test_icon_mode_serialization() {
+        assert_eq!(
+            serde_json::to_value(IconMode::Auto).unwrap(),
+            serde_json::json!("auto")
+        );
+        assert_eq!(
+            serde_json::to_value(IconMode::Always).unwrap(),
+            serde_json::json!("always")
+        );
+        assert_eq!(
+            serde_json::to_value(IconMode::Never).unwrap(),
+            serde_json::json!("never")
+        );
+    }
+
+    #[test]
+    fn test_icon_mode_deserialization() {
+        assert_eq!(
+            serde_json::from_value::<IconMode>(serde_json::json!("auto")).unwrap(),
+            IconMode::Auto
+        );
+        assert_eq!(
+            serde_json::from_value::<IconMode>(serde_json::json!("always")).unwrap(),
+            IconMode::Always
+        );
+        assert_eq!(
+            serde_json::from_value::<IconMode>(serde_json::json!("never")).unwrap(),
+            IconMode::Never
+        );
+        // Test automatic alias
+        assert_eq!(
+            serde_json::from_value::<IconMode>(serde_json::json!("automatic")).unwrap(),
+            IconMode::Auto
+        );
+    }
+
+    #[test]
+    fn test_auto_bool_serialization() {
+        assert_eq!(
+            serde_json::to_value(&AutoBool::Auto).unwrap(),
+            serde_json::json!("auto")
+        );
+        assert_eq!(
+            serde_json::to_value(&AutoBool::True).unwrap(),
+            serde_json::json!("true")
+        );
+        assert_eq!(
+            serde_json::to_value(&AutoBool::False).unwrap(),
+            serde_json::json!("false")
+        );
+    }
+
+    #[test]
+    fn test_from_toml_str() {
+        let temp_dir = TempDir::new().unwrap();
+        let toml = r#"
+[general]
+color = false
+
+[age]
+identity = "./key.txt"
+"#;
+
+        let config = Config::from_toml_str(toml, temp_dir.path()).unwrap();
+        assert!(!config.general.color);
+
+        // Relative path should be resolved
+        assert_eq!(
+            config.age.identity.as_ref().unwrap(),
+            &temp_dir.path().join("key.txt")
+        );
+    }
+
+    #[test]
+    fn test_load_from_source_missing_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = Config::load_from_source(temp_dir.path());
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Configuration file not found"));
+    }
+
+    #[test]
+    fn test_load_from_source_with_template_exists() {
+        let temp_dir = TempDir::new().unwrap();
+        let template_path = temp_dir.path().join(".guisu.toml.j2");
+        fs::write(&template_path, "# template config").unwrap();
+
+        let result = Config::load_from_source(temp_dir.path());
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Found .guisu.toml.j2 template"));
+    }
+
+    #[test]
+    fn test_load_from_source_success() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join(".guisu.toml");
+        fs::write(&config_path, "[general]\ncolor = false").unwrap();
+
+        let config = Config::load_from_source(temp_dir.path()).unwrap();
+        assert!(!config.general.color);
+    }
+
+    #[test]
+    fn test_source_dir_and_dest_dir_accessors() {
+        let mut config = Config::default();
+        assert!(config.source_dir().is_none());
+        assert!(config.dest_dir().is_none());
+
+        config.general.src_dir = Some(PathBuf::from("/src"));
+        config.general.dst_dir = Some(PathBuf::from("/dst"));
+
+        assert_eq!(config.source_dir(), Some(&PathBuf::from("/src")));
+        assert_eq!(config.dest_dir(), Some(&PathBuf::from("/dst")));
+    }
+
+    #[test]
+    fn test_config_provider_trait() {
+        use guisu_core::ConfigProvider;
+
+        let mut config = Config::default();
+        config.general.src_dir = Some(PathBuf::from("/src"));
+        config.general.dst_dir = Some(PathBuf::from("/dst"));
+        config
+            .variables
+            .insert("key".to_string(), serde_json::json!("value"));
+
+        // Test trait methods
+        assert_eq!(config.source_dir(), Some(&PathBuf::from("/src")));
+        assert_eq!(config.dest_dir(), Some(&PathBuf::from("/dst")));
+        assert_eq!(config.variables().len(), 1);
+    }
+
+    #[test]
+    fn test_load_invalid_toml() {
+        let (_temp_dir, config_path) = create_test_config("invalid toml {{");
+        let result = Config::load(&config_path);
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Failed to parse config file"));
+    }
+
+    #[test]
+    fn test_save_creates_parent_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let nested_path = temp_dir.path().join("nested/dir/config.toml");
+
+        let config = Config::default();
+        config.save(&nested_path).unwrap();
+
+        assert!(nested_path.exists());
+    }
+
+    #[test]
+    fn test_age_recipients_none() {
+        let config = Config::default();
+        let result = config.age_recipients().unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_age_identities_none_configured() {
+        let config = Config::default();
+        let result = config.age_identities();
+
+        assert!(result.is_err());
+        if let Err(e) = result {
+            let err_msg = e.to_string();
+            assert!(err_msg.contains("No identity file configured"));
+        }
+    }
+
+    #[test]
+    fn test_age_identities_file_not_found() {
+        let mut config = Config::default();
+        config.age.identity = Some(PathBuf::from("/nonexistent/key.txt"));
+
+        let result = config.age_identities();
+
+        assert!(result.is_err());
+        if let Err(e) = result {
+            let err_msg = e.to_string();
+            assert!(err_msg.contains("Identity file not found"));
+        }
+    }
+
+    #[test]
+    fn test_ignore_config_default() {
+        let config = IgnoreConfig::default();
+        assert!(config.global.is_empty());
+        assert!(config.darwin.is_empty());
+        assert!(config.linux.is_empty());
+        assert!(config.windows.is_empty());
+    }
+
+    #[test]
+    fn test_complex_config_roundtrip() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("complex.toml");
+
+        let mut config = Config::default();
+        config.general.color = false;
+        config.general.progress = true;
+        config.general.root_entry = PathBuf::from("files");
+        config.general.editor = Some("nvim".to_string());
+        config.general.editor_args = vec!["-u".to_string(), "NONE".to_string()];
+
+        config.ui.icons = IconMode::Always;
+        config.ui.diff_format = "split".to_string();
+        config.ui.context_lines = 5;
+
+        config.ignore.global = vec!["*.log".to_string()];
+        config.ignore.darwin = vec![".DS_Store".to_string()];
+
+        config
+            .variables
+            .insert("name".to_string(), serde_json::json!("test"));
+        config
+            .variables
+            .insert("email".to_string(), serde_json::json!("test@example.com"));
+
+        config.bitwarden.provider = "rbw".to_string();
+
+        // Save and reload
+        config.save(&config_path).unwrap();
+        let loaded = Config::load(&config_path).unwrap();
+
+        assert_eq!(loaded.general.color, config.general.color);
+        assert_eq!(loaded.general.progress, config.general.progress);
+        assert_eq!(loaded.general.root_entry, config.general.root_entry);
+        assert_eq!(loaded.general.editor, config.general.editor);
+        assert_eq!(loaded.general.editor_args, config.general.editor_args);
+        assert_eq!(loaded.ui.icons, config.ui.icons);
+        assert_eq!(loaded.ui.diff_format, config.ui.diff_format);
+        assert_eq!(loaded.ui.context_lines, config.ui.context_lines);
+        assert_eq!(loaded.ignore.global, config.ignore.global);
+        assert_eq!(loaded.ignore.darwin, config.ignore.darwin);
+        assert_eq!(loaded.bitwarden.provider, config.bitwarden.provider);
+        assert_eq!(loaded.variables.len(), 2);
     }
 }

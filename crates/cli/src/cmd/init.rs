@@ -12,6 +12,18 @@ use tracing::{debug, info};
 /// Run the init command
 ///
 /// Returns the path to the initialized source directory if successful
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The target directory cannot be determined
+/// - Git cloning fails
+/// - Local directory initialization fails
+///
+/// # Panics
+///
+/// Panics if `path_or_repo` is `None` when `is_clone` is `true`.
+/// This should never happen due to the logic in `determine_init_target`.
 pub fn run(
     path_or_repo: Option<&str>,
     custom_source: Option<&Path>,
@@ -56,7 +68,7 @@ fn determine_init_target(
         None => {
             // Default: use custom source or XDG data directory
             let target = custom_source
-                .map(|p| p.to_path_buf())
+                .map(std::path::Path::to_path_buf)
                 .or_else(guisu_config::dirs::data_dir)
                 .ok_or_else(|| anyhow!("Could not determine data directory"))?;
             Ok((target, false))
@@ -66,7 +78,7 @@ fn determine_init_target(
             if is_github_reference(input) {
                 // Use custom source or XDG data directory for cloned repos
                 let target = custom_source
-                    .map(|p| p.to_path_buf())
+                    .map(std::path::Path::to_path_buf)
                     .or_else(guisu_config::dirs::data_dir)
                     .ok_or_else(|| anyhow!("Could not determine data directory"))?;
                 Ok((target, true))
@@ -111,16 +123,16 @@ fn clone_from_github(
     let repo_url = if use_ssh {
         // Use SSH URL format
         if repo_ref.contains('/') {
-            format!("git@github.com:{}.git", repo_ref)
+            format!("git@github.com:{repo_ref}.git")
         } else {
-            format!("git@github.com:{}/dotfiles.git", repo_ref)
+            format!("git@github.com:{repo_ref}/dotfiles.git")
         }
     } else {
         // Use HTTPS URL format (default)
         if repo_ref.contains('/') {
-            format!("https://github.com/{}.git", repo_ref)
+            format!("https://github.com/{repo_ref}.git")
         } else {
-            format!("https://github.com/{}/dotfiles.git", repo_ref)
+            format!("https://github.com/{repo_ref}/dotfiles.git")
         }
     };
 
@@ -133,12 +145,12 @@ fn clone_from_github(
         recurse_submodules,
         "Cloning repository"
     );
-    println!("Cloning from: {}", repo_url);
+    println!("Cloning from: {repo_url}");
     if let Some(d) = depth {
         println!("  Depth: {} commit{}", d, if d == 1 { "" } else { "s" });
     }
     if let Some(b) = branch {
-        println!("  Branch: {}", b);
+        println!("  Branch: {b}");
     }
     if recurse_submodules {
         println!("  Recurse submodules: yes");
@@ -169,14 +181,20 @@ fn clone_from_github(
         let total = stats.total_objects();
 
         if total > 0 {
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss
+            )]
             let percentage = (received as f64 / total as f64 * 100.0) as u64;
             progress_bar.set_position(percentage);
 
             if stats.received_bytes() > 0 {
+                #[allow(clippy::cast_precision_loss)]
                 let mb = stats.received_bytes() as f64 / 1_048_576.0;
-                progress_bar.set_message(format!("{}/{} objects ({:.2} MiB)", received, total, mb));
+                progress_bar.set_message(format!("{received}/{total} objects ({mb:.2} MiB)"));
             } else {
-                progress_bar.set_message(format!("{}/{} objects", received, total));
+                progress_bar.set_message(format!("{received}/{total} objects"));
             }
         }
 
@@ -189,6 +207,7 @@ fn clone_from_github(
 
     // Set depth for shallow clone if specified
     if let Some(depth_value) = depth {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         fetch_options.depth(depth_value as i32);
     }
 
@@ -207,8 +226,7 @@ fn clone_from_github(
         .with_context(|| {
             progress_bar.finish_and_clear();
             format!(
-                "Failed to clone repository from {}. Make sure the repository exists and you have access.",
-                repo_url
+                "Failed to clone repository from {repo_url}. Make sure the repository exists and you have access."
             )
         })?;
 
@@ -248,7 +266,7 @@ fn init_submodules_recursive(repo: &Repository, repo_path: &Path) -> Result<()> 
         // Initialize the submodule
         submodule
             .init(false)
-            .with_context(|| format!("Failed to initialize submodule '{}'", name))?;
+            .with_context(|| format!("Failed to initialize submodule '{name}'"))?;
 
         // Update the submodule (clone and checkout)
         let mut update_options = SubmoduleUpdateOptions::new();
@@ -263,9 +281,9 @@ fn init_submodules_recursive(repo: &Repository, repo_path: &Path) -> Result<()> 
 
         submodule
             .update(true, Some(&mut update_options))
-            .with_context(|| format!("Failed to update submodule '{}'", name))?;
+            .with_context(|| format!("Failed to update submodule '{name}'"))?;
 
-        println!("  Submodule: {}", name);
+        println!("  Submodule: {name}");
 
         // Recursively initialize submodules of this submodule
         let submodule_path = repo_path.join(&path);
@@ -283,14 +301,14 @@ fn initialize_local_directory(path: &Path) -> Result<()> {
     println!("Initializing guisu source directory at: {}", path.display());
 
     // Create the directory if it doesn't exist
-    if !path.exists() {
+    if path.exists() {
+        debug!(path = %path.display(), "Directory already exists");
+        println!("Directory already exists: {}", path.display());
+    } else {
         fs::create_dir_all(path)
             .with_context(|| format!("Failed to create directory: {}", path.display()))?;
         debug!(path = %path.display(), "Created directory");
         println!("Created directory: {}", path.display());
-    } else {
-        debug!(path = %path.display(), "Directory already exists");
-        println!("Directory already exists: {}", path.display());
     }
 
     println!("\nGuisu source directory initialized successfully!");

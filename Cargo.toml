@@ -17,79 +17,81 @@ authors = ["Yihuang Yu <yuyihuang@live.com>"]
 license-file = "LICENSE"
 repository = "https://github.com/PaulYuuu/guisu"
 homepage = "https://github.com/PaulYuuu/guisu"
-keywords = ["dotfiles manager"]
+keywords = ["dotfiles"]
 documentation = "https://github.com/PaulYuuu/guisu"
 
 [workspace.lints.clippy]
-# Pedantic lints for high code quality
-pedantic = { level = "warn", priority = -1 }
-# Specific adjustments to pedantic lints
-module_name_repetitions = "allow" # Often necessary for clarity
-missing_errors_doc = "allow"      # Too verbose for internal code
-missing_panics_doc = "allow"      # Too verbose for internal code
-must_use_candidate = "allow"      # Too many false positives
-# Performance lints
-perf = { level = "warn", priority = -1 }
-# Correctness (highest priority)
+pedantic = { level = "deny", priority = -1 }
 correctness = { level = "deny", priority = -1 }
-# Complexity lints
-complexity = { level = "warn", priority = -1 }
-# Style lints
-style = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+todo = "warn"
 
 [workspace.lints.rust]
-# Deny unsafe code by default
 unsafe_code = "deny"
-# Warn on missing documentation for public items
 missing_docs = "warn"
-# Future incompatibility
-rust_2024_compatibility = { level = "warn", priority = -1 }
 
 [workspace.dependencies]
-age = { version = "0.11", features = ["ssh", "armor"] }
-anyhow = "1.0"
-base64 = "0.22"
-bincode = { version = "2.0", features = ["serde"] }
-bitflags = "2.6"
-chrono = "0.4"
 clap = { version = "4.5", features = ["derive", "cargo", "env"] }
 crossterm = "0.29"
-dirs = "6.0"
-duct = "1.1"
-git2 = "0.20"
-ignore = "0.4"
-indexmap = { version = "2.0", features = ["serde"] }
-indicatif = "0.18"
-libc = "0.2"
-miette = { version = "7.6", features = ["fancy"] }
-minijinja = { version = "2.12", features = ["builtins", "loader"] }
-once_cell = "1.19"
-os_info = "3.9"
 ratatui = "0.29"
-rayon = "1.10"
-redb = "3.1"
-regex = "1.11"
-secrecy = "0.10"
+terminal_size = "0.4"
+indicatif = "0.18"
+
+anyhow = "1.0"
+thiserror = "2.0"
+miette = { version = "7.6", features = ["fancy"] }
+
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.10"
-similar = "2.7"
-subtle = "2.6"
-tempfile = "3.23"
-terminal_size = "0.4"
-thiserror = "2.0"
-tokio = { version = "1.48", features = ["rt", "macros"] }
 toml = "0.9"
+bincode = { version = "2.0", features = ["serde"] }
+
+age = { version = "0.11", features = ["ssh", "armor"] }
+secrecy = "0.10"
+sha2 = "0.10"
+subtle = "2.6"
+base64 = "0.22"
+
+dirs = "6.0"
+ignore = "0.4"
+walkdir = "2.5"
+tempfile = "3.23"
+which = "8.0"
+
+minijinja = { version = "2.12", features = ["builtins", "loader"] }
+regex = "1.11"
+
+indexmap = { version = "2.0", features = ["serde"] }
+bitflags = "2.6"
+
+rayon = "1.10"
+tokio = { version = "1.48", features = ["rt", "macros"] }
+once_cell = "1.19"
+
+redb = "3.1"
+git2 = "0.20"
+similar = "2.7"
+os_info = "3.9"
+libc = "0.2"
+chrono = "0.4"
+duct = "1.1"
+shell-words = "1.1"
+
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [
   "env-filter",
   "fmt",
   "ansi",
 ] }
+
 vergen = { version = "9.0", features = ["build", "rustc"] }
 vergen-git2 = { version = "1.0", features = ["build"] }
-walkdir = "2.5"
-which = "8.0"
+
+assert_cmd = "2.0"
+assert_fs = "1.1"
+predicates = "3.1"
+serial_test = "3.2"
+temp-env = "0.3"
 
 [profile.release]
 codegen-units = 1

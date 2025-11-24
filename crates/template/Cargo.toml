@@ -35,8 +35,16 @@ which.workspace = true
 rustix = { version = "1.0", features = ["process", "system"] }
 uzers = "0.12"
 
+[dev-dependencies]
+serial_test.workspace = true
+temp-env.workspace = true
+tempfile.workspace = true
+
 [features]
 default = ["bw", "bws", "rbw"]
 bw = ["guisu-vault/bw"]
 bws = ["guisu-vault/bws"]
 rbw = ["guisu-vault/rbw"]
+
+[lints]
+workspace = true

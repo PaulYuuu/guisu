@@ -16,33 +16,69 @@ use std::path::Path;
 /// - Mock implementations for testing
 pub trait System {
     /// Read a file's contents
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read (e.g., not found, permission denied, I/O error)
     fn read_file(&self, path: &AbsPath) -> Result<Vec<u8>>;
 
     /// Write a file's contents with optional permissions
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be written (e.g., permission denied, I/O error, parent directory doesn't exist)
     fn write_file(&self, path: &AbsPath, content: &[u8], mode: Option<u32>) -> Result<()>;
 
     /// Create a directory with optional permissions
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created (e.g., already exists, permission denied, I/O error)
     fn create_dir(&self, path: &AbsPath, mode: Option<u32>) -> Result<()>;
 
     /// Create all parent directories
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any directory in the path cannot be created (e.g., permission denied, I/O error)
     fn create_dir_all(&self, path: &AbsPath, mode: Option<u32>) -> Result<()>;
 
     /// Remove a file or directory
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path cannot be removed (e.g., not found, permission denied, directory not empty)
     fn remove(&self, path: &AbsPath) -> Result<()>;
 
     /// Remove a directory and all its contents
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory or its contents cannot be removed (e.g., permission denied, I/O error)
     fn remove_all(&self, path: &AbsPath) -> Result<()>;
 
     /// Check if a path exists
     fn exists(&self, path: &AbsPath) -> bool;
 
     /// Get file metadata
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if metadata cannot be read (e.g., file not found, permission denied)
     fn metadata(&self, path: &AbsPath) -> Result<Metadata>;
 
     /// Create a symbolic link
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the symlink cannot be created (e.g., already exists, permission denied, platform not supported)
     fn symlink(&self, target: &Path, link: &AbsPath) -> Result<()>;
 
     /// Read a symbolic link
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the symlink cannot be read (e.g., not a symlink, not found, permission denied)
     fn read_link(&self, path: &AbsPath) -> Result<std::path::PathBuf>;
 }
 
@@ -187,26 +223,43 @@ pub struct DryRunSystem {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operation {
     /// Read a file
-    ReadFile { path: AbsPath },
+    ReadFile {
+        /// Path to the file to read
+        path: AbsPath,
+    },
     /// Write a file
     WriteFile {
+        /// Path to the file to write
         path: AbsPath,
+        /// Size of the file in bytes
         size: usize,
+        /// File mode/permissions (Unix only)
         mode: Option<u32>,
     },
     /// Create a directory
-    CreateDir { path: AbsPath, mode: Option<u32> },
+    CreateDir {
+        /// Path to the directory to create
+        path: AbsPath,
+        /// Directory mode/permissions (Unix only)
+        mode: Option<u32>,
+    },
     /// Remove a path
-    Remove { path: AbsPath },
+    Remove {
+        /// Path to remove
+        path: AbsPath,
+    },
     /// Create a symlink
     Symlink {
+        /// Path where the symlink will be created
         link: AbsPath,
+        /// Target path that the symlink points to
         target: std::path::PathBuf,
     },
 }
 
 impl DryRunSystem {
     /// Create a new dry-run system
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
