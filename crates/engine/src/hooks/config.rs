@@ -688,15 +688,15 @@ mod tests {
     #[test]
     fn test_hook_mode_serialization() {
         assert_eq!(
-            serde_json::to_value(&HookMode::Always).unwrap(),
+            serde_json::to_value(HookMode::Always).unwrap(),
             serde_json::json!("always")
         );
         assert_eq!(
-            serde_json::to_value(&HookMode::Once).unwrap(),
+            serde_json::to_value(HookMode::Once).unwrap(),
             serde_json::json!("once")
         );
         assert_eq!(
-            serde_json::to_value(&HookMode::OnChange).unwrap(),
+            serde_json::to_value(HookMode::OnChange).unwrap(),
             serde_json::json!("onchange")
         );
     }
@@ -724,7 +724,7 @@ mod tests {
 
     #[test]
     fn test_default_failfast() {
-        assert_eq!(default_failfast(), true);
+        assert!(default_failfast());
     }
 
     #[test]
@@ -767,7 +767,7 @@ mode = "once"
         assert_eq!(hook.cmd, Some("echo hello".to_string()));
         assert_eq!(hook.mode, HookMode::Once);
         assert_eq!(hook.order, 100); // default
-        assert_eq!(hook.failfast, true); // default
+        assert!(hook.failfast); // default
     }
 
     #[test]
@@ -804,7 +804,7 @@ cmd = "echo post"
 
     #[test]
     fn test_hook_with_script_content() {
-        let mut hook = Hook {
+        let hook = Hook {
             name: "test".to_string(),
             order: 100,
             platforms: vec![],

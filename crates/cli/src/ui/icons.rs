@@ -771,24 +771,6 @@ mod tests {
     }
 
     #[test]
-    fn test_icon_constants_not_empty() {
-        // Verify icon constants are defined (not empty)
-        assert!(!Icons::FILE.is_empty());
-        assert!(!Icons::DIRECTORY.is_empty());
-        assert!(!Icons::SYMLINK.is_empty());
-        assert!(!Icons::RUST.is_empty());
-        assert!(!Icons::PYTHON.is_empty());
-    }
-
-    #[test]
-    fn test_status_icon_clone() {
-        let icon = StatusIcon::Success;
-        let cloned = icon;
-
-        assert_eq!(icon.get(true), cloned.get(true));
-    }
-
-    #[test]
     fn test_filename_icons_initialized() {
         // Verify the lazy static is properly initialized
         assert!(FILENAME_ICONS.contains_key("Cargo.toml"));

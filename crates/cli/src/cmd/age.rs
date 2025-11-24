@@ -709,8 +709,10 @@ mod tests {
 
         // Create a test file with multiple inline encrypted values
         let test_file = temp.path().join("config.txt");
-        let enc1 = encrypt_inline("secret1", &[old_recipient.clone()]).expect("Encryption failed");
-        let enc2 = encrypt_inline("secret2", &[old_recipient]).expect("Encryption failed");
+        let enc1 = encrypt_inline("secret1", std::slice::from_ref(&old_recipient))
+            .expect("Encryption failed");
+        let enc2 = encrypt_inline("secret2", std::slice::from_ref(&old_recipient))
+            .expect("Encryption failed");
         let file_content = format!("password = {enc1}\napi_key = {enc2}");
 
         std::fs::write(&test_file, &file_content).expect("Failed to write file");
@@ -797,7 +799,7 @@ mod tests {
         // Create config with this identity
         let temp = TempDir::new().expect("Failed to create temp dir");
         let identity_file = temp.path().join("identity.txt");
-        guisu_crypto::IdentityFile::save(&identity_file, &[identity.clone()])
+        guisu_crypto::IdentityFile::save(&identity_file, std::slice::from_ref(&identity))
             .expect("Failed to save identity");
 
         let mut config = Config::default();

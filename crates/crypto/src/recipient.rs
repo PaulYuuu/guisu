@@ -653,7 +653,7 @@ mod tests {
         let identity = Identity::generate();
         let valid = identity.to_public().to_string();
 
-        let inputs = vec![
+        let inputs = [
             valid.clone(),
             "invalid".to_string(),
             valid.clone(),

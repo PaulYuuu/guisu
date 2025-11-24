@@ -205,14 +205,6 @@ mod tests {
     }
 
     #[test]
-    fn test_error_debug_format() {
-        let error = Error::Syntax("test".to_string());
-        let debug_str = format!("{error:?}");
-
-        assert!(debug_str.contains("Syntax"));
-    }
-
-    #[test]
     fn test_all_error_variants() {
         // Test that all error variants can be created and displayed
         let errors = vec![

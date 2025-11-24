@@ -141,7 +141,7 @@ mod tests {
 
     // Mock provider for testing
     struct MockProvider {
-        name: String,
+        _name: String,
         available: bool,
         response: JsonValue,
         call_count: AtomicUsize,
@@ -150,7 +150,7 @@ mod tests {
     impl MockProvider {
         fn new(name: &str, response: JsonValue) -> Self {
             Self {
-                name: name.to_string(),
+                _name: name.to_string(),
                 available: true,
                 response,
                 call_count: AtomicUsize::new(0),
@@ -159,7 +159,7 @@ mod tests {
 
         fn unavailable(name: &str) -> Self {
             Self {
-                name: name.to_string(),
+                _name: name.to_string(),
                 available: false,
                 response: JsonValue::Null,
                 call_count: AtomicUsize::new(0),

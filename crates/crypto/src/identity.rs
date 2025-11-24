@@ -603,7 +603,7 @@ mod tests {
         let path = temp_file.path();
 
         let identity = Identity::generate();
-        IdentityFile::save(path, &[identity.clone()]).expect("Failed to save");
+        IdentityFile::save(path, std::slice::from_ref(&identity)).expect("Failed to save");
 
         let loaded = load_identities(path, false).expect("Failed to load");
         assert_eq!(loaded.len(), 1);
@@ -755,7 +755,7 @@ mod tests {
         let path = temp_file.path();
 
         let identity = Identity::generate();
-        IdentityFile::save(path, &[identity.clone()]).expect("Failed to save");
+        IdentityFile::save(path, std::slice::from_ref(&identity)).expect("Failed to save");
 
         let content = fs::read_to_string(path).expect("Failed to read file");
 
@@ -870,7 +870,7 @@ mod tests {
         let path = temp_file.path();
 
         let identity = Identity::generate();
-        IdentityFile::save(path, &[identity.clone()]).expect("Failed to save");
+        IdentityFile::save(path, std::slice::from_ref(&identity)).expect("Failed to save");
 
         let content = fs::read_to_string(path).expect("Failed to read file");
 

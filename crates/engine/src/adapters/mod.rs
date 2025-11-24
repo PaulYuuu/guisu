@@ -37,7 +37,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
     use super::*;
     use crate::attr::FileAttributes;
-    use guisu_crypto::{encrypt, encrypt_inline};
+    use guisu_crypto::encrypt;
     use serde_json::json;
     use std::fs;
     use tempfile::TempDir;

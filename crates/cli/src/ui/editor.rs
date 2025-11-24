@@ -316,7 +316,7 @@ mod tests {
         assert!(content.contains("# BASE"));
         assert!(content.contains("# SOURCE"));
         assert!(content.contains(local_content));
-        assert!(content.contains(base_content.unwrap()));
+        assert!(content.contains("option1 = original_value"));
         assert!(content.contains(remote_content));
     }
 

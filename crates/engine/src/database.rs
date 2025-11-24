@@ -606,7 +606,7 @@ mod tests {
         let _ = close_db();
         open_db().expect("Failed to open db");
 
-        let mode_values = vec![
+        let mode_values = [
             0o000, // No permissions
             0o400, // Read only
             0o644, // Standard file

@@ -17,7 +17,7 @@ fn test_end_to_end_file_encryption() {
     let identity = Identity::generate();
     let temp_identity_file = NamedTempFile::new().expect("Failed to create temp file");
 
-    IdentityFile::save(temp_identity_file.path(), &[identity.clone()])
+    IdentityFile::save(temp_identity_file.path(), std::slice::from_ref(&identity))
         .expect("Failed to save identity");
 
     // Load identity back from file
@@ -80,9 +80,9 @@ fn test_config_file_encryption_workflow() {
     let recipient = identity.to_public();
 
     // Encrypt individual values
-    let db_password = encrypt_inline("postgres_password_123", &[recipient.clone()])
+    let db_password = encrypt_inline("postgres_password_123", std::slice::from_ref(&recipient))
         .expect("Failed to encrypt db password");
-    let api_key = encrypt_inline("sk_live_abc123xyz", &[recipient.clone()])
+    let api_key = encrypt_inline("sk_live_abc123xyz", std::slice::from_ref(&recipient))
         .expect("Failed to encrypt api key");
 
     // Create a config file with inline encrypted values
@@ -120,10 +120,10 @@ fn test_key_rotation_workflow() {
     let old_recipient = old_identity.to_public();
 
     // Encrypt config with old key
-    let secret1 =
-        encrypt_inline("secret_value_1", &[old_recipient.clone()]).expect("Failed to encrypt");
-    let secret2 =
-        encrypt_inline("secret_value_2", &[old_recipient.clone()]).expect("Failed to encrypt");
+    let secret1 = encrypt_inline("secret_value_1", std::slice::from_ref(&old_recipient))
+        .expect("Failed to encrypt");
+    let secret2 = encrypt_inline("secret_value_2", std::slice::from_ref(&old_recipient))
+        .expect("Failed to encrypt");
 
     let config = format!("api_key = {secret1}\ndb_password = {secret2}\nplain_value = hello");
 
@@ -136,7 +136,7 @@ fn test_key_rotation_workflow() {
         .expect("Key rotation failed");
 
     // New key can decrypt
-    let decrypted_new = decrypt_file_content(&rotated_config, &[new_identity.clone()])
+    let decrypted_new = decrypt_file_content(&rotated_config, std::slice::from_ref(&new_identity))
         .expect("Decryption with new key failed");
 
     assert!(decrypted_new.contains("secret_value_1"));
@@ -196,7 +196,8 @@ fn test_recipients_export_workflow() {
     let identity = Identity::generate();
     let temp_identity = NamedTempFile::new().expect("Failed to create temp file");
 
-    IdentityFile::save(temp_identity.path(), &[identity.clone()]).expect("Failed to save identity");
+    IdentityFile::save(temp_identity.path(), std::slice::from_ref(&identity))
+        .expect("Failed to save identity");
 
     // Load identity file
     let identity_file = IdentityFile::load(temp_identity.path()).expect("Failed to load identity");

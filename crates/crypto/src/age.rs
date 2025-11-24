@@ -658,9 +658,9 @@ mod tests {
         let encrypted = encrypt(plaintext, &recipients).expect("Encryption failed");
 
         // All three identities should be able to decrypt
-        let dec1 = decrypt(&encrypted, &[id1.clone()]).expect("Decryption 1 failed");
-        let dec2 = decrypt(&encrypted, &[id2.clone()]).expect("Decryption 2 failed");
-        let dec3 = decrypt(&encrypted, &[id3.clone()]).expect("Decryption 3 failed");
+        let dec1 = decrypt(&encrypted, std::slice::from_ref(&id1)).expect("Decryption 1 failed");
+        let dec2 = decrypt(&encrypted, std::slice::from_ref(&id2)).expect("Decryption 2 failed");
+        let dec3 = decrypt(&encrypted, std::slice::from_ref(&id3)).expect("Decryption 3 failed");
 
         assert_eq!(plaintext, dec1.as_slice());
         assert_eq!(plaintext, dec2.as_slice());
@@ -829,8 +829,10 @@ mod tests {
         let identity = test_identity();
         let recipient = identity.to_public();
 
-        let enc1 = encrypt_inline("secret1", &[recipient.clone()]).expect("Encryption failed");
-        let enc2 = encrypt_inline("secret2", &[recipient]).expect("Encryption failed");
+        let enc1 =
+            encrypt_inline("secret1", std::slice::from_ref(&recipient)).expect("Encryption failed");
+        let enc2 =
+            encrypt_inline("secret2", std::slice::from_ref(&recipient)).expect("Encryption failed");
 
         let content = format!("password = {enc1}\napi_key = {enc2}\nother = plain_value");
 
@@ -863,8 +865,12 @@ mod tests {
         let content = format!("password = {encrypted_value}");
 
         // Rotate keys
-        let rotated = encrypt_file_content(&content, &[old_identity.clone()], &[new_recipient])
-            .expect("Key rotation failed");
+        let rotated = encrypt_file_content(
+            &content,
+            std::slice::from_ref(&old_identity),
+            std::slice::from_ref(&new_recipient),
+        )
+        .expect("Key rotation failed");
 
         // Old key should not work anymore
         let old_decrypt = decrypt_file_content(&rotated, &[old_identity]);
@@ -905,7 +911,7 @@ mod tests {
 
         let content = "plain_text = value\nno_encryption = here";
 
-        let result = encrypt_file_content(&content, &[old_identity], &[new_recipient])
+        let result = encrypt_file_content(content, &[old_identity], &[new_recipient])
             .expect("Should succeed");
 
         assert_eq!(content, result);
@@ -1025,8 +1031,10 @@ mod tests {
         let recipient2 = id2.to_public();
 
         // Create content with two encrypted values, but only one can be decrypted
-        let enc1 = encrypt_inline("secret1", &[recipient1.clone()]).expect("Encryption failed");
-        let enc2 = encrypt_inline("secret2", &[recipient2]).expect("Encryption failed");
+        let enc1 = encrypt_inline("secret1", std::slice::from_ref(&recipient1))
+            .expect("Encryption failed");
+        let enc2 = encrypt_inline("secret2", std::slice::from_ref(&recipient2))
+            .expect("Encryption failed");
 
         let content = format!("value1 = {enc1}\nvalue2 = {enc2}");
 
@@ -1055,15 +1063,19 @@ mod tests {
         let content = format!("val1 = {enc1}\nval2 = {enc2}");
 
         // Try to rotate with old_id1 only - enc1 should rotate, enc2 should stay unchanged
-        let result = encrypt_file_content(&content, &[old_id1.clone()], &[new_recipient.clone()])
-            .expect("Should not error");
+        let result = encrypt_file_content(
+            &content,
+            std::slice::from_ref(&old_id1),
+            std::slice::from_ref(&new_recipient),
+        )
+        .expect("Should not error");
 
         // Both should still be encrypted
         assert!(result.contains("age:"));
 
         // Verify enc1 was rotated (can decrypt with new key)
-        let decrypted =
-            decrypt_file_content(&result, &[new_identity.clone()]).expect("Should work");
+        let decrypted = decrypt_file_content(&result, std::slice::from_ref(&new_identity))
+            .expect("Should work");
         assert!(decrypted.contains("secret1"));
 
         // enc2 should still be encrypted with old key (wasn't rotated)
@@ -1109,8 +1121,10 @@ mod tests {
         let identity = test_identity();
         let recipient = identity.to_public();
 
-        let enc1 = encrypt_inline("val1", &[recipient.clone()]).expect("Encryption failed");
-        let enc2 = encrypt_inline("val2", &[recipient]).expect("Encryption failed");
+        let enc1 =
+            encrypt_inline("val1", std::slice::from_ref(&recipient)).expect("Encryption failed");
+        let enc2 =
+            encrypt_inline("val2", std::slice::from_ref(&recipient)).expect("Encryption failed");
 
         // Multiple encrypted values on the same line
         let content = format!("config = {{ key1: {enc1}, key2: {enc2} }}");
@@ -1279,7 +1293,7 @@ mod tests {
 
         // Each identity should independently be able to decrypt
         for identity in &[id1, id2, id3] {
-            let decrypted = decrypt(&encrypted, &[identity.clone()])
+            let decrypted = decrypt(&encrypted, std::slice::from_ref(identity))
                 .expect("Decryption should work with any single recipient");
             assert_eq!(plaintext, decrypted.as_slice());
         }
@@ -1322,8 +1336,10 @@ mod tests {
         let identity = test_identity();
         let recipient = identity.to_public();
 
-        let enc1 = encrypt_inline("val1", &[recipient.clone()]).expect("Encryption failed");
-        let enc2 = encrypt_inline("val2", &[recipient]).expect("Encryption failed");
+        let enc1 =
+            encrypt_inline("val1", std::slice::from_ref(&recipient)).expect("Encryption failed");
+        let enc2 =
+            encrypt_inline("val2", std::slice::from_ref(&recipient)).expect("Encryption failed");
 
         // No space between encrypted values
         let content = format!("{enc1}{enc2}");
@@ -1342,20 +1358,24 @@ mod tests {
         let old_recipient = old_identity.to_public();
         let new_recipient = new_identity.to_public();
 
-        let enc1 = encrypt_inline("secret1", &[old_recipient.clone()]).expect("Encryption failed");
-        let enc2 = encrypt_inline("secret2", &[old_recipient.clone()]).expect("Encryption failed");
-        let enc3 = encrypt_inline("secret3", &[old_recipient]).expect("Encryption failed");
+        let enc1 = encrypt_inline("secret1", std::slice::from_ref(&old_recipient))
+            .expect("Encryption failed");
+        let enc2 = encrypt_inline("secret2", std::slice::from_ref(&old_recipient))
+            .expect("Encryption failed");
+        let enc3 = encrypt_inline("secret3", std::slice::from_ref(&old_recipient))
+            .expect("Encryption failed");
 
         let content = format!("a={enc1}\nb={enc2}\nc={enc3}");
 
-        let rotated = encrypt_file_content(&content, &[old_identity.clone()], &[new_recipient])
-            .expect("Should work");
+        let rotated = encrypt_file_content(
+            &content,
+            std::slice::from_ref(&old_identity),
+            std::slice::from_ref(&new_recipient),
+        )
+        .expect("Should work");
 
         // Old identity should not be able to decrypt anymore
-        let old_result = decrypt_file_content(&rotated, &[old_identity]).expect("Should work");
-        let decrypted_count = old_result
-            .matches(|c: char| c != 'a' && c != 'g' && c != 'e' && c != ':')
-            .count();
+        let _old_result = decrypt_file_content(&rotated, &[old_identity]).expect("Should work");
         // Should still have age: prefixes since wrong key
         assert!(rotated.contains("age:"));
 

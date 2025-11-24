@@ -135,9 +135,7 @@ impl GitProvider for Git2Provider {
 
         // Set up callbacks for progress reporting
         let mut callbacks = RemoteCallbacks::new();
-        if let Some(ref progress_fn) = self.progress_callback {
-            #[allow(noop_method_call)]
-            let progress_fn = progress_fn.clone();
+        if let Some(progress_fn) = &self.progress_callback {
             callbacks.transfer_progress(move |stats| {
                 let received = stats.received_objects();
                 let total = stats.total_objects();
@@ -187,9 +185,7 @@ impl GitProvider for Git2Provider {
         let mut remote = repo.find_remote(remote).map_err(git_err)?;
 
         let mut callbacks = RemoteCallbacks::new();
-        if let Some(ref progress_fn) = self.progress_callback {
-            #[allow(noop_method_call)]
-            let progress_fn = progress_fn.clone();
+        if let Some(progress_fn) = &self.progress_callback {
             callbacks.transfer_progress(move |stats| {
                 let received = stats.received_objects();
                 let total = stats.total_objects();

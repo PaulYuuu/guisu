@@ -409,13 +409,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_variable_filter_values() {
-        assert_eq!(VariableFilter::All, VariableFilter::All);
-        assert_ne!(VariableFilter::All, VariableFilter::BuiltinOnly);
-        assert_ne!(VariableFilter::BuiltinOnly, VariableFilter::UserOnly);
-    }
-
-    #[test]
     fn test_flatten_json_map_empty() {
         let map = BTreeMap::new();
         let result = flatten_json_map(&map, "");
@@ -535,7 +528,7 @@ mod tests {
         // Empty object produces no flattened keys
         assert_eq!(result.len(), 1);
         assert_eq!(result.get("value"), Some(&json!("test")));
-        assert!(result.get("empty").is_none());
+        assert!(!result.contains_key("empty"));
     }
 
     #[test]

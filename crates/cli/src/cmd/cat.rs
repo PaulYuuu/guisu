@@ -400,7 +400,8 @@ mod tests {
 
         // Generate identity and save
         let identity = Identity::generate();
-        IdentityFile::save(&identity_file, &[identity.clone()]).expect("Failed to save identity");
+        IdentityFile::save(&identity_file, std::slice::from_ref(&identity))
+            .expect("Failed to save identity");
 
         // Create config with identity
         let config = test_config_with_identity(&identity_file);

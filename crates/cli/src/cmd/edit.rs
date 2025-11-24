@@ -367,14 +367,6 @@ mod tests {
     fn test_config() -> Config {
         Config::default()
     }
-
-    // Helper to create test config with age identity
-    fn test_config_with_identity(identity_path: &Path) -> Config {
-        let mut config = Config::default();
-        config.age.identity = Some(identity_path.to_path_buf());
-        config
-    }
-
     #[test]
     fn test_age_value_regex_matches_simple() {
         let content = "password = age:YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOQ==";
