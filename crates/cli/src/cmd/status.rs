@@ -9,7 +9,7 @@ use guisu_engine::adapters::crypto::CryptoDecryptorAdapter;
 use guisu_engine::adapters::template::TemplateRendererAdapter;
 use guisu_engine::entry::TargetEntry;
 use guisu_engine::processor::ContentProcessor;
-use guisu_engine::state::{DestinationState, SourceState, TargetState};
+use guisu_engine::state::{DestinationState, RedbPersistentState, SourceState, TargetState};
 use guisu_engine::system::RealSystem;
 use owo_colors::OwoColorize;
 use rayon::prelude::*;
@@ -374,7 +374,7 @@ fn run_impl(
     }
 
     // Check and display hooks status
-    print_hooks_status(source_dir)?;
+    print_hooks_status(source_dir, database)?;
 
     Ok(())
 }
@@ -971,10 +971,9 @@ fn render_tree(
 }
 
 /// Check and print hooks status
-fn print_hooks_status(source_dir: &Path) -> Result<()> {
-    use guisu_engine::database;
+fn print_hooks_status(source_dir: &Path, db: &RedbPersistentState) -> Result<()> {
     use guisu_engine::hooks::HookLoader;
-    use guisu_engine::state::{HookStatePersistence, RedbPersistentState};
+    use guisu_engine::state::HookStatePersistence;
 
     let hooks_dir = source_dir.join(".guisu/hooks");
 
@@ -993,16 +992,8 @@ fn print_hooks_status(source_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    // Load state from database
-    let Ok(db_path) = database::get_db_path() else {
-        return Ok(()); // Silently skip if can't get db path
-    };
-
-    let Ok(db) = RedbPersistentState::new(&db_path) else {
-        return Ok(()); // Silently skip if can't open db
-    };
-
-    let persistence = HookStatePersistence::new(&db);
+    // Load state from database (using provided database)
+    let persistence = HookStatePersistence::new(db);
     let Ok(state) = persistence.load() else {
         return Ok(()); // Silently skip if can't load state
     };

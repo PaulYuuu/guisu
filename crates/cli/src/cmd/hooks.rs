@@ -6,7 +6,6 @@
 use anyhow::{Context, Result};
 use guisu_config::Config;
 use guisu_core::platform::CURRENT_PLATFORM;
-use guisu_engine::database;
 use guisu_engine::hooks::{HookLoader, HookRunner, HookStage, TemplateRenderer};
 use guisu_engine::state::{HookStatePersistence, RedbPersistentState};
 use owo_colors::OwoColorize;
@@ -21,13 +20,14 @@ use crate::ui::icons::StatusIcon;
 ///
 /// Returns an error if:
 /// - Loading hooks from the hooks directory fails
-/// - Database operations fail (opening or saving state)
+/// - Database operations fail (saving state)
 /// - User confirmation input fails (when not skipped)
 /// - Template engine creation fails
 /// - Hook execution fails
 pub fn run_hooks(
     source_dir: &Path,
     config: &Config,
+    db: &RedbPersistentState,
     skip_confirm: bool,
     hook_filter: Option<&str>,
 ) -> Result<()> {
@@ -108,10 +108,8 @@ pub fn run_hooks(
         }
     }
 
-    // Load persistent state for hook execution tracking
-    let db_path = database::get_db_path()?;
-    let db = RedbPersistentState::new(&db_path).context("Failed to open database")?;
-    let persistence = HookStatePersistence::new(&db);
+    // Load persistent state for hook execution tracking (using provided database)
+    let persistence = HookStatePersistence::new(db);
     let mut state = persistence.load()?;
 
     // Create template renderer
@@ -243,10 +241,15 @@ pub fn run_list(source_dir: &Path, _config: &Config, format: &str) -> Result<()>
 ///
 /// Returns an error if:
 /// - Loading hooks from the hooks directory fails
-/// - Database operations fail (opening or loading state)
+/// - Database operations fail (loading state)
 /// - Checking for changes in hooks directory fails
 /// - JSON serialization fails (when format is "json")
-pub fn run_check(source_dir: &Path, config: &Config, format: &str) -> Result<()> {
+pub fn run_check(
+    source_dir: &Path,
+    config: &Config,
+    db: &RedbPersistentState,
+    format: &str,
+) -> Result<()> {
     let is_tty = std::io::stdout().is_terminal();
     let use_nerd_fonts = config.ui.icons.should_show_icons(is_tty);
     // Load hooks using HookLoader
@@ -259,10 +262,8 @@ pub fn run_check(source_dir: &Path, config: &Config, format: &str) -> Result<()>
 
     let collections = loader.load().context("Failed to load hooks")?;
 
-    // Load state from database
-    let db_path = database::get_db_path()?;
-    let db = RedbPersistentState::new(&db_path).context("Failed to open database")?;
-    let persistence = HookStatePersistence::new(&db);
+    // Load state from database (using provided database)
+    let persistence = HookStatePersistence::new(db);
     let state = persistence.load()?;
 
     let hooks_dir = source_dir.join(".guisu/hooks");
@@ -495,10 +496,14 @@ fn display_hook_not_found(hook_name: &str, use_nerd_fonts: bool) {
 ///
 /// Returns an error if:
 /// - Loading hooks from the hooks directory fails
-/// - Database operations fail (opening, loading, or saving state)
+/// - Database operations fail (loading or saving state)
 /// - Template engine creation fails
 /// - Pre hook execution fails
-pub fn handle_hooks_pre(source_dir: &Path, config: &Config) -> Result<()> {
+pub fn handle_hooks_pre(
+    source_dir: &Path,
+    config: &Config,
+    db: &RedbPersistentState,
+) -> Result<()> {
     use guisu_engine::hooks::config::HookMode;
     use sha2::{Digest, Sha256};
 
@@ -519,10 +524,8 @@ pub fn handle_hooks_pre(source_dir: &Path, config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    // Load persistent state for hook execution tracking first
-    let db_path = database::get_db_path()?;
-    let db = RedbPersistentState::new(&db_path).context("Failed to open database")?;
-    let persistence = HookStatePersistence::new(&db);
+    // Load persistent state for hook execution tracking (using provided database)
+    let persistence = HookStatePersistence::new(db);
     let mut state = persistence.load()?;
 
     // Show which hooks will run
@@ -605,10 +608,14 @@ pub fn handle_hooks_pre(source_dir: &Path, config: &Config) -> Result<()> {
 ///
 /// Returns an error if:
 /// - Loading hooks from the hooks directory fails
-/// - Database operations fail (opening, loading, or saving state)
+/// - Database operations fail (loading or saving state)
 /// - Template engine creation fails
 /// - Post hook execution fails
-pub fn handle_hooks_post(source_dir: &Path, config: &Config) -> Result<()> {
+pub fn handle_hooks_post(
+    source_dir: &Path,
+    config: &Config,
+    db: &RedbPersistentState,
+) -> Result<()> {
     use guisu_engine::hooks::config::HookMode;
     use sha2::{Digest, Sha256};
 
@@ -629,10 +636,8 @@ pub fn handle_hooks_post(source_dir: &Path, config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    // Load persistent state for hook execution tracking first
-    let db_path = database::get_db_path()?;
-    let db = RedbPersistentState::new(&db_path).context("Failed to open database")?;
-    let persistence = HookStatePersistence::new(&db);
+    // Load persistent state for hook execution tracking (using provided database)
+    let persistence = HookStatePersistence::new(db);
     let mut state = persistence.load()?;
 
     // Show which hooks will run

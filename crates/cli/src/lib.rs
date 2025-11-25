@@ -405,7 +405,8 @@ fn handle_apply_command(
 ) -> Result<()> {
     // Handle pre-apply hooks (unless it's a dry run)
     if !apply_cmd.dry_run
-        && let Err(e) = cmd::hooks::handle_hooks_pre(context.source_dir(), &context.config)
+        && let Err(e) =
+            cmd::hooks::handle_hooks_pre(context.source_dir(), &context.config, &context.database)
     {
         tracing::warn!("Pre-apply hooks failed: {}", e);
         println!(
@@ -424,7 +425,9 @@ fn handle_apply_command(
     // Database will be automatically closed when RuntimeContext is dropped
 
     // Handle post-apply hooks (unless it's a dry run)
-    if !dry_run && let Err(e) = cmd::hooks::handle_hooks_post(context.source_dir(), &context.config)
+    if !dry_run
+        && let Err(e) =
+            cmd::hooks::handle_hooks_post(context.source_dir(), &context.config, &context.database)
     {
         tracing::warn!("Post-apply hooks failed: {}", e);
         println!(
@@ -444,6 +447,7 @@ fn handle_apply_command(
 }
 
 /// Execute the command based on the command type
+#[allow(clippy::too_many_lines)]
 fn execute_command(command: Commands, context: &RuntimeContext) -> Result<()> {
     match command {
         Commands::Init { .. } => {
@@ -531,7 +535,13 @@ fn execute_command(command: Commands, context: &RuntimeContext) -> Result<()> {
         }
         Commands::Hooks(hooks_cmd) => match hooks_cmd {
             HooksCommands::Run { yes, hook } => {
-                cmd::hooks::run_hooks(context.source_dir(), &context.config, yes, hook.as_deref())?;
+                cmd::hooks::run_hooks(
+                    context.source_dir(),
+                    &context.config,
+                    &context.database,
+                    yes,
+                    hook.as_deref(),
+                )?;
             }
             HooksCommands::List { format } => {
                 cmd::hooks::run_list(context.source_dir(), &context.config, &format)?;

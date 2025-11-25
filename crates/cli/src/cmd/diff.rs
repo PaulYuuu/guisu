@@ -9,7 +9,7 @@ use guisu_engine::adapters::crypto::CryptoDecryptorAdapter;
 use guisu_engine::adapters::template::TemplateRendererAdapter;
 use guisu_engine::entry::TargetEntry;
 use guisu_engine::processor::ContentProcessor;
-use guisu_engine::state::{SourceState, TargetState};
+use guisu_engine::state::{RedbPersistentState, SourceState, TargetState};
 use owo_colors::OwoColorize;
 use rayon::prelude::*;
 use similar::{ChangeTag, TextDiff};
@@ -53,6 +53,7 @@ impl Command for DiffCommand {
             self.pager,
             self.interactive,
             &context.config,
+            &context.database,
         )
         .map_err(Into::into)
     }
@@ -358,9 +359,10 @@ fn display_diff_output(
     stats: &DiffStats,
     pager: bool,
     config: &Config,
+    db: &RedbPersistentState,
 ) -> Result<()> {
     // Check and display hooks status first
-    let _ = print_hooks_status(source_dir, config);
+    let _ = print_hooks_status(source_dir, config, db);
 
     // Join all diff outputs
     let diff_output = diff_outputs.join("\n");
@@ -389,6 +391,7 @@ fn run_impl(
     pager: bool,
     interactive: bool,
     config: &Config,
+    db: &RedbPersistentState,
 ) -> Result<()> {
     // Resolve all paths (handles root_entry and canonicalization)
     let paths = crate::common::ResolvedPaths::resolve(source_dir, dest_dir, config)?;
@@ -508,7 +511,7 @@ fn run_impl(
         config,
     );
 
-    display_diff_output(source_dir, &diff_outputs, &stats, pager, config)
+    display_diff_output(source_dir, &diff_outputs, &stats, pager, config, db)
 }
 
 /// Diff a single target entry against destination
@@ -1222,10 +1225,9 @@ fn compare_and_print_hooks(
 
 /// Check and print hooks status
 /// Returns true if any hooks were displayed
-fn print_hooks_status(source_dir: &Path, config: &Config) -> bool {
-    use guisu_engine::database;
+fn print_hooks_status(source_dir: &Path, config: &Config, db: &RedbPersistentState) -> bool {
     use guisu_engine::hooks::HookLoader;
-    use guisu_engine::state::{HookStatePersistence, RedbPersistentState};
+    use guisu_engine::state::HookStatePersistence;
 
     let hooks_dir = source_dir.join(".guisu/hooks");
 
@@ -1244,16 +1246,8 @@ fn print_hooks_status(source_dir: &Path, config: &Config) -> bool {
         return false;
     }
 
-    // Load state from database
-    let Ok(db_path) = database::get_db_path() else {
-        return false;
-    };
-
-    let Ok(db) = RedbPersistentState::new(&db_path) else {
-        return false;
-    };
-
-    let persistence = HookStatePersistence::new(&db);
+    // Load state from database (using provided database)
+    let persistence = HookStatePersistence::new(db);
     let Ok(state) = persistence.load() else {
         return false;
     };
