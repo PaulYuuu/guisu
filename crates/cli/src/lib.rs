@@ -421,10 +421,7 @@ fn handle_apply_command(
     let dry_run = apply_cmd.dry_run;
     let stats = apply_cmd.execute(context)?;
 
-    // Close database before running post hooks
-    if !dry_run && let Err(e) = guisu_engine::database::close_db() {
-        tracing::warn!("Failed to close database: {}", e);
-    }
+    // Database will be automatically closed when RuntimeContext is dropped
 
     // Handle post-apply hooks (unless it's a dry run)
     if !dry_run && let Err(e) = cmd::hooks::handle_hooks_post(context.source_dir(), &context.config)

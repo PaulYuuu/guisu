@@ -1,16 +1,12 @@
 //! Database helper for persistent state storage
 //!
-//! This module provides a singleton database instance stored in XDG state directory.
+//! This module provides database utility functions for managing persistent state.
+//! The database instance is managed by `RuntimeContext` and passed explicitly.
 
 use crate::state::{ENTRY_STATE_BUCKET, EntryState, PersistentState, RedbPersistentState};
 use guisu_config::dirs;
 use guisu_core::{Error, Result};
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock, RwLock};
-use tracing::warn;
-
-/// Global database instance
-static DB_INSTANCE: OnceLock<Arc<RwLock<Option<RedbPersistentState>>>> = OnceLock::new();
 
 /// Get the database path in XDG state directory
 ///
@@ -33,101 +29,20 @@ pub fn get_db_path() -> Result<PathBuf> {
     Ok(state_dir.join("state.db"))
 }
 
-/// Get or create the database instance
-///
-/// # Errors
-///
-/// Returns an error if the database instance cannot be accessed
-pub fn get_db() -> Result<Arc<RwLock<Option<RedbPersistentState>>>> {
-    Ok(Arc::clone(
-        DB_INSTANCE.get_or_init(|| Arc::new(RwLock::new(None))),
-    ))
-}
-
-/// Open the database (creates if doesn't exist)
-///
-/// # Errors
-///
-/// Returns an error if the database cannot be opened or created (e.g., permission denied, disk full, corrupted database file)
-pub fn open_db() -> Result<()> {
-    let db_path = get_db_path()?;
-    let db = RedbPersistentState::new(&db_path).map_err(|e| {
-        Error::State(format!(
-            "Failed to open database at {}: {}",
-            db_path.display(),
-            e
-        ))
-    })?;
-
-    let db_instance = get_db()?;
-    let mut guard = db_instance.write().unwrap_or_else(|poisoned| {
-        warn!("Database write lock was poisoned during open, attempting recovery");
-        let mut guard = poisoned.into_inner();
-
-        // Validate existing database state if present
-        let is_corrupted = if let Some(ref existing_db) = *guard {
-            // Perform integrity check: try a simple read operation
-            match existing_db.get(ENTRY_STATE_BUCKET, b"_integrity_check") {
-                Ok(_) => {
-                    warn!("Database integrity check passed after lock poisoning");
-                    false
-                }
-                Err(e) => {
-                    warn!(
-                        "Database corrupted after lock poisoning: {}. \
-                         Deleting corrupted file and rebuilding.",
-                        e
-                    );
-                    true
-                }
-            }
-        } else {
-            false
-        };
-
-        // If corrupted, clear and delete the file
-        if is_corrupted {
-            *guard = None;
-
-            // Delete the corrupted database file
-            if let Ok(db_path) = get_db_path()
-                && db_path.exists()
-            {
-                if let Err(e) = std::fs::remove_file(&db_path) {
-                    warn!("Failed to remove corrupted database file: {}", e);
-                } else {
-                    warn!("Corrupted database file removed: {}", db_path.display());
-                }
-            }
-        }
-
-        guard
-    });
-    *guard = Some(db);
-
-    Ok(())
-}
-
 /// Save entry state to database
 ///
 /// # Errors
 ///
-/// Returns an error if the state cannot be saved (e.g., database not opened, serialization failure, write error)
-pub fn save_entry_state(path: &str, content: &[u8], mode: Option<u32>) -> Result<()> {
-    let db_instance = get_db()?;
-    let guard = db_instance.write().unwrap_or_else(|poisoned| {
-        warn!("Database write lock was poisoned during save, recovering");
-        poisoned.into_inner()
-    });
-
-    if let Some(db) = guard.as_ref() {
-        let state = EntryState::new(content, mode);
-        db.set(ENTRY_STATE_BUCKET, path.as_bytes(), &state.to_bytes()?)
-            .map_err(|e| Error::State(format!("Failed to save state for {path}: {e}")))?;
-    } else {
-        return Err(Error::State("Database not opened".to_string()));
-    }
-
+/// Returns an error if the state cannot be saved (e.g., serialization failure, write error)
+pub fn save_entry_state(
+    db: &RedbPersistentState,
+    path: &str,
+    content: &[u8],
+    mode: Option<u32>,
+) -> Result<()> {
+    let state = EntryState::new(content, mode);
+    db.set(ENTRY_STATE_BUCKET, path.as_bytes(), &state.to_bytes()?)
+        .map_err(|e| Error::State(format!("Failed to save state for {path}: {e}")))?;
     Ok(())
 }
 
@@ -135,68 +50,30 @@ pub fn save_entry_state(path: &str, content: &[u8], mode: Option<u32>) -> Result
 ///
 /// # Errors
 ///
-/// Returns an error if the state cannot be retrieved (e.g., database not opened, deserialization failure, read error)
-pub fn get_entry_state(path: &str) -> Result<Option<EntryState>> {
-    let db_instance = get_db()?;
-    let guard = db_instance.read().unwrap_or_else(|poisoned| {
-        warn!("Database read lock was poisoned during get, recovering");
-        poisoned.into_inner()
-    });
+/// Returns an error if the state cannot be retrieved (e.g., deserialization failure, read error)
+pub fn get_entry_state(db: &RedbPersistentState, path: &str) -> Result<Option<EntryState>> {
+    let bytes = db
+        .get(ENTRY_STATE_BUCKET, path.as_bytes())
+        .map_err(|e| Error::State(format!("Failed to get state for {path}: {e}")))?;
 
-    if let Some(db) = guard.as_ref() {
-        let bytes = db
-            .get(ENTRY_STATE_BUCKET, path.as_bytes())
-            .map_err(|e| Error::State(format!("Failed to get state for {path}: {e}")))?;
-
-        Ok(bytes.and_then(|b| EntryState::from_bytes(&b)))
-    } else {
-        Err(Error::State("Database not opened".to_string()))
-    }
+    Ok(bytes.and_then(|b| EntryState::from_bytes(&b)))
 }
 
 /// Delete entry state from database
 ///
 /// # Errors
 ///
-/// Returns an error if the state cannot be deleted (e.g., database not opened, write error)
-pub fn delete_entry_state(path: &str) -> Result<()> {
-    let db_instance = get_db()?;
-    let guard = db_instance.write().unwrap_or_else(|poisoned| {
-        warn!("Database write lock was poisoned during delete, recovering");
-        poisoned.into_inner()
-    });
-
-    if let Some(db) = guard.as_ref() {
-        db.delete(ENTRY_STATE_BUCKET, path.as_bytes())
-            .map_err(|e| Error::State(format!("Failed to delete state for {path}: {e}")))?;
-    }
-
+/// Returns an error if the state cannot be deleted (e.g., write error)
+pub fn delete_entry_state(db: &RedbPersistentState, path: &str) -> Result<()> {
+    db.delete(ENTRY_STATE_BUCKET, path.as_bytes())
+        .map_err(|e| Error::State(format!("Failed to delete state for {path}: {e}")))?;
     Ok(())
 }
 
-/// Close the database
-///
-/// # Errors
-///
-/// Returns an error if the database cannot be closed properly (e.g., outstanding transactions, I/O error)
-pub fn close_db() -> Result<()> {
-    let db_instance = get_db()?;
-    let mut guard = db_instance.write().unwrap_or_else(|poisoned| {
-        warn!("Database write lock was poisoned during close, recovering");
-        poisoned.into_inner()
-    });
-
-    if let Some(db) = guard.take() {
-        db.close()?;
-    }
-
-    Ok(())
-}
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
     use super::*;
-    use serial_test::serial;
     use tempfile::TempDir;
 
     /// Create an isolated test database in a temporary directory
@@ -211,23 +88,12 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_get_db_path() {
         let result = get_db_path();
         assert!(result.is_ok());
 
         let path = result.unwrap();
         assert!(path.to_string_lossy().contains("state.db"));
-    }
-
-    #[test]
-    #[serial]
-    fn test_get_db_returns_singleton() {
-        let db1 = get_db().expect("Failed to get db");
-        let db2 = get_db().expect("Failed to get db");
-
-        // Both should be the same Arc instance
-        assert!(Arc::ptr_eq(&db1, &db2));
     }
 
     #[test]
@@ -325,26 +191,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
-    fn test_save_before_open_fails() {
-        let _ = close_db();
-
-        // Try to save without opening database
-        let result = save_entry_state("test.txt", b"content", None);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    #[serial]
-    fn test_get_before_open_fails() {
-        let _ = close_db();
-
-        // Try to get without opening database
-        let result = get_entry_state("test.txt");
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_multiple_saves_same_path() {
         let (_temp, db) = test_db_setup();
 
@@ -399,27 +245,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
-    fn test_close_and_reopen() {
-        let _ = close_db();
-
-        // Open, save, close
-        open_db().expect("Failed to open db");
-        save_entry_state("persistent.txt", b"data", Some(0o644)).expect("Failed to save");
-        close_db().expect("Failed to close");
-
-        // Reopen and verify data persists
-        open_db().expect("Failed to reopen db");
-        let retrieved = get_entry_state("persistent.txt")
-            .expect("Failed to get")
-            .expect("Entry not found");
-
-        assert_eq!(retrieved.mode, Some(0o644));
-
-        let _ = close_db();
-    }
-
-    #[test]
     fn test_path_with_special_characters() {
         let (_temp, db) = test_db_setup();
 
@@ -445,16 +270,6 @@ mod tests {
                 .unwrap_or_else(|_| panic!("Failed to get {path}"));
             assert!(result.is_some(), "Entry not found: {path}");
         }
-    }
-
-    #[test]
-    #[serial]
-    fn test_close_already_closed() {
-        let _ = close_db();
-
-        // Close when already closed should not error
-        let result = close_db();
-        assert!(result.is_ok());
     }
 
     #[test]
@@ -693,7 +508,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_db_path_contains_state_db() {
         let path = get_db_path().expect("Failed to get db path");
         let path_str = path.to_string_lossy();
@@ -703,30 +517,6 @@ mod tests {
 
         // Should be in a guisu-related directory
         assert!(path_str.contains("guisu") || path_str.contains(".local/state"));
-    }
-
-    #[test]
-    #[serial]
-    fn test_reopen_after_close() {
-        let _ = close_db();
-
-        // Open database
-        open_db().expect("First open failed");
-
-        // Save data
-        save_entry_state("test.txt", b"content", None).expect("Failed to save");
-
-        // Close database
-        close_db().expect("Failed to close");
-
-        // Reopen database
-        open_db().expect("Reopen failed");
-
-        // Data should still be there
-        let result = get_entry_state("test.txt").expect("Failed to get after reopen");
-        assert!(result.is_some());
-
-        let _ = close_db();
     }
 
     #[test]
@@ -876,16 +666,6 @@ mod tests {
             .expect("Entry not found");
         let state = EntryState::from_bytes(&bytes).expect("Failed to deserialize");
         assert_eq!(state.mode, None);
-    }
-
-    #[test]
-    #[serial]
-    fn test_get_db_returns_same_instance() {
-        let db1 = get_db().expect("Failed to get db 1");
-        let db2 = get_db().expect("Failed to get db 2");
-
-        // Both should point to the same Arc
-        assert!(Arc::ptr_eq(&db1, &db2));
     }
 
     #[test]

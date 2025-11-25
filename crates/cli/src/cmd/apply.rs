@@ -56,11 +56,14 @@ pub struct ApplyCommand {
 ///
 /// Returns the content hash if the entry is a file and has state in the database.
 /// Returns None for non-file entries or if no state exists.
-fn get_last_written_hash(entry: &TargetEntry) -> Option<Vec<u8>> {
+fn get_last_written_hash(
+    db: &guisu_engine::state::RedbPersistentState,
+    entry: &TargetEntry,
+) -> Option<Vec<u8>> {
     match entry {
         TargetEntry::File { .. } => {
             let path_str = entry.path().to_string();
-            guisu_engine::database::get_entry_state(&path_str)
+            guisu_engine::database::get_entry_state(db, &path_str)
                 .ok()
                 .flatten()
                 .map(|state| state.content_hash)
@@ -290,6 +293,7 @@ fn handle_dry_run_entry(
 
 /// Handle interactive conflict resolution
 fn handle_interactive_conflict(
+    db: &guisu_engine::state::RedbPersistentState,
     entry: &TargetEntry,
     dest_abs: &AbsPath,
     dest_path: &AbsPath,
@@ -297,7 +301,7 @@ fn handle_interactive_conflict(
     handler: &mut ConflictHandler,
     fail_on_decrypt_error: bool,
 ) -> Result<bool> {
-    let last_written_hash = get_last_written_hash(entry);
+    let last_written_hash = get_last_written_hash(db, entry);
     let change_type = ConflictHandler::detect_change_type(
         entry,
         dest_abs,
@@ -326,6 +330,7 @@ fn handle_interactive_conflict(
 
 /// Handle non-interactive conflict resolution with user confirmation
 fn handle_non_interactive_conflict(
+    db: &guisu_engine::state::RedbPersistentState,
     entry: &TargetEntry,
     dest_abs: &AbsPath,
     dest_path: &AbsPath,
@@ -336,7 +341,7 @@ fn handle_non_interactive_conflict(
         return Ok(false);
     }
 
-    let last_written_hash = get_last_written_hash(entry);
+    let last_written_hash = get_last_written_hash(db, entry);
     let change_type = ConflictHandler::detect_change_type(
         entry,
         dest_abs,
@@ -380,6 +385,7 @@ fn handle_non_interactive_conflict(
 
 /// Apply entry and handle errors
 fn apply_entry_with_error_handling(
+    db: &guisu_engine::state::RedbPersistentState,
     entry: &TargetEntry,
     dest_path: &AbsPath,
     identities: &[guisu_crypto::Identity],
@@ -390,7 +396,7 @@ fn apply_entry_with_error_handling(
     match apply_target_entry(entry, dest_path, identities, fail_on_decrypt_error) {
         Ok(()) => {
             debug!(path = %entry.path(), "Applied entry successfully");
-            match save_entry_state_to_db(entry) {
+            match save_entry_state_to_db(db, entry) {
                 Ok(()) => {
                     print_success_entry(entry, show_icons);
                     stats.record_success(entry);
@@ -413,6 +419,7 @@ fn apply_entry_with_error_handling(
 /// Process entries sequentially (for interactive mode or dry run)
 #[allow(clippy::too_many_arguments)]
 fn process_entries_sequential(
+    db: &guisu_engine::state::RedbPersistentState,
     entries: Vec<&TargetEntry>,
     dest_abs: &AbsPath,
     identities: &[guisu_crypto::Identity],
@@ -437,6 +444,7 @@ fn process_entries_sequential(
         } else {
             let should_apply = if let Some(handler) = conflict_handler {
                 handle_interactive_conflict(
+                    db,
                     entry,
                     dest_abs,
                     &dest_path,
@@ -446,6 +454,7 @@ fn process_entries_sequential(
                 )?
             } else {
                 handle_non_interactive_conflict(
+                    db,
                     entry,
                     dest_abs,
                     &dest_path,
@@ -456,6 +465,7 @@ fn process_entries_sequential(
 
             if should_apply {
                 apply_entry_with_error_handling(
+                    db,
                     entry,
                     &dest_path,
                     identities,
@@ -471,6 +481,7 @@ fn process_entries_sequential(
 
 /// Process entries in parallel (for non-interactive mode)
 fn process_entries_parallel(
+    db: &guisu_engine::state::RedbPersistentState,
     entries: &[&TargetEntry],
     dest_abs: &AbsPath,
     identities: &[guisu_crypto::Identity],
@@ -492,7 +503,7 @@ fn process_entries_parallel(
             continue;
         }
 
-        let last_written_hash = get_last_written_hash(entry);
+        let last_written_hash = get_last_written_hash(db, entry);
 
         if let Ok(Some(change_type)) = ConflictHandler::detect_change_type(
             entry,
@@ -559,7 +570,7 @@ fn process_entries_parallel(
             match apply_target_entry(entry, &dest_path, identities, fail_on_decrypt_error) {
                 Ok(()) => {
                     debug!(path = %entry.path(), "Applied entry successfully");
-                    match save_entry_state_to_db(entry) {
+                    match save_entry_state_to_db(db, entry) {
                         Ok(()) => {
                             print_success_entry(entry, show_icons);
                             stats.record_success(entry);
@@ -604,11 +615,12 @@ impl Command for ApplyCommand {
             self.exclude.iter().map(|s| s.parse()).collect();
         let _exclude_types = exclude_types?;
 
-        // Extract paths and config from context
+        // Extract paths, config, and database from context
         let source_abs = context.dotfiles_dir();
         let dest_abs = context.dest_dir();
         let source_dir = context.source_dir();
         let config = &context.config;
+        let database = context.database();
 
         if self.dry_run {
             info!("{}", "Dry run mode - no changes will be made".dimmed());
@@ -685,14 +697,9 @@ impl Command for ApplyCommand {
             return Ok(ApplyStats::new());
         }
 
-        // Open database for state tracking (only if not dry run)
-        if !self.dry_run {
-            guisu_engine::database::open_db().context("Failed to open state database")?;
-        }
-
         // Check for configuration drift (files modified by user AND source updated)
         if !self.dry_run && !is_single_file {
-            let drift_warnings = detect_config_drift(&entries_to_apply, dest_abs);
+            let drift_warnings = detect_config_drift(database, &entries_to_apply, dest_abs);
             display_drift_warnings(&drift_warnings);
         }
 
@@ -712,6 +719,7 @@ impl Command for ApplyCommand {
         // Use parallel processing only when NOT in interactive mode
         if self.interactive || self.dry_run {
             process_entries_sequential(
+                database,
                 entries_to_apply,
                 dest_abs,
                 &identities,
@@ -723,6 +731,7 @@ impl Command for ApplyCommand {
             )?;
         } else {
             process_entries_parallel(
+                database,
                 &entries_to_apply,
                 dest_abs,
                 &identities,
@@ -1025,11 +1034,14 @@ fn apply_target_entry(
 }
 
 /// Save entry state to database
-fn save_entry_state_to_db(entry: &TargetEntry) -> Result<()> {
+fn save_entry_state_to_db(
+    db: &guisu_engine::state::RedbPersistentState,
+    entry: &TargetEntry,
+) -> Result<()> {
     // Only save state for files (directories and symlinks don't need content state)
     if let TargetEntry::File { content, mode, .. } = entry {
         let path = entry.path().to_string();
-        guisu_engine::database::save_entry_state(&path, content, *mode)
+        guisu_engine::database::save_entry_state(db, &path, content, *mode)
             .with_context(|| format!("Failed to save state for {path}"))?;
     }
     Ok(())
@@ -1170,7 +1182,11 @@ fn print_error_entry(entry: &TargetEntry, error: &anyhow::Error, use_nerd_fonts:
 /// 2. The source has also been updated (target != `last_written`)
 ///
 /// This indicates potential conflict where both local and source changes exist.
-fn detect_config_drift(entries: &[&TargetEntry], dest_abs: &AbsPath) -> Vec<String> {
+fn detect_config_drift(
+    db: &guisu_engine::state::RedbPersistentState,
+    entries: &[&TargetEntry],
+    dest_abs: &AbsPath,
+) -> Vec<String> {
     use sha2::{Digest, Sha256};
 
     // Parallel processing of drift detection (3x SHA256 per file = CPU-intensive)
@@ -1195,7 +1211,7 @@ fn detect_config_drift(entries: &[&TargetEntry], dest_abs: &AbsPath) -> Vec<Stri
 
             // Get last written state from database
             let path_str = entry.path().to_string();
-            let last_written_state = match guisu_engine::database::get_entry_state(&path_str) {
+            let last_written_state = match guisu_engine::database::get_entry_state(db, &path_str) {
                 Ok(Some(state)) => state,
                 Ok(None) => return None, // No previous state, can't detect drift
                 Err(e) => {

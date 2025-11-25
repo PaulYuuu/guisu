@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use guisu_config::Config;
 use guisu_core::path::AbsPath;
+use guisu_engine::state::RedbPersistentState;
 use once_cell::sync::OnceCell;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -62,13 +63,15 @@ impl ResolvedPaths {
 
 /// Runtime context for CLI commands
 ///
-/// Consolidates config, paths, and caches to reduce parameter passing.
+/// Consolidates config, paths, database, and caches to reduce parameter passing.
 #[derive(Clone)]
 pub struct RuntimeContext {
     /// Application configuration
     pub config: Arc<Config>,
     /// Resolved and canonicalized paths
     pub paths: ResolvedPaths,
+    /// Database instance for persistent state
+    pub database: Arc<RedbPersistentState>,
     identities_cache: Arc<OnceCell<Arc<[guisu_crypto::Identity]>>>,
     guisu_dir_cache: Arc<OnceCell<PathBuf>>,
     templates_dir_cache: Arc<OnceCell<Option<PathBuf>>>,
@@ -79,12 +82,20 @@ impl RuntimeContext {
     ///
     /// # Errors
     ///
-    /// Returns an error if resolving and canonicalizing paths fails
+    /// Returns an error if resolving and canonicalizing paths fails or database creation fails
     pub fn new(config: Config, source_dir: &Path, dest_dir: &Path) -> Result<Self> {
         let paths = ResolvedPaths::resolve(source_dir, dest_dir, &config)?;
+
+        // Initialize database
+        let db_path =
+            guisu_engine::database::get_db_path().context("Failed to get database path")?;
+        let database =
+            RedbPersistentState::new(&db_path).context("Failed to create database instance")?;
+
         Ok(Self {
             config: Arc::new(config),
             paths,
+            database: Arc::new(database),
             identities_cache: Arc::new(OnceCell::new()),
             guisu_dir_cache: Arc::new(OnceCell::new()),
             templates_dir_cache: Arc::new(OnceCell::new()),
@@ -92,11 +103,22 @@ impl RuntimeContext {
     }
 
     /// Create context from already-resolved paths
+    ///
+    /// # Panics
+    ///
+    /// Panics if database path cannot be retrieved or database creation fails.
+    /// This is acceptable for a convenience constructor.
     #[must_use]
     pub fn from_parts(config: Arc<Config>, paths: ResolvedPaths) -> Self {
+        // Initialize database (panic on failure since this is a convenience constructor)
+        let db_path = guisu_engine::database::get_db_path().expect("Failed to get database path");
+        let database =
+            RedbPersistentState::new(&db_path).expect("Failed to create database instance");
+
         Self {
             config,
             paths,
+            database: Arc::new(database),
             identities_cache: Arc::new(OnceCell::new()),
             guisu_dir_cache: Arc::new(OnceCell::new()),
             templates_dir_cache: Arc::new(OnceCell::new()),
@@ -122,6 +144,13 @@ impl RuntimeContext {
     #[must_use]
     pub fn dotfiles_dir(&self) -> &AbsPath {
         &self.paths.dotfiles_dir
+    }
+
+    /// Get the database instance
+    #[inline]
+    #[must_use]
+    pub fn database(&self) -> &Arc<RedbPersistentState> {
+        &self.database
     }
 
     /// Load age identities (cached)
@@ -181,6 +210,34 @@ impl RuntimeContext {
         guisu_engine::git::find_working_tree(self.source_dir())
             .unwrap_or_else(|| self.source_dir().to_path_buf())
     }
+
+    /// Create runtime context with a custom database path (test only)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if resolving paths fails or database creation fails
+    #[cfg(test)]
+    pub fn new_with_db_path(
+        config: Config,
+        source_dir: &Path,
+        dest_dir: &Path,
+        db_path: &Path,
+    ) -> Result<Self> {
+        let paths = ResolvedPaths::resolve(source_dir, dest_dir, &config)?;
+
+        // Initialize database with custom path
+        let database =
+            RedbPersistentState::new(db_path).context("Failed to create database instance")?;
+
+        Ok(Self {
+            config: Arc::new(config),
+            paths,
+            database: Arc::new(database),
+            identities_cache: Arc::new(OnceCell::new()),
+            guisu_dir_cache: Arc::new(OnceCell::new()),
+            templates_dir_cache: Arc::new(OnceCell::new()),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -199,6 +256,18 @@ mod tests {
         let mut config = Config::default();
         config.general.root_entry = root_entry.into();
         config
+    }
+
+    // Helper to create RuntimeContext with isolated database for testing
+    fn test_runtime_context(
+        config: Config,
+        source_dir: &Path,
+        dest_dir: &Path,
+        temp_db_dir: &TempDir,
+    ) -> RuntimeContext {
+        let db_path = temp_db_dir.path().join("test.db");
+        RuntimeContext::new_with_db_path(config, source_dir, dest_dir, &db_path)
+            .expect("Failed to create test RuntimeContext")
     }
 
     // Tests for ResolvedPaths
@@ -308,9 +377,9 @@ mod tests {
         std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
 
         let config = test_config();
-        let context = RuntimeContext::new(config, &source_dir, &dest_dir);
-
-        assert!(context.is_ok());
+        let temp_db = TempDir::new().expect("Failed to create temp db dir");
+        let _context = test_runtime_context(config, &source_dir, &dest_dir, &temp_db);
+        // Test passes if no panic occurs during creation
     }
 
     #[test]
@@ -326,9 +395,8 @@ mod tests {
         std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
 
         let config = test_config();
-        let paths = ResolvedPaths::resolve(&source_dir, &dest_dir, &config).unwrap();
-
-        let context = RuntimeContext::from_parts(Arc::new(config), paths);
+        let temp_db = TempDir::new().expect("Failed to create temp db dir");
+        let context = test_runtime_context(config, &source_dir, &dest_dir, &temp_db);
 
         assert_eq!(context.source_dir(), &source_dir);
     }
@@ -346,7 +414,8 @@ mod tests {
         std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
 
         let config = test_config();
-        let context = RuntimeContext::new(config, &source_dir, &dest_dir).unwrap();
+        let temp_db = TempDir::new().expect("Failed to create temp db dir");
+        let context = test_runtime_context(config, &source_dir, &dest_dir, &temp_db);
 
         assert_eq!(context.source_dir(), &source_dir);
     }
@@ -364,7 +433,8 @@ mod tests {
         std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
 
         let config = test_config();
-        let context = RuntimeContext::new(config, &source_dir, &dest_dir).unwrap();
+        let temp_db = TempDir::new().expect("Failed to create temp db dir");
+        let context = test_runtime_context(config, &source_dir, &dest_dir, &temp_db);
 
         assert!(context.dest_dir().as_path().ends_with("dst"));
     }
@@ -382,7 +452,8 @@ mod tests {
         std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
 
         let config = test_config();
-        let context = RuntimeContext::new(config, &source_dir, &dest_dir).unwrap();
+        let temp_db = TempDir::new().expect("Failed to create temp db dir");
+        let context = test_runtime_context(config, &source_dir, &dest_dir, &temp_db);
 
         assert!(context.dotfiles_dir().as_path().ends_with("home"));
     }
@@ -400,7 +471,8 @@ mod tests {
         std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
 
         let config = test_config();
-        let context = RuntimeContext::new(config, &source_dir, &dest_dir).unwrap();
+        let temp_db = TempDir::new().expect("Failed to create temp db dir");
+        let context = test_runtime_context(config, &source_dir, &dest_dir, &temp_db);
 
         let guisu_dir = context.guisu_dir();
         assert!(guisu_dir.ends_with(".guisu"));
@@ -419,7 +491,8 @@ mod tests {
         std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
 
         let config = test_config();
-        let context = RuntimeContext::new(config, &source_dir, &dest_dir).unwrap();
+        let temp_db = TempDir::new().expect("Failed to create temp db dir");
+        let context = test_runtime_context(config, &source_dir, &dest_dir, &temp_db);
 
         // Call twice to test caching
         let guisu_dir1 = context.guisu_dir();
@@ -447,7 +520,8 @@ mod tests {
         std::fs::create_dir_all(&templates_dir).expect("Failed to create templates dir");
 
         let config = test_config();
-        let context = RuntimeContext::new(config, &source_dir, &dest_dir).unwrap();
+        let temp_db = TempDir::new().expect("Failed to create temp db dir");
+        let context = test_runtime_context(config, &source_dir, &dest_dir, &temp_db);
 
         let templates = context.templates_dir();
         assert!(templates.is_some());
@@ -467,7 +541,8 @@ mod tests {
         std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
 
         let config = test_config();
-        let context = RuntimeContext::new(config, &source_dir, &dest_dir).unwrap();
+        let temp_db = TempDir::new().expect("Failed to create temp db dir");
+        let context = test_runtime_context(config, &source_dir, &dest_dir, &temp_db);
 
         let templates = context.templates_dir();
         assert!(templates.is_none());
@@ -486,7 +561,8 @@ mod tests {
         std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
 
         let config = test_config();
-        let context = RuntimeContext::new(config, &source_dir, &dest_dir).unwrap();
+        let temp_db = TempDir::new().expect("Failed to create temp db dir");
+        let context = test_runtime_context(config, &source_dir, &dest_dir, &temp_db);
 
         let working_tree = context.working_tree();
         // Should fallback to source_dir when no git repo found
@@ -506,7 +582,8 @@ mod tests {
         std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
 
         let config = test_config();
-        let context = RuntimeContext::new(config, &source_dir, &dest_dir).unwrap();
+        let temp_db = TempDir::new().expect("Failed to create temp db dir");
+        let context = test_runtime_context(config, &source_dir, &dest_dir, &temp_db);
 
         let cloned = context.clone();
         assert_eq!(context.source_dir(), cloned.source_dir());
@@ -526,7 +603,8 @@ mod tests {
         std::fs::create_dir_all(source_dir.join("home")).expect("Failed to create home dir");
 
         let config = test_config();
-        let context = RuntimeContext::new(config, &source_dir, &dest_dir).unwrap();
+        let temp_db = TempDir::new().expect("Failed to create temp db dir");
+        let context = test_runtime_context(config, &source_dir, &dest_dir, &temp_db);
 
         // Should generate a dummy identity when no identities configured
         let identity = context.primary_identity();

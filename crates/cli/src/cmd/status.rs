@@ -134,6 +134,7 @@ impl Command for StatusCommand {
             OutputFormat::Simple
         };
         run_impl(
+            context.database(),
             context.source_dir(),
             context.dest_dir().as_path(),
             &context.config,
@@ -232,6 +233,7 @@ fn build_status_target_state(
 
 /// Run the status command implementation
 fn run_impl(
+    database: &std::sync::Arc<guisu_engine::state::RedbPersistentState>,
     source_dir: &Path,
     dest_dir: &Path,
     config: &Config,
@@ -239,9 +241,6 @@ fn run_impl(
     show_all: bool,
     output_format: OutputFormat,
 ) -> Result<()> {
-    // Open database for reading previous state
-    guisu_engine::database::open_db().context("Failed to open state database")?;
-
     // Initialize lscolors from environment
     let lscolors = LsColors::from_env().unwrap_or_default();
 
@@ -346,6 +345,7 @@ fn run_impl(
 
     // Collect file information
     let file_infos = collect_file_info(CollectParams {
+        database,
         source_state: &source_state,
         target_state: &target_state,
         dest_state: &mut dest_state,
@@ -381,6 +381,7 @@ fn run_impl(
 
 /// Parameters for collecting file information
 struct CollectParams<'a> {
+    database: &'a std::sync::Arc<guisu_engine::state::RedbPersistentState>,
     source_state: &'a SourceState,
     target_state: &'a TargetState,
     dest_state: &'a mut DestinationState,
@@ -418,6 +419,7 @@ fn format_display_path(dest_root: &AbsPath, target_path: &RelPath) -> String {
 
 /// Determine file status based on three-way comparison
 fn determine_entry_status(
+    database: &std::sync::Arc<guisu_engine::state::RedbPersistentState>,
     target_entry: &TargetEntry,
     dest_entry: &guisu_engine::entry::DestEntry,
     path_str: &str,
@@ -425,7 +427,7 @@ fn determine_entry_status(
     use guisu_engine::entry::TargetEntry;
 
     // Get the base state from database (last applied state)
-    let base_state = guisu_engine::database::get_entry_state(path_str)
+    let base_state = guisu_engine::database::get_entry_state(database, path_str)
         .ok()
         .flatten();
 
@@ -491,6 +493,7 @@ fn determine_entry_status(
 /// Process a single entry for status display
 #[allow(clippy::too_many_arguments)]
 fn process_entry_for_status(
+    database: &std::sync::Arc<guisu_engine::state::RedbPersistentState>,
     entry: &guisu_engine::entry::SourceEntry,
     dest_state_mutex: &std::sync::Mutex<&mut DestinationState>,
     target_state: &TargetState,
@@ -571,7 +574,7 @@ fn process_entry_for_status(
             return None;
         };
 
-        determine_entry_status(target_entry, &dest_entry, &path_str)
+        determine_entry_status(database, target_entry, &dest_entry, &path_str)
     };
 
     // Format path for display
@@ -590,6 +593,7 @@ fn collect_file_info(params: CollectParams) -> Vec<FileInfo> {
 
     // Destructure params to avoid partial move issues
     let CollectParams {
+        database,
         source_state,
         target_state,
         dest_state,
@@ -610,6 +614,7 @@ fn collect_file_info(params: CollectParams) -> Vec<FileInfo> {
         .par_bridge()
         .filter_map(|entry| {
             process_entry_for_status(
+                database,
                 entry,
                 &dest_state_mutex,
                 target_state,
