@@ -3,7 +3,10 @@
 //! This module provides database utility functions for managing persistent state.
 //! The database instance is managed by `RuntimeContext` and passed explicitly.
 
-use crate::state::{ENTRY_STATE_BUCKET, EntryState, PersistentState, RedbPersistentState};
+use crate::state::{
+    CONFIG_METADATA_BUCKET, ConfigMetadata, ENTRY_STATE_BUCKET, EntryState, PersistentState,
+    RedbPersistentState,
+};
 use guisu_config::dirs;
 use guisu_core::{Error, Result};
 use std::path::PathBuf;
@@ -67,6 +70,54 @@ pub fn get_entry_state(db: &RedbPersistentState, path: &str) -> Result<Option<En
 pub fn delete_entry_state(db: &RedbPersistentState, path: &str) -> Result<()> {
     db.delete(ENTRY_STATE_BUCKET, path.as_bytes())
         .map_err(|e| Error::State(format!("Failed to delete state for {path}: {e}")))?;
+    Ok(())
+}
+
+/// Save config metadata to database
+///
+/// Stores the rendered configuration along with the template source hash for cache validation.
+/// Uses a fixed key "config" in the `CONFIG_METADATA_BUCKET`.
+///
+/// # Errors
+///
+/// Returns an error if the metadata cannot be saved (e.g., serialization failure, write error)
+pub fn save_config_metadata(
+    db: &RedbPersistentState,
+    template_source: &str,
+    rendered_config: String,
+) -> Result<()> {
+    let metadata = ConfigMetadata::new(template_source, rendered_config);
+    db.set(CONFIG_METADATA_BUCKET, b"config", &metadata.to_bytes()?)
+        .map_err(|e| Error::State(format!("Failed to save config metadata: {e}")))?;
+    Ok(())
+}
+
+/// Get config metadata from database
+///
+/// Retrieves the cached rendered configuration if it exists.
+/// Uses a fixed key "config" in the `CONFIG_METADATA_BUCKET`.
+///
+/// # Errors
+///
+/// Returns an error if the metadata cannot be retrieved (e.g., deserialization failure, read error)
+pub fn get_config_metadata(db: &RedbPersistentState) -> Result<Option<ConfigMetadata>> {
+    let bytes = db
+        .get(CONFIG_METADATA_BUCKET, b"config")
+        .map_err(|e| Error::State(format!("Failed to get config metadata: {e}")))?;
+
+    Ok(bytes.and_then(|b| ConfigMetadata::from_bytes(&b)))
+}
+
+/// Delete config metadata from database
+///
+/// Clears the cached configuration. Useful when forcing a config reload.
+///
+/// # Errors
+///
+/// Returns an error if the metadata cannot be deleted (e.g., write error)
+pub fn delete_config_metadata(db: &RedbPersistentState) -> Result<()> {
+    db.delete(CONFIG_METADATA_BUCKET, b"config")
+        .map_err(|e| Error::State(format!("Failed to delete config metadata: {e}")))?;
     Ok(())
 }
 

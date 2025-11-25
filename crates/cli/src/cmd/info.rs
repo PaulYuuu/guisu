@@ -657,7 +657,7 @@ fn validate_configuration(source_dir: &Path) -> Result<()> {
     }
 
     // Try to load config to validate it
-    crate::load_config_with_template_support(None, source_dir)
+    crate::load_config_with_template_support(None, source_dir, None)
         .map_err(|e| anyhow::anyhow!("Configuration validation failed: {e}"))?;
 
     Ok(())

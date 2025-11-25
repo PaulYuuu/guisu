@@ -125,6 +125,26 @@ impl RuntimeContext {
         }
     }
 
+    /// Create context from already-resolved paths and existing database
+    ///
+    /// Use this when you've already created a database instance (e.g., for config caching)
+    /// to avoid creating the database twice.
+    #[must_use]
+    pub fn from_parts_with_db(
+        config: Arc<Config>,
+        paths: ResolvedPaths,
+        database: Arc<RedbPersistentState>,
+    ) -> Self {
+        Self {
+            config,
+            paths,
+            database,
+            identities_cache: Arc::new(OnceCell::new()),
+            guisu_dir_cache: Arc::new(OnceCell::new()),
+            templates_dir_cache: Arc::new(OnceCell::new()),
+        }
+    }
+
     /// Get the source directory (original input, may contain .guisu)
     #[inline]
     #[must_use]

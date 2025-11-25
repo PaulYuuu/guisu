@@ -517,6 +517,8 @@ impl Metadata {
 pub const ENTRY_STATE_BUCKET: &str = "entryState";
 /// Database bucket name for hook state (tracks hook execution and hashes)
 pub const HOOK_STATE_BUCKET: &str = "hookState";
+/// Database bucket name for config metadata (tracks rendered config and template hash)
+pub const CONFIG_METADATA_BUCKET: &str = "configMetadata";
 
 /// Trait for persistent state storage
 pub trait PersistentState: Send + Sync {
@@ -616,8 +618,8 @@ impl RedbPersistentState {
     /// # Panics
     ///
     /// Panics if called with an unknown bucket name. This is a programming error
-    /// that should be caught during development. Only `ENTRY_STATE_BUCKET` and
-    /// `HOOK_STATE_BUCKET` are valid bucket names.
+    /// that should be caught during development. Only `ENTRY_STATE_BUCKET`,
+    /// `HOOK_STATE_BUCKET`, and `CONFIG_METADATA_BUCKET` are valid bucket names.
     #[inline]
     fn table_def_with_storage(
         bucket: &str,
@@ -625,9 +627,10 @@ impl RedbPersistentState {
         match bucket {
             ENTRY_STATE_BUCKET => TableDefinition::new(ENTRY_STATE_BUCKET),
             HOOK_STATE_BUCKET => TableDefinition::new(HOOK_STATE_BUCKET),
+            CONFIG_METADATA_BUCKET => TableDefinition::new(CONFIG_METADATA_BUCKET),
             _ => panic!(
-                "Unknown bucket name: '{bucket}'. Only ENTRY_STATE_BUCKET and \
-                 HOOK_STATE_BUCKET are valid. This is a programming error."
+                "Unknown bucket name: '{bucket}'. Only ENTRY_STATE_BUCKET, \
+                 HOOK_STATE_BUCKET, and CONFIG_METADATA_BUCKET are valid. This is a programming error."
             ),
         }
     }
@@ -822,6 +825,56 @@ impl ScriptState {
         bincode::decode_from_slice(bytes, bincode::config::standard())
             .ok()
             .map(|(state, _len)| state)
+    }
+}
+
+/// Config metadata - tracks rendered configuration state
+///
+/// Stores the rendered configuration file content along with a hash of the template source.
+/// This enables caching: if the template hasn't changed, we can use the cached rendered config.
+#[derive(Debug, Clone, PartialEq, Eq, bincode::Encode, bincode::Decode)]
+pub struct ConfigMetadata {
+    /// SHA256 hash of the config template source file
+    /// Used to detect changes in .guisu.toml.j2
+    pub template_hash: Vec<u8>,
+    /// Rendered TOML configuration string
+    /// Result of processing the template with full context
+    pub rendered_config: String,
+}
+
+impl ConfigMetadata {
+    /// Create new config metadata from template source and rendered output
+    #[must_use]
+    pub fn new(template_source: &str, rendered_config: String) -> Self {
+        Self {
+            template_hash: hash_data(template_source.as_bytes()),
+            rendered_config,
+        }
+    }
+
+    /// Serialize to bytes using bincode
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization fails (e.g., encoding error)
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::encode_to_vec(self, bincode::config::standard())
+            .map_err(|e| Error::State(format!("Failed to serialize ConfigMetadata: {e}")))
+    }
+
+    /// Deserialize from bytes using bincode
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        bincode::decode_from_slice(bytes, bincode::config::standard())
+            .ok()
+            .map(|(metadata, _len)| metadata)
+    }
+
+    /// Check if template source matches stored hash (for cache validation)
+    #[must_use]
+    pub fn template_matches(&self, template_source: &str) -> bool {
+        let current_hash = hash_data(template_source.as_bytes());
+        bool::from(self.template_hash.ct_eq(&current_hash))
     }
 }
 

@@ -12,7 +12,7 @@ pub mod logging;
 pub mod stats;
 pub mod ui;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use owo_colors::OwoColorize;
 use std::path::{Path, PathBuf};
@@ -314,7 +314,7 @@ pub enum HooksCommands {
 fn load_base_config() -> guisu_config::Config {
     if let Some(source_dir) = guisu_config::default_source_dir()
         && source_dir.exists()
-        && let Ok(config) = load_config_with_template_support(None, &source_dir)
+        && let Ok(config) = load_config_with_template_support(None, &source_dir, None)
     {
         config
     } else {
@@ -378,8 +378,8 @@ fn handle_init_command(
     // Apply if requested
     if apply && let Some(source_path) = init_result {
         println!("\nApplying changes...");
-        // Now load config after source directory is created
-        let config = load_config_with_template_support(config_path, &source_path)?;
+        // Now load config after source directory is created (no caching needed for init)
+        let config = load_config_with_template_support(config_path, &source_path, None)?;
 
         // Create ApplyCommand with default options (all files)
         let apply_cmd = cmd::apply::ApplyCommand {
@@ -586,11 +586,24 @@ pub fn run(cli: Cli) -> Result<()> {
         );
     }
 
-    // For all other commands, load config now
-    let config = load_config_with_template_support(cli.config.as_deref(), &source_dir)?;
+    // For all other commands, create database first to enable config caching
+    let db_path = guisu_engine::database::get_db_path().context("Failed to get database path")?;
+    let database = std::sync::Arc::new(
+        guisu_engine::state::RedbPersistentState::new(&db_path)
+            .context("Failed to create database instance")?,
+    );
 
-    // Create RuntimeContext for commands
-    let context = RuntimeContext::new(config, &source_dir, &dest_dir)?;
+    // Load config with database caching enabled
+    let config =
+        load_config_with_template_support(cli.config.as_deref(), &source_dir, Some(&database))?;
+
+    // Create RuntimeContext for commands (reuses the database instance)
+    let paths = crate::common::ResolvedPaths::resolve(&source_dir, &dest_dir, &config)?;
+    let context = crate::common::RuntimeContext::from_parts_with_db(
+        std::sync::Arc::new(config),
+        paths,
+        database,
+    );
 
     // Execute the command
     execute_command(cli.command, &context)
@@ -689,16 +702,26 @@ fn resolve_absolute_path(path: &std::path::Path) -> Result<guisu_core::path::Abs
     }
 }
 
-/// Load configuration with support for template files (.guisu.toml.j2)
+/// Load configuration with template support and optional database caching
 ///
-/// This helper function handles loading configuration from either .guisu.toml
-/// or .guisu.toml.j2 (template) files. If a template file is found, it will
-/// be rendered using system variables before parsing.
+/// Handles both static `.guisu.toml` and templated `.guisu.toml.j2` configurations.
+///
+/// For `.guisu.toml.j2` templates:
+/// - If database is provided, checks cache first using template hash
+/// - Cache hit: Uses cached rendered config (avoids re-rendering)
+/// - Cache miss: Renders template with minimal context and caches result
+/// - Template rendering uses only system variables to avoid circular dependency
+///
+/// This database-backed caching solves the circular dependency problem:
+/// - First load: Renders with minimal context, caches result
+/// - Subsequent loads: Uses cached config (fast path)
+/// - Cache invalidation: Automatic when template content changes (SHA256 hash)
 ///
 /// # Arguments
 ///
 /// * `_config_path` - Optional path to config file (currently unused)
 /// * `source_dir` - The source directory containing .guisu.toml or .guisu.toml.j2
+/// * `database` - Optional database for caching rendered config
 ///
 /// # Returns
 ///
@@ -706,6 +729,7 @@ fn resolve_absolute_path(path: &std::path::Path) -> Result<guisu_core::path::Abs
 pub(crate) fn load_config_with_template_support(
     _config_path: Option<&std::path::Path>,
     source_dir: &std::path::Path,
+    database: Option<&std::sync::Arc<guisu_engine::state::RedbPersistentState>>,
 ) -> Result<guisu_config::Config> {
     use std::fs;
 
@@ -718,28 +742,33 @@ pub(crate) fn load_config_with_template_support(
             .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"));
     }
 
-    // If .guisu.toml.j2 exists, render it first
+    // If .guisu.toml.j2 exists, render it (with optional database caching)
     if template_path.exists() {
         let template_content = fs::read_to_string(&template_path)?;
 
-        // Create a minimal template engine for rendering config template
-        // Use system variables only (no user variables since we haven't loaded config yet)
-        let engine = guisu_template::TemplateEngine::new();
-
-        // Create context with only system info
-        let working_tree = guisu_engine::git::find_working_tree(source_dir)
-            .unwrap_or_else(|| source_dir.to_path_buf());
-        let context = guisu_template::TemplateContext::new().with_guisu_info(
-            path_to_string(source_dir),
-            path_to_string(&working_tree),
-            path_to_string(&dirs::home_dir().unwrap_or_default()),
-            "home".to_string(),
-        );
-
-        // Render the template
-        let rendered_toml = engine
-            .render_str(&template_content, &context)
-            .map_err(|e| anyhow::anyhow!("Failed to render .guisu.toml.j2 template: {e}"))?;
+        // Try to use cached config if database is available
+        let rendered_toml = if let Some(db) = database {
+            match guisu_engine::database::get_config_metadata(db) {
+                Ok(Some(metadata)) if metadata.template_matches(&template_content) => {
+                    // Cache hit - use cached rendered config
+                    metadata.rendered_config
+                }
+                _ => {
+                    // Cache miss or invalid - render and cache
+                    let rendered = render_config_template(source_dir, &template_content)?;
+                    // Save to cache (ignore errors - caching is optional)
+                    let _ = guisu_engine::database::save_config_metadata(
+                        db,
+                        &template_content,
+                        rendered.clone(),
+                    );
+                    rendered
+                }
+            }
+        } else {
+            // No database - render without caching
+            render_config_template(source_dir, &template_content)?
+        };
 
         // Parse the rendered TOML
         let mut config = guisu_config::Config::from_toml_str(&rendered_toml, source_dir)
@@ -782,6 +811,42 @@ pub(crate) fn load_config_with_template_support(
          EOF",
         source_dir.display()
     ))
+}
+
+/// Render config template with minimal context (system variables only)
+///
+/// Uses a minimal template engine to avoid circular dependency:
+/// - No user variables (config not loaded yet)
+/// - No password manager integration (requires identities from config)
+/// - Only system info (OS, hostname, etc.)
+///
+/// # Arguments
+///
+/// * `source_dir` - The source directory
+/// * `template_content` - The template file content to render
+///
+/// # Returns
+///
+/// Rendered TOML configuration string
+fn render_config_template(source_dir: &std::path::Path, template_content: &str) -> Result<String> {
+    // Create a minimal template engine for rendering config template
+    // Use system variables only (no user variables since we haven't loaded config yet)
+    let engine = guisu_template::TemplateEngine::new();
+
+    // Create context with only system info
+    let working_tree = guisu_engine::git::find_working_tree(source_dir)
+        .unwrap_or_else(|| source_dir.to_path_buf());
+    let context = guisu_template::TemplateContext::new().with_guisu_info(
+        path_to_string(source_dir),
+        path_to_string(&working_tree),
+        path_to_string(&dirs::home_dir().unwrap_or_default()),
+        "home".to_string(),
+    );
+
+    // Render the template
+    engine
+        .render_str(template_content, &context)
+        .map_err(|e| anyhow::anyhow!("Failed to render .guisu.toml.j2 template: {e}"))
 }
 
 /// Create a template engine with common configuration (crate-internal use only)
