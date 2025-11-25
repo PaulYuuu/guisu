@@ -452,15 +452,18 @@ pub fn decrypt_file_content(content: &str, identities: &[Identity]) -> Result<St
         let mut matched_str = mat.as_str();
         let mut next_pos = mat.end();
 
-        if matched_str.ends_with("age") && content[mat.end()..].starts_with(':') {
-            matched_str = &matched_str[..matched_str.len() - 3];
-            next_pos = mat.end() - 3;
-        } else if matched_str.ends_with("ag") && content[mat.end()..].starts_with("e:") {
-            matched_str = &matched_str[..matched_str.len() - 2];
-            next_pos = mat.end() - 2;
-        } else if matched_str.ends_with('a') && content[mat.end()..].starts_with("ge:") {
-            matched_str = &matched_str[..matched_str.len() - 1];
-            next_pos = mat.end() - 1;
+        // Bounds check before accessing content[mat.end()..]
+        if mat.end() < content.len() {
+            if matched_str.ends_with("age") && content[mat.end()..].starts_with(':') {
+                matched_str = &matched_str[..matched_str.len() - 3];
+                next_pos = mat.end() - 3;
+            } else if matched_str.ends_with("ag") && content[mat.end()..].starts_with("e:") {
+                matched_str = &matched_str[..matched_str.len() - 2];
+                next_pos = mat.end() - 2;
+            } else if matched_str.ends_with('a') && content[mat.end()..].starts_with("ge:") {
+                matched_str = &matched_str[..matched_str.len() - 1];
+                next_pos = mat.end() - 1;
+            }
         }
 
         match decrypt_inline(matched_str, identities) {
@@ -561,15 +564,18 @@ pub fn encrypt_file_content(
         let mut matched_str = mat.as_str();
         let mut next_pos = mat.end();
 
-        if matched_str.ends_with("age") && content[mat.end()..].starts_with(':') {
-            matched_str = &matched_str[..matched_str.len() - 3];
-            next_pos = mat.end() - 3;
-        } else if matched_str.ends_with("ag") && content[mat.end()..].starts_with("e:") {
-            matched_str = &matched_str[..matched_str.len() - 2];
-            next_pos = mat.end() - 2;
-        } else if matched_str.ends_with('a') && content[mat.end()..].starts_with("ge:") {
-            matched_str = &matched_str[..matched_str.len() - 1];
-            next_pos = mat.end() - 1;
+        // Bounds check before accessing content[mat.end()..]
+        if mat.end() < content.len() {
+            if matched_str.ends_with("age") && content[mat.end()..].starts_with(':') {
+                matched_str = &matched_str[..matched_str.len() - 3];
+                next_pos = mat.end() - 3;
+            } else if matched_str.ends_with("ag") && content[mat.end()..].starts_with("e:") {
+                matched_str = &matched_str[..matched_str.len() - 2];
+                next_pos = mat.end() - 2;
+            } else if matched_str.ends_with('a') && content[mat.end()..].starts_with("ge:") {
+                matched_str = &matched_str[..matched_str.len() - 1];
+                next_pos = mat.end() - 1;
+            }
         }
 
         match decrypt_inline(matched_str, old_identities) {
