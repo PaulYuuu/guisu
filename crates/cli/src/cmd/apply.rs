@@ -275,16 +275,17 @@ fn handle_dry_run_entry(
     identities: &[guisu_crypto::Identity],
     stats: &ApplyStats,
     show_icons: bool,
-) -> bool {
-    if !needs_update(entry, dest_path, identities) {
+    fail_on_decrypt_error: bool,
+) -> Result<bool> {
+    if !needs_update(entry, dest_path, identities, fail_on_decrypt_error)? {
         debug!(path = %entry.path(), "File is already up to date, skipping");
-        return false;
+        return Ok(false);
     }
 
     debug!(path = %entry.path(), "Would apply entry");
     print_dry_run_entry(entry, show_icons);
     stats.record_dry_run(entry);
-    true
+    Ok(true)
 }
 
 /// Handle interactive conflict resolution
@@ -294,6 +295,7 @@ fn handle_interactive_conflict(
     dest_path: &AbsPath,
     identities: &[guisu_crypto::Identity],
     handler: &mut ConflictHandler,
+    fail_on_decrypt_error: bool,
 ) -> Result<bool> {
     let last_written_hash = get_last_written_hash(entry);
     let change_type = ConflictHandler::detect_change_type(
@@ -318,7 +320,7 @@ fn handle_interactive_conflict(
             _ => unreachable!("Unexpected action returned from prompt_action"),
         }
     } else {
-        Ok(needs_update(entry, dest_path, identities))
+        needs_update(entry, dest_path, identities, fail_on_decrypt_error)
     }
 }
 
@@ -328,8 +330,9 @@ fn handle_non_interactive_conflict(
     dest_abs: &AbsPath,
     dest_path: &AbsPath,
     identities: &[guisu_crypto::Identity],
+    fail_on_decrypt_error: bool,
 ) -> Result<bool> {
-    if !needs_update(entry, dest_path, identities) {
+    if !needs_update(entry, dest_path, identities, fail_on_decrypt_error)? {
         return Ok(false);
     }
 
@@ -382,8 +385,9 @@ fn apply_entry_with_error_handling(
     identities: &[guisu_crypto::Identity],
     stats: &ApplyStats,
     show_icons: bool,
+    fail_on_decrypt_error: bool,
 ) {
-    match apply_target_entry(entry, dest_path, identities) {
+    match apply_target_entry(entry, dest_path, identities, fail_on_decrypt_error) {
         Ok(()) => {
             debug!(path = %entry.path(), "Applied entry successfully");
             match save_entry_state_to_db(entry) {
@@ -416,21 +420,49 @@ fn process_entries_sequential(
     stats: &ApplyStats,
     show_icons: bool,
     dry_run: bool,
+    fail_on_decrypt_error: bool,
 ) -> Result<()> {
     for entry in entries {
         let dest_path = dest_abs.join(entry.path());
 
         if dry_run {
-            handle_dry_run_entry(entry, &dest_path, identities, stats, show_icons);
+            handle_dry_run_entry(
+                entry,
+                &dest_path,
+                identities,
+                stats,
+                show_icons,
+                fail_on_decrypt_error,
+            )?;
         } else {
             let should_apply = if let Some(handler) = conflict_handler {
-                handle_interactive_conflict(entry, dest_abs, &dest_path, identities, handler)?
+                handle_interactive_conflict(
+                    entry,
+                    dest_abs,
+                    &dest_path,
+                    identities,
+                    handler,
+                    fail_on_decrypt_error,
+                )?
             } else {
-                handle_non_interactive_conflict(entry, dest_abs, &dest_path, identities)?
+                handle_non_interactive_conflict(
+                    entry,
+                    dest_abs,
+                    &dest_path,
+                    identities,
+                    fail_on_decrypt_error,
+                )?
             };
 
             if should_apply {
-                apply_entry_with_error_handling(entry, &dest_path, identities, stats, show_icons);
+                apply_entry_with_error_handling(
+                    entry,
+                    &dest_path,
+                    identities,
+                    stats,
+                    show_icons,
+                    fail_on_decrypt_error,
+                );
             }
         }
     }
@@ -444,6 +476,7 @@ fn process_entries_parallel(
     identities: &[guisu_crypto::Identity],
     stats: &ApplyStats,
     show_icons: bool,
+    fail_on_decrypt_error: bool,
 ) -> Result<()> {
     use dialoguer::{Confirm, theme::ColorfulTheme};
     use std::collections::HashSet;
@@ -455,7 +488,7 @@ fn process_entries_parallel(
     for entry in entries {
         let dest_path = dest_abs.join(entry.path());
 
-        if !needs_update(entry, &dest_path, identities) {
+        if !needs_update(entry, &dest_path, identities, fail_on_decrypt_error)? {
             continue;
         }
 
@@ -518,12 +551,12 @@ fn process_entries_parallel(
         .map(|entry| {
             let dest_path = dest_abs.join(entry.path());
 
-            if !needs_update(entry, &dest_path, identities) {
+            if !needs_update(entry, &dest_path, identities, fail_on_decrypt_error)? {
                 debug!(path = %entry.path(), "File is already up to date, skipping");
                 return Ok(());
             }
 
-            match apply_target_entry(entry, &dest_path, identities) {
+            match apply_target_entry(entry, &dest_path, identities, fail_on_decrypt_error) {
                 Ok(()) => {
                     debug!(path = %entry.path(), "Applied entry successfully");
                     match save_entry_state_to_db(entry) {
@@ -560,6 +593,7 @@ fn process_entries_parallel(
 
 impl Command for ApplyCommand {
     type Output = ApplyStats;
+    #[allow(clippy::too_many_lines)]
     fn execute(&self, context: &RuntimeContext) -> crate::error::Result<ApplyStats> {
         // Parse entry type filters
         let include_types: Result<Vec<EntryType>> =
@@ -588,6 +622,9 @@ impl Command for ApplyCommand {
         // Detect if output is to a terminal for icon auto mode
         let is_tty = std::io::stdout().is_terminal();
         let show_icons = config.ui.icons.should_show_icons(is_tty);
+
+        // Get decryption failure handling configuration
+        let fail_on_decrypt_error = config.age.fail_on_decrypt_error;
 
         // Load variables and create processor
         let all_variables = load_all_variables(source_dir, config)?;
@@ -682,9 +719,17 @@ impl Command for ApplyCommand {
                 &stats,
                 show_icons,
                 self.dry_run,
+                fail_on_decrypt_error,
             )?;
         } else {
-            process_entries_parallel(&entries_to_apply, dest_abs, &identities, &stats, show_icons)?;
+            process_entries_parallel(
+                &entries_to_apply,
+                dest_abs,
+                &identities,
+                &stats,
+                show_icons,
+                fail_on_decrypt_error,
+            )?;
         }
 
         // Return stats instead of printing here
@@ -739,26 +784,28 @@ fn needs_update(
     entry: &TargetEntry,
     dest_path: &AbsPath,
     identities: &[guisu_crypto::Identity],
-) -> bool {
+    fail_on_decrypt_error: bool,
+) -> Result<bool> {
     match entry {
         TargetEntry::File { content, mode, .. } => {
             // If file doesn't exist, it needs to be created
             if !dest_path.as_path().exists() {
-                return true;
+                return Ok(true);
             }
 
             // Decrypt inline age values in target content before comparing
             // This matches the behavior in detect_change_type and apply_target_entry
-            let target_content_decrypted = decrypt_inline_age_values(content, identities);
+            let target_content_decrypted =
+                decrypt_inline_age_values(content, identities, fail_on_decrypt_error)?;
 
             // Check if content differs
             if let Ok(existing_content) = fs::read(dest_path.as_path()) {
                 if existing_content != target_content_decrypted {
-                    return true;
+                    return Ok(true);
                 }
             } else {
                 // Can't read file, assume it needs update
-                return true;
+                return Ok(true);
             }
 
             // Check if permissions differ (Unix only)
@@ -770,23 +817,23 @@ fn needs_update(
                 {
                     let current_mode = metadata.permissions().mode() & 0o777;
                     if current_mode != *target_mode {
-                        return true;
+                        return Ok(true);
                     }
                 }
             }
 
             // Content and permissions match, no update needed
-            false
+            Ok(false)
         }
         TargetEntry::Directory { mode, .. } => {
             // If directory doesn't exist, it needs to be created
             if !dest_path.as_path().exists() {
-                return true;
+                return Ok(true);
             }
 
             // Check if it's actually a directory
             if !dest_path.as_path().is_dir() {
-                return true;
+                return Ok(true);
             }
 
             // Check if permissions differ (Unix only)
@@ -798,41 +845,41 @@ fn needs_update(
                 {
                     let current_mode = metadata.permissions().mode() & 0o777;
                     if current_mode != *target_mode {
-                        return true;
+                        return Ok(true);
                     }
                 }
             }
 
             // Directory exists with correct permissions
-            false
+            Ok(false)
         }
         TargetEntry::Symlink { target, .. } => {
             // If symlink doesn't exist, it needs to be created
             if !dest_path.as_path().exists() {
-                return true;
+                return Ok(true);
             }
 
             // Check if it's actually a symlink
             if !dest_path.as_path().is_symlink() {
-                return true;
+                return Ok(true);
             }
 
             // Check if symlink target differs
             if let Ok(existing_target) = fs::read_link(dest_path.as_path()) {
                 if existing_target != target.as_path() {
-                    return true;
+                    return Ok(true);
                 }
             } else {
                 // Can't read symlink, assume it needs update
-                return true;
+                return Ok(true);
             }
 
             // Symlink exists with correct target
-            false
+            Ok(false)
         }
         TargetEntry::Remove { .. } => {
             // Always needs update if file exists
-            dest_path.as_path().exists()
+            Ok(dest_path.as_path().exists())
         }
     }
 }
@@ -842,6 +889,7 @@ fn apply_target_entry(
     entry: &TargetEntry,
     dest_path: &AbsPath,
     identities: &[guisu_crypto::Identity],
+    fail_on_decrypt_error: bool,
 ) -> Result<()> {
     match entry {
         TargetEntry::File { content, mode, .. } => {
@@ -866,7 +914,8 @@ fn apply_target_entry(
             // Decrypt inline age values before writing to destination
             // This allows source files to contain age:... encrypted values
             // but destination files get plaintext (for applications to use)
-            let final_content = decrypt_inline_age_values(content, identities);
+            let final_content =
+                decrypt_inline_age_values(content, identities, fail_on_decrypt_error)?;
 
             // Write file with atomic permission setting to avoid TOCTOU race condition
             #[cfg(unix)]
@@ -1202,43 +1251,59 @@ fn detect_config_drift(entries: &[&TargetEntry], dest_abs: &AbsPath) -> Vec<Stri
 /// - Source: password: age:YWdlLWVuY3J5cHRpb24...
 /// - Destination: password: my-secret-password
 ///
-/// If decryption fails or no identities are available, returns the original content unchanged.
-fn decrypt_inline_age_values(content: &[u8], identities: &[guisu_crypto::Identity]) -> Vec<u8> {
+/// # Behavior
+///
+/// - If `fail_on_decrypt_error` is true (default), decryption failures cause an error
+/// - If `fail_on_decrypt_error` is false, decryption failures log a warning and return original content
+/// - If no identities are available, returns the original content (not an error)
+/// - If content is binary (non-UTF-8), returns the original content (not an error)
+/// - If no age: patterns are found, returns the original content (not an error)
+fn decrypt_inline_age_values(
+    content: &[u8],
+    identities: &[guisu_crypto::Identity],
+    fail_on_decrypt_error: bool,
+) -> Result<Vec<u8>> {
     // Convert to string (if not valid UTF-8, return original)
     let Ok(content_str) = String::from_utf8(content.to_vec()) else {
-        return content.to_vec(); // Binary file, return as-is
+        return Ok(content.to_vec()); // Binary file, return as-is
     };
 
     // Check if content contains age: prefix (quick check before decrypting)
     if !content_str.contains("age:") {
-        return content.to_vec(); // No encrypted values, return as-is
+        return Ok(content.to_vec()); // No encrypted values, return as-is
     }
 
     // If no identities available, return original content
     if identities.is_empty() {
-        return content.to_vec();
+        return Ok(content.to_vec());
     }
 
     // Decrypt all inline age values
     match guisu_crypto::decrypt_file_content(&content_str, identities) {
-        Ok(decrypted) => decrypted.into_bytes(),
+        Ok(decrypted) => Ok(decrypted.into_bytes()),
         Err(e) => {
-            // Log the error with context
-            warn!(
-                "Failed to decrypt inline age values in file. \
-                 Content will be written with encrypted age: values intact. \
-                 Applications may not be able to use these values. \
-                 Error: {}",
-                e
-            );
+            if fail_on_decrypt_error {
+                // Fail loudly for security (matches chezmoi behavior)
+                Err(anyhow::anyhow!(
+                    "Failed to decrypt inline age values in file. \
+                     This usually means the wrong identity was used or the encrypted value is corrupted. \
+                     Error: {e}"
+                ))
+            } else {
+                // Log the error with context
+                warn!(
+                    "Failed to decrypt inline age values in file. \
+                     Content will be written with encrypted age: values intact. \
+                     Applications may not be able to use these values. \
+                     Error: {}",
+                    e
+                );
 
-            // Return original content with encrypted values
-            // This allows the file to be applied, but the application
-            // will see "age:..." strings instead of plaintext
-            //
-            // NOTE: Future enhancement - add config option to fail loudly
-            // See CLAUDE.md: "Encryption Failure Handling Configuration"
-            content.to_vec()
+                // Return original content with encrypted values
+                // This allows the file to be applied, but the application
+                // will see "age:..." strings instead of plaintext
+                Ok(content.to_vec())
+            }
         }
     }
 }
@@ -1352,7 +1417,7 @@ mod tests {
         let content = b"password: my-secret";
         let identities = vec![];
 
-        let result = decrypt_inline_age_values(content, &identities);
+        let result = decrypt_inline_age_values(content, &identities, true).unwrap();
         assert_eq!(result, content);
     }
 
@@ -1361,7 +1426,7 @@ mod tests {
         let content = b"password: age:encrypted-value";
         let identities = vec![];
 
-        let result = decrypt_inline_age_values(content, &identities);
+        let result = decrypt_inline_age_values(content, &identities, true).unwrap();
         // Should return original content when no identities
         assert_eq!(result, content);
     }
@@ -1372,7 +1437,7 @@ mod tests {
         let content = b"\xFF\xFE\xFD\xFC";
         let identities = vec![guisu_crypto::Identity::generate()];
 
-        let result = decrypt_inline_age_values(content, &identities);
+        let result = decrypt_inline_age_values(content, &identities, true).unwrap();
         // Should return original binary content as-is
         assert_eq!(result, content);
     }
@@ -1382,7 +1447,7 @@ mod tests {
         let content = b"";
         let identities = vec![];
 
-        let result = decrypt_inline_age_values(content, &identities);
+        let result = decrypt_inline_age_values(content, &identities, true).unwrap();
         assert_eq!(result, b"");
     }
 
@@ -1391,7 +1456,7 @@ mod tests {
         let content = b"username: john\npassword: plain-text";
         let identities = vec![guisu_crypto::Identity::generate()];
 
-        let result = decrypt_inline_age_values(content, &identities);
+        let result = decrypt_inline_age_values(content, &identities, true).unwrap();
         // Should return original content when no age: prefix found
         assert_eq!(result, content);
     }

@@ -870,7 +870,10 @@ mod tests {
         assert_eq!(identities.len(), 1);
 
         // Verify we can encrypt and decrypt with it
-        let recipient = identities[0].to_public();
+        let recipient = identities
+            .first()
+            .expect("identity vec should have one element")
+            .to_public();
         let plaintext = b"test message";
 
         let encrypted = guisu_crypto::encrypt(plaintext, &[recipient]).expect("Encryption failed");

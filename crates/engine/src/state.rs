@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::{LazyLock, RwLock};
+use std::sync::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 use walkdir::WalkDir;
@@ -430,10 +430,6 @@ impl Metadata {
     /// # Errors
     ///
     /// Returns an error if the state file cannot be read or parsed (e.g., file not found, permission denied, invalid TOML syntax)
-    ///
-    /// # Panics
-    ///
-    /// Panics if the canonicalized path cannot be converted to an absolute path (should never happen for valid canonicalized paths)
     pub fn load(source_dir: &Path) -> Result<Self> {
         let metadata_path = source_dir.join(".guisu/state.toml");
 
@@ -446,13 +442,12 @@ impl Metadata {
             fs::canonicalize(&metadata_path).unwrap_or_else(|_| metadata_path.clone());
 
         let content = fs::read_to_string(&metadata_path).map_err(|e| {
-            // Safe to unwrap since we canonicalized it above
-            let abs_path = guisu_core::path::AbsPath::new(abs_metadata_path.clone())
-                .expect("canonicalized path should be absolute");
-            Error::FileRead {
-                path: abs_path.as_path().to_path_buf(),
-                source: e,
-            }
+            // Try to convert to AbsPath for error message, but fall back to PathBuf if it fails
+            let path = guisu_core::path::AbsPath::new(abs_metadata_path.clone()).map_or_else(
+                |_| abs_metadata_path.clone(),
+                |abs| abs.as_path().to_path_buf(),
+            );
+            Error::FileRead { path, source: e }
         })?;
 
         toml::from_str(&content).map_err(|e| Error::InvalidConfig {
@@ -465,10 +460,6 @@ impl Metadata {
     /// # Errors
     ///
     /// Returns an error if the state file cannot be written (e.g., permission denied, disk full, serialization error)
-    ///
-    /// # Panics
-    ///
-    /// Panics if the canonicalized path cannot be converted to an absolute path (should never happen for valid canonicalized paths)
     pub fn save(&self, source_dir: &Path) -> Result<()> {
         let guisu_dir = source_dir.join(".guisu");
 
@@ -479,12 +470,10 @@ impl Metadata {
         // Create .guisu directory if it doesn't exist
         if !guisu_dir.exists() {
             fs::create_dir_all(&guisu_dir).map_err(|e| {
-                let abs_path = guisu_core::path::AbsPath::new(abs_guisu_dir.clone())
-                    .expect("canonicalized path should be absolute");
-                Error::DirectoryCreate {
-                    path: abs_path.as_path().to_path_buf(),
-                    source: e,
-                }
+                // Try to convert to AbsPath for error message, but fall back to PathBuf if it fails
+                let path = guisu_core::path::AbsPath::new(abs_guisu_dir.clone())
+                    .map_or_else(|_| abs_guisu_dir.clone(), |abs| abs.as_path().to_path_buf());
+                Error::DirectoryCreate { path, source: e }
             })?;
         }
 
@@ -496,12 +485,12 @@ impl Metadata {
         })?;
 
         fs::write(&metadata_path, content).map_err(|e| {
-            let abs_path = guisu_core::path::AbsPath::new(abs_metadata_path.clone())
-                .expect("canonicalized path should be absolute");
-            Error::FileWrite {
-                path: abs_path.as_path().to_path_buf(),
-                source: e,
-            }
+            // Try to convert to AbsPath for error message, but fall back to PathBuf if it fails
+            let path = guisu_core::path::AbsPath::new(abs_metadata_path.clone()).map_or_else(
+                |_| abs_metadata_path.clone(),
+                |abs| abs.as_path().to_path_buf(),
+            );
+            Error::FileWrite { path, source: e }
         })?;
 
         Ok(())
@@ -526,12 +515,6 @@ impl Metadata {
 
 /// Database bucket name for entry state (tracks file content hashes and modes)
 pub const ENTRY_STATE_BUCKET: &str = "entryState";
-/// Database bucket name for script state (tracks script execution hashes)
-pub const SCRIPT_STATE_BUCKET: &str = "scriptState";
-/// Database bucket name for config state
-pub const CONFIG_STATE_BUCKET: &str = "configState";
-/// Database bucket name for package state
-pub const PACKAGE_STATE_BUCKET: &str = "packageState";
 /// Database bucket name for hook state (tracks hook execution and hashes)
 pub const HOOK_STATE_BUCKET: &str = "hookState";
 
@@ -605,13 +588,6 @@ const _: () = {
     let _ = assert_sync::<RedbPersistentState>;
 };
 
-/// Cache for dynamic bucket names to prevent memory leaks
-///
-/// This cache ensures that each unique bucket name is only leaked once,
-/// rather than on every call to `table_def_with_storage`.
-static BUCKET_CACHE: LazyLock<RwLock<HashMap<String, &'static str>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-
 impl RedbPersistentState {
     /// Create or open a persistent state database
     ///
@@ -635,48 +611,24 @@ impl RedbPersistentState {
         Ok(Self { db })
     }
 
-    /// Create table definition, avoiding String allocation for known buckets
+    /// Create table definition for known bucket names
     ///
-    /// For known buckets, uses static strings. For unknown buckets, caches
-    /// leaked strings to prevent repeated memory leaks.
+    /// # Panics
+    ///
+    /// Panics if called with an unknown bucket name. This is a programming error
+    /// that should be caught during development. Only `ENTRY_STATE_BUCKET` and
+    /// `HOOK_STATE_BUCKET` are valid bucket names.
     #[inline]
     fn table_def_with_storage(
         bucket: &str,
     ) -> TableDefinition<'static, &'static [u8], &'static [u8]> {
-        // For known buckets, use static strings to avoid allocation
         match bucket {
             ENTRY_STATE_BUCKET => TableDefinition::new(ENTRY_STATE_BUCKET),
-            SCRIPT_STATE_BUCKET => TableDefinition::new(SCRIPT_STATE_BUCKET),
-            CONFIG_STATE_BUCKET => TableDefinition::new(CONFIG_STATE_BUCKET),
-            PACKAGE_STATE_BUCKET => TableDefinition::new(PACKAGE_STATE_BUCKET),
             HOOK_STATE_BUCKET => TableDefinition::new(HOOK_STATE_BUCKET),
-            // For unknown buckets, check cache first to avoid repeated leaks
-            _ => {
-                // Check cache with read lock first (fast path)
-                {
-                    let cache = BUCKET_CACHE
-                        .read()
-                        .expect("BUCKET_CACHE lock should not be poisoned");
-                    if let Some(&leaked) = cache.get(bucket) {
-                        return TableDefinition::new(leaked);
-                    }
-                }
-
-                // Not in cache, acquire write lock and leak it
-                let mut cache = BUCKET_CACHE
-                    .write()
-                    .expect("BUCKET_CACHE lock should not be poisoned");
-
-                // Double-check in case another thread added it while we waited
-                if let Some(&leaked) = cache.get(bucket) {
-                    return TableDefinition::new(leaked);
-                }
-
-                // Leak the string and cache it
-                let leaked: &'static str = Box::leak(bucket.to_string().into_boxed_str());
-                cache.insert(bucket.to_string(), leaked);
-                TableDefinition::new(leaked)
-            }
+            _ => panic!(
+                "Unknown bucket name: '{bucket}'. Only ENTRY_STATE_BUCKET and \
+                 HOOK_STATE_BUCKET are valid. This is a programming error."
+            ),
         }
     }
 }

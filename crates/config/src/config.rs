@@ -265,6 +265,25 @@ pub struct AgeConfig {
     /// ```
     #[serde(default, alias = "symmetric")]
     pub derive: bool,
+
+    /// Fail on decryption errors
+    ///
+    /// When true (default), decryption failures will cause the apply command to fail.
+    /// When false, decryption failures will log a warning and continue with encrypted content.
+    ///
+    /// Default: true (matches chezmoi behavior - fail loudly for security)
+    ///
+    /// ```toml
+    /// [age]
+    /// identity = "~/.config/guisu/key.txt"
+    /// fail_on_decrypt_error = true   # Default: fail on decrypt errors
+    /// # fail_on_decrypt_error = false # Warn and continue (insecure)
+    /// ```
+    #[serde(
+        default = "default_fail_on_decrypt_error",
+        rename = "failOnDecryptError"
+    )]
+    pub fail_on_decrypt_error: bool,
 }
 
 /// Guisu configuration
@@ -310,6 +329,10 @@ fn default_progress() -> bool {
 
 fn default_root_entry() -> PathBuf {
     PathBuf::from("home")
+}
+
+fn default_fail_on_decrypt_error() -> bool {
+    true // Default to failing loudly for security (matches chezmoi)
 }
 
 impl Config {
