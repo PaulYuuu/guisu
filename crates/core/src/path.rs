@@ -326,10 +326,13 @@ impl RelPath {
     }
 }
 
-/// A relative path in the source directory with encoded attributes
+/// A relative path in the source directory
 ///
-/// This type represents paths in the source directory where attributes are encoded
-/// in the filename (e.g., `dot_bashrc`, `private_dot_ssh/`).
+/// This type represents paths in the source directory. Attributes are encoded via:
+/// - File extensions (`.j2` for templates, `.age` for encryption)
+/// - Unix file permissions (for private/executable/readonly)
+///
+/// Unlike chezmoi, guisu does NOT use filename prefixes (no `dot_`, `private_`, etc.).
 ///
 /// # Examples
 ///
@@ -337,8 +340,8 @@ impl RelPath {
 /// use guisu_core::path::SourceRelPath;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let source = SourceRelPath::new("dot_config/nvim/init.lua".into())?;
-/// assert_eq!(source.as_path().to_str().unwrap(), "dot_config/nvim/init.lua");
+/// let source = SourceRelPath::new(".config/nvim/init.lua".into())?;
+/// assert_eq!(source.as_path().to_str().unwrap(), ".config/nvim/init.lua");
 /// # Ok(())
 /// # }
 /// ```
