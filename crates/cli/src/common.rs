@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use guisu_config::Config;
 use guisu_core::path::AbsPath;
 use guisu_engine::state::RedbPersistentState;
-use once_cell::sync::OnceCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -72,9 +71,9 @@ pub struct RuntimeContext {
     pub paths: ResolvedPaths,
     /// Database instance for persistent state
     pub database: Arc<RedbPersistentState>,
-    identities_cache: Arc<OnceCell<Arc<[guisu_crypto::Identity]>>>,
-    guisu_dir_cache: Arc<OnceCell<PathBuf>>,
-    templates_dir_cache: Arc<OnceCell<Option<PathBuf>>>,
+    identities_cache: Arc<std::sync::OnceLock<Arc<[guisu_crypto::Identity]>>>,
+    guisu_dir_cache: Arc<std::sync::OnceLock<PathBuf>>,
+    templates_dir_cache: Arc<std::sync::OnceLock<Option<PathBuf>>>,
 }
 
 impl RuntimeContext {
@@ -96,9 +95,9 @@ impl RuntimeContext {
             config: Arc::new(config),
             paths,
             database: Arc::new(database),
-            identities_cache: Arc::new(OnceCell::new()),
-            guisu_dir_cache: Arc::new(OnceCell::new()),
-            templates_dir_cache: Arc::new(OnceCell::new()),
+            identities_cache: Arc::new(std::sync::OnceLock::new()),
+            guisu_dir_cache: Arc::new(std::sync::OnceLock::new()),
+            templates_dir_cache: Arc::new(std::sync::OnceLock::new()),
         })
     }
 
@@ -119,9 +118,9 @@ impl RuntimeContext {
             config,
             paths,
             database: Arc::new(database),
-            identities_cache: Arc::new(OnceCell::new()),
-            guisu_dir_cache: Arc::new(OnceCell::new()),
-            templates_dir_cache: Arc::new(OnceCell::new()),
+            identities_cache: Arc::new(std::sync::OnceLock::new()),
+            guisu_dir_cache: Arc::new(std::sync::OnceLock::new()),
+            templates_dir_cache: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -139,9 +138,9 @@ impl RuntimeContext {
             config,
             paths,
             database,
-            identities_cache: Arc::new(OnceCell::new()),
-            guisu_dir_cache: Arc::new(OnceCell::new()),
-            templates_dir_cache: Arc::new(OnceCell::new()),
+            identities_cache: Arc::new(std::sync::OnceLock::new()),
+            guisu_dir_cache: Arc::new(std::sync::OnceLock::new()),
+            templates_dir_cache: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -179,15 +178,22 @@ impl RuntimeContext {
     ///
     /// Returns an error if loading age identities from configuration fails
     pub fn load_identities(&self) -> crate::error::Result<Arc<[guisu_crypto::Identity]>> {
-        self.identities_cache
-            .get_or_try_init(|| {
-                let identities = self
-                    .config
-                    .age_identities()
-                    .map_err(crate::error::CommandError::identity_load)?;
-                Ok(Arc::from(identities.into_boxed_slice()))
-            })
-            .map(Arc::clone)
+        // Check if already initialized
+        if let Some(identities) = self.identities_cache.get() {
+            return Ok(Arc::clone(identities));
+        }
+
+        // Initialize if not cached
+        let identities = self
+            .config
+            .age_identities()
+            .map_err(crate::error::CommandError::identity_load)?;
+        let arc_identities = Arc::from(identities.into_boxed_slice());
+
+        // Try to set the value (ignore if another thread already set it)
+        let _ = self.identities_cache.set(Arc::clone(&arc_identities));
+
+        Ok(arc_identities)
     }
 
     /// Get the primary identity or generate a dummy one
@@ -253,9 +259,9 @@ impl RuntimeContext {
             config: Arc::new(config),
             paths,
             database: Arc::new(database),
-            identities_cache: Arc::new(OnceCell::new()),
-            guisu_dir_cache: Arc::new(OnceCell::new()),
-            templates_dir_cache: Arc::new(OnceCell::new()),
+            identities_cache: Arc::new(std::sync::OnceLock::new()),
+            guisu_dir_cache: Arc::new(std::sync::OnceLock::new()),
+            templates_dir_cache: Arc::new(std::sync::OnceLock::new()),
         })
     }
 }

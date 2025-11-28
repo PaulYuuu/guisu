@@ -4,7 +4,6 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
-use once_cell::sync::Lazy;
 use owo_colors::OwoColorize;
 use std::env;
 use std::fs;
@@ -17,7 +16,7 @@ use crate::common::RuntimeContext;
 use guisu_config::Config;
 
 /// Cached regex for matching inline age encrypted values
-static AGE_VALUE_REGEX: Lazy<regex::Regex> = Lazy::new(|| {
+static AGE_VALUE_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     regex::Regex::new(r"age:[A-Za-z0-9+/]+=*")
         .expect("AGE_VALUE_REGEX compilation should never fail")
 });

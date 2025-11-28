@@ -36,7 +36,6 @@ indicatif.workspace = true
 libc.workspace = true
 lscolors = "0.21"
 miette.workspace = true
-once_cell.workspace = true
 os_info.workspace = true
 rayon.workspace = true
 nu-ansi-term = "0.50"

@@ -5,7 +5,6 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use guisu_core::path::AbsPath;
-use once_cell::sync::Lazy;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::warn;
@@ -626,64 +625,68 @@ fn encrypt_content(content: &[u8], config: &Config) -> Result<Vec<u8>> {
 }
 
 /// Cached secret detection regex patterns
-static SECRET_PATTERNS: Lazy<Vec<(regex::Regex, &'static str)>> = Lazy::new(|| {
-    vec![
-        (
-            regex::Regex::new(r#"(?i)(password|passwd|pwd)\s*[:=]\s*['"]?[^\s'"]{3,}"#)
+static SECRET_PATTERNS: std::sync::LazyLock<Vec<(regex::Regex, &'static str)>> =
+    std::sync::LazyLock::new(|| {
+        vec![
+            (
+                regex::Regex::new(r#"(?i)(password|passwd|pwd)\s*[:=]\s*['"]?[^\s'"]{3,}"#)
+                    .expect("Valid regex"),
+                "Password",
+            ),
+            (
+                regex::Regex::new(r#"(?i)(api[_-]?key|apikey)\s*[:=]\s*['"]?[^\s'"]{8,}"#)
+                    .expect("Valid regex"),
+                "API Key",
+            ),
+            (
+                regex::Regex::new(r#"(?i)(secret[_-]?key|secret)\s*[:=]\s*['"]?[^\s'"]{8,}"#)
+                    .expect("Valid regex"),
+                "Secret Key",
+            ),
+            (
+                regex::Regex::new(r#"(?i)(access[_-]?token|token)\s*[:=]\s*['"]?[^\s'"]{8,}"#)
+                    .expect("Valid regex"),
+                "Access Token",
+            ),
+            (
+                regex::Regex::new(r#"(?i)(auth[_-]?token|bearer)\s*[:=]\s*['"]?[^\s'"]{8,}"#)
+                    .expect("Valid regex"),
+                "Auth Token",
+            ),
+            (
+                regex::Regex::new(r#"(?i)(client[_-]?secret)\s*[:=]\s*['"]?[^\s'"]{8,}"#)
+                    .expect("Valid regex"),
+                "Client Secret",
+            ),
+            (
+                regex::Regex::new(r"(?i)(private[_-]?key)\s*[:=]").expect("Valid regex"),
+                "Private Key",
+            ),
+            (
+                regex::Regex::new(r"-----BEGIN (RSA |DSA |EC )?PRIVATE KEY-----")
+                    .expect("Valid regex"),
+                "PEM Private Key",
+            ),
+            (
+                regex::Regex::new(
+                    r#"(?i)(aws[_-]?access[_-]?key[_-]?id)\s*[:=]\s*['"]?[A-Z0-9]{20}"#,
+                )
                 .expect("Valid regex"),
-            "Password",
-        ),
-        (
-            regex::Regex::new(r#"(?i)(api[_-]?key|apikey)\s*[:=]\s*['"]?[^\s'"]{8,}"#)
+                "AWS Access Key",
+            ),
+            (
+                regex::Regex::new(
+                    r#"(?i)(aws[_-]?secret[_-]?access[_-]?key)\s*[:=]\s*['"]?[A-Za-z0-9/+=]{40}"#,
+                )
                 .expect("Valid regex"),
-            "API Key",
-        ),
-        (
-            regex::Regex::new(r#"(?i)(secret[_-]?key|secret)\s*[:=]\s*['"]?[^\s'"]{8,}"#)
-                .expect("Valid regex"),
-            "Secret Key",
-        ),
-        (
-            regex::Regex::new(r#"(?i)(access[_-]?token|token)\s*[:=]\s*['"]?[^\s'"]{8,}"#)
-                .expect("Valid regex"),
-            "Access Token",
-        ),
-        (
-            regex::Regex::new(r#"(?i)(auth[_-]?token|bearer)\s*[:=]\s*['"]?[^\s'"]{8,}"#)
-                .expect("Valid regex"),
-            "Auth Token",
-        ),
-        (
-            regex::Regex::new(r#"(?i)(client[_-]?secret)\s*[:=]\s*['"]?[^\s'"]{8,}"#)
-                .expect("Valid regex"),
-            "Client Secret",
-        ),
-        (
-            regex::Regex::new(r"(?i)(private[_-]?key)\s*[:=]").expect("Valid regex"),
-            "Private Key",
-        ),
-        (
-            regex::Regex::new(r"-----BEGIN (RSA |DSA |EC )?PRIVATE KEY-----").expect("Valid regex"),
-            "PEM Private Key",
-        ),
-        (
-            regex::Regex::new(r#"(?i)(aws[_-]?access[_-]?key[_-]?id)\s*[:=]\s*['"]?[A-Z0-9]{20}"#)
-                .expect("Valid regex"),
-            "AWS Access Key",
-        ),
-        (
-            regex::Regex::new(
-                r#"(?i)(aws[_-]?secret[_-]?access[_-]?key)\s*[:=]\s*['"]?[A-Za-z0-9/+=]{40}"#,
-            )
-            .expect("Valid regex"),
-            "AWS Secret Key",
-        ),
-    ]
-});
+                "AWS Secret Key",
+            ),
+        ]
+    });
 
 /// Cached high-entropy pattern for token detection
-static HIGH_ENTROPY_PATTERN: Lazy<regex::Regex> =
-    Lazy::new(|| regex::Regex::new(r"[A-Za-z0-9+/=]{32,}").expect("Valid regex"));
+static HIGH_ENTROPY_PATTERN: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"[A-Za-z0-9+/=]{32,}").expect("Valid regex"));
 
 /// Detect potential secrets in a file
 ///
