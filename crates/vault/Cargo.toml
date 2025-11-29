@@ -15,7 +15,6 @@ indexmap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["process"], optional = true }
 tracing.workspace = true
 
 [features]
@@ -24,8 +23,8 @@ default = ["bw", "bws", "rbw"]
 bw = []  # Bitwarden CLI (bw.rs)
 bws = [] # Bitwarden Secrets Manager (bws.rs)
 rbw = [] # Unofficial Bitwarden CLI (rbw.rs)
-# Future: Native SDK support
-bw-sdk = ["tokio"]
+# Future: Native SDK support (requires tokio runtime)
+# bw-sdk = ["tokio"]  # Disabled: not implemented yet
 # Future: 1Password support
 op = [] # 1Password CLI
 
