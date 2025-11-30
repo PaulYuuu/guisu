@@ -179,23 +179,38 @@ impl HookLoader {
             ))
         })?;
 
+        // Parse as raw TOML value to check if order field exists
+        let toml_value: toml::Value = toml::from_str(&content).map_err(|e| {
+            Error::HookConfig(format!(
+                "Failed to parse TOML from {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+
         // Try to parse as array of hooks first
         if let Ok(mut hooks) = toml::from_str::<Vec<Hook>>(&content) {
-            // Resolve script paths relative to hook file directory
-            for hook in &mut hooks {
-                // Use base_order if not explicitly set in TOML (order == default)
-                if hook.order == 100 {
-                    hook.order = base_order;
+            // Check if order was explicitly set in TOML
+            if let toml::Value::Array(arr) = &toml_value {
+                for (idx, hook) in hooks.iter_mut().enumerate() {
+                    if let Some(toml::Value::Table(table)) = arr.get(idx) {
+                        // Only use base_order if 'order' field is not present in TOML
+                        if !table.contains_key("order") {
+                            hook.order = base_order;
+                        }
+                    }
+                    self.resolve_script_path(hook, path)?;
                 }
-                self.resolve_script_path(hook, path)?;
             }
             return Ok(hooks);
         }
 
         // Try to parse as single hook
         if let Ok(mut hook) = toml::from_str::<Hook>(&content) {
-            // Use base_order if not explicitly set in TOML (order == default)
-            if hook.order == 100 {
+            // Only use base_order if 'order' field is not present in TOML
+            if let toml::Value::Table(table) = &toml_value
+                && !table.contains_key("order")
+            {
                 hook.order = base_order;
             }
             // Resolve script path relative to hook file directory
