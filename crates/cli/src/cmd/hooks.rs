@@ -556,48 +556,48 @@ pub fn handle_hooks_pre(
         })
         .collect();
 
-    if active_hooks.is_empty() {
-        return Ok(());
-    }
+    // Only run hooks if there are active ones, but always update state
+    if !active_hooks.is_empty() {
+        // Display hooks being run
+        for hook in &active_hooks {
+            println!(
+                "{} Running hook: {}",
+                StatusIcon::Hook.get(use_nerd_fonts),
+                hook.name.cyan()
+            );
+        }
 
-    // Display hooks being run
-    for hook in &active_hooks {
+        // Create template renderer
+        let renderer = create_template_engine(source_dir, config)?;
+
+        // Create hook runner with builder pattern and run pre hooks
+        // Pass persistent state to respect mode=once and mode=onchange
+        let runner = HookRunner::builder(&collections, source_dir)
+            .template_renderer(renderer)
+            .persistent_state(state.once_executed.clone(), state.onchange_hashes.clone())
+            .build();
+        runner.run_stage(HookStage::Pre)?;
+
+        // Get newly executed hooks and merge with state
+        for hook_name in runner.get_once_executed() {
+            state.mark_executed_once(hook_name);
+        }
+        for (hook_name, content_hash) in runner.get_onchange_hashes() {
+            state.update_onchange_hash(hook_name, content_hash);
+        }
+
         println!(
-            "{} Running hook: {}",
-            StatusIcon::Hook.get(use_nerd_fonts),
-            hook.name.cyan()
+            "{} {}",
+            StatusIcon::Success.get(use_nerd_fonts),
+            "Pre hooks completed!".green()
         );
     }
 
-    // Create template renderer
-    let renderer = create_template_engine(source_dir, config)?;
-
-    // Create hook runner with builder pattern and run pre hooks
-    // Pass persistent state to respect mode=once and mode=onchange
-    let runner = HookRunner::builder(&collections, source_dir)
-        .template_renderer(renderer)
-        .persistent_state(state.once_executed.clone(), state.onchange_hashes.clone())
-        .build();
-    runner.run_stage(HookStage::Pre)?;
-
-    // Get newly executed hooks and merge with state
-    for hook_name in runner.get_once_executed() {
-        state.mark_executed_once(hook_name);
-    }
-    for (hook_name, content_hash) in runner.get_onchange_hashes() {
-        state.update_onchange_hash(hook_name, content_hash);
-    }
-
-    // Update state in database
+    // Always update state in database, even if no hooks ran
+    // This marks the hooks directory as "checked" and prevents repeated warnings
     let hooks_dir = source_dir.join(".guisu/hooks");
     state.update_with_collections(&hooks_dir, collections)?;
     persistence.save(&state)?;
-
-    println!(
-        "{} {}",
-        StatusIcon::Success.get(use_nerd_fonts),
-        "Pre hooks completed!".green()
-    );
 
     Ok(())
 }
@@ -668,48 +668,48 @@ pub fn handle_hooks_post(
         })
         .collect();
 
-    if active_hooks.is_empty() {
-        return Ok(());
-    }
+    // Only run hooks if there are active ones, but always update state
+    if !active_hooks.is_empty() {
+        // Display hooks being run
+        for hook in &active_hooks {
+            println!(
+                "{} Running hook: {}",
+                StatusIcon::Hook.get(use_nerd_fonts),
+                hook.name.cyan()
+            );
+        }
 
-    // Display hooks being run
-    for hook in &active_hooks {
+        // Create template renderer
+        let renderer = create_template_engine(source_dir, config)?;
+
+        // Create hook runner with builder pattern and run post hooks
+        // Pass persistent state to respect mode=once and mode=onchange
+        let runner = HookRunner::builder(&collections, source_dir)
+            .template_renderer(renderer)
+            .persistent_state(state.once_executed.clone(), state.onchange_hashes.clone())
+            .build();
+        runner.run_stage(HookStage::Post)?;
+
+        // Get newly executed hooks and merge with state
+        for hook_name in runner.get_once_executed() {
+            state.mark_executed_once(hook_name);
+        }
+        for (hook_name, content_hash) in runner.get_onchange_hashes() {
+            state.update_onchange_hash(hook_name, content_hash);
+        }
+
         println!(
-            "{} Running hook: {}",
-            StatusIcon::Hook.get(use_nerd_fonts),
-            hook.name.cyan()
+            "{} {}",
+            StatusIcon::Success.get(use_nerd_fonts),
+            "Post hooks completed!".green()
         );
     }
 
-    // Create template renderer
-    let renderer = create_template_engine(source_dir, config)?;
-
-    // Create hook runner with builder pattern and run post hooks
-    // Pass persistent state to respect mode=once and mode=onchange
-    let runner = HookRunner::builder(&collections, source_dir)
-        .template_renderer(renderer)
-        .persistent_state(state.once_executed.clone(), state.onchange_hashes.clone())
-        .build();
-    runner.run_stage(HookStage::Post)?;
-
-    // Get newly executed hooks and merge with state
-    for hook_name in runner.get_once_executed() {
-        state.mark_executed_once(hook_name);
-    }
-    for (hook_name, content_hash) in runner.get_onchange_hashes() {
-        state.update_onchange_hash(hook_name, content_hash);
-    }
-
-    // Update state in database
+    // Always update state in database, even if no hooks ran
+    // This marks the hooks directory as "checked" and prevents repeated warnings
     let hooks_dir = source_dir.join(".guisu/hooks");
     state.update_with_collections(&hooks_dir, collections)?;
     persistence.save(&state)?;
-
-    println!(
-        "{} {}",
-        StatusIcon::Success.get(use_nerd_fonts),
-        "Post hooks completed!".green()
-    );
 
     Ok(())
 }
