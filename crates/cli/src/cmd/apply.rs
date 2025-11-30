@@ -24,6 +24,9 @@ use crate::stats::ApplyStats;
 use crate::ui::ConflictAction;
 use crate::ui::progress;
 
+/// Type alias for batch entry state data (path, content, mode)
+type BatchEntryData = (String, Vec<u8>, Option<u32>);
+
 /// Apply the source state to the destination
 #[derive(Debug, Clone, Args)]
 pub struct ApplyCommand {
@@ -383,35 +386,35 @@ fn handle_non_interactive_conflict(
     }
 }
 
-/// Apply entry and handle errors
+/// Apply entry and handle errors, returning entry data for batch save
+///
+/// Returns `Some((path, content, mode))` if the entry was successfully applied and needs state saved
 fn apply_entry_with_error_handling(
-    db: &guisu_engine::state::RedbPersistentState,
     entry: &TargetEntry,
     dest_path: &AbsPath,
     identities: &[guisu_crypto::Identity],
     stats: &ApplyStats,
     show_icons: bool,
     fail_on_decrypt_error: bool,
-) {
+) -> Option<BatchEntryData> {
     match apply_target_entry(entry, dest_path, identities, fail_on_decrypt_error) {
         Ok(()) => {
             debug!(path = %entry.path(), "Applied entry successfully");
-            match save_entry_state_to_db(db, entry) {
-                Ok(()) => {
-                    print_success_entry(entry, show_icons);
-                    stats.record_success(entry);
-                }
-                Err(e) => {
-                    warn!(path = %entry.path(), error = %e, "Failed to save state to database");
-                    print_error_entry(entry, &e, show_icons);
-                    stats.record_failure();
-                }
+            print_success_entry(entry, show_icons);
+            stats.record_success(entry);
+
+            // Return entry data for batch save (only for files)
+            if let TargetEntry::File { content, mode, .. } = entry {
+                Some((entry.path().to_string(), content.clone(), *mode))
+            } else {
+                None
             }
         }
         Err(e) => {
             warn!(path = %entry.path(), error = %e, "Failed to apply entry");
             print_error_entry(entry, &e, show_icons);
             stats.record_failure();
+            None
         }
     }
 }
@@ -429,6 +432,9 @@ fn process_entries_sequential(
     dry_run: bool,
     fail_on_decrypt_error: bool,
 ) -> Result<()> {
+    // Pre-allocate capacity for worst case (all entries applied successfully)
+    let mut batch_entries = Vec::with_capacity(entries.len());
+
     for entry in entries {
         let dest_path = dest_abs.join(entry.path());
 
@@ -463,19 +469,29 @@ fn process_entries_sequential(
                 )?
             };
 
-            if should_apply {
-                apply_entry_with_error_handling(
-                    db,
+            if should_apply
+                && let Some(state_data) = apply_entry_with_error_handling(
                     entry,
                     &dest_path,
                     identities,
                     stats,
                     show_icons,
                     fail_on_decrypt_error,
-                );
+                )
+            {
+                batch_entries.push(state_data);
             }
         }
     }
+
+    // Batch save all successful entries to database
+    if !batch_entries.is_empty() {
+        guisu_engine::database::save_entry_states_batch(db, &batch_entries).map_err(|e| {
+            warn!(error = %e, "Failed to save batch state to database");
+            e
+        })?;
+    }
+
     Ok(())
 }
 
@@ -556,7 +572,8 @@ fn process_entries_parallel(
     }
 
     // Process confirmed files in parallel
-    let results: Vec<Result<()>> = entries
+    // Returns entry data for batch save if successfully applied
+    let results: Vec<Result<Option<BatchEntryData>>> = entries
         .par_iter()
         .filter(|entry| confirmed_paths.contains(&entry.path().to_string()))
         .map(|entry| {
@@ -564,25 +581,23 @@ fn process_entries_parallel(
 
             if !needs_update(entry, &dest_path, identities, fail_on_decrypt_error)? {
                 debug!(path = %entry.path(), "File is already up to date, skipping");
-                return Ok(());
+                return Ok(None);
             }
 
             match apply_target_entry(entry, &dest_path, identities, fail_on_decrypt_error) {
                 Ok(()) => {
                     debug!(path = %entry.path(), "Applied entry successfully");
-                    match save_entry_state_to_db(db, entry) {
-                        Ok(()) => {
-                            print_success_entry(entry, show_icons);
-                            stats.record_success(entry);
-                            Ok(())
-                        }
-                        Err(e) => {
-                            warn!(path = %entry.path(), error = %e, "Failed to save state to database");
-                            print_error_entry(entry, &e, show_icons);
-                            stats.record_failure();
-                            Err(e)
-                        }
-                    }
+                    print_success_entry(entry, show_icons);
+                    stats.record_success(entry);
+
+                    // Prepare entry data for batch save
+                    let state_data = if let TargetEntry::File { content, mode, .. } = entry {
+                        Some((entry.path().to_string(), content.clone(), *mode))
+                    } else {
+                        None
+                    };
+
+                    Ok(state_data)
                 }
                 Err(e) => {
                     warn!(path = %entry.path(), error = %e, "Failed to apply entry");
@@ -594,9 +609,21 @@ fn process_entries_parallel(
         })
         .collect();
 
-    // Check for any errors in parallel execution
+    // Collect successful entries for batch save and check for errors
+    // Pre-allocate capacity for worst case (all results successful)
+    let mut batch_entries = Vec::with_capacity(results.len());
     for result in results {
-        result?;
+        if let Some(data) = result? {
+            batch_entries.push(data);
+        }
+    }
+
+    // Batch save all successful entries to database
+    if !batch_entries.is_empty() {
+        guisu_engine::database::save_entry_states_batch(db, &batch_entries).map_err(|e| {
+            warn!(error = %e, "Failed to save batch state to database");
+            e
+        })?;
     }
 
     Ok(())
@@ -1032,21 +1059,6 @@ fn apply_target_entry(
         }
     }
 }
-
-/// Save entry state to database
-fn save_entry_state_to_db(
-    db: &guisu_engine::state::RedbPersistentState,
-    entry: &TargetEntry,
-) -> Result<()> {
-    // Only save state for files (directories and symlinks don't need content state)
-    if let TargetEntry::File { content, mode, .. } = entry {
-        let path = entry.path().to_string();
-        guisu_engine::database::save_entry_state(db, &path, content, *mode)
-            .with_context(|| format!("Failed to save state for {path}"))?;
-    }
-    Ok(())
-}
-
 impl ApplyStats {
     fn record_success(&self, entry: &TargetEntry) {
         match entry {
