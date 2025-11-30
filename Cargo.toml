@@ -74,6 +74,7 @@ libc = "0.2"
 chrono = "0.4"
 duct = "1.1"
 shell-words = "1.1"
+blake3 = "1.5"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [
@@ -96,6 +97,6 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [profile.release]
 codegen-units = 1
 lto = "thin"
-opt-level = "s"
+opt-level = 3
 panic = "abort"
 strip = true

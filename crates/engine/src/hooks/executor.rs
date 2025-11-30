@@ -147,8 +147,6 @@ where
     /// The `cached_hash` is only computed for `OnChange` mode to avoid redundant hashing
     #[tracing::instrument(skip(self), fields(hook_name = %hook.name, hook_mode = ?hook.mode))]
     fn should_skip_hook(&self, hook: &Hook) -> (bool, &'static str, Option<Vec<u8>>) {
-        use sha2::{Digest, Sha256};
-
         match hook.mode {
             HookMode::Always => {
                 tracing::trace!("Hook will run (mode=always)");
@@ -180,9 +178,7 @@ where
             HookMode::OnChange => {
                 // Compute content hash (cached for later use)
                 let content = hook.get_content();
-                let mut hasher = Sha256::new();
-                hasher.update(content.as_bytes());
-                let current_hash = hasher.finalize().to_vec();
+                let current_hash = crate::hash::hash_content(content.as_bytes());
 
                 // Check if content changed from this session
                 if let Some(session_hash) = self
@@ -238,11 +234,8 @@ where
             HookMode::OnChange => {
                 // Use cached hash if available, otherwise compute
                 let content_hash = cached_hash.unwrap_or_else(|| {
-                    use sha2::{Digest, Sha256};
                     let content = hook.get_content();
-                    let mut hasher = Sha256::new();
-                    hasher.update(content.as_bytes());
-                    hasher.finalize().to_vec()
+                    crate::hash::hash_content(content.as_bytes())
                 });
 
                 self.onchange_hashes
@@ -1330,17 +1323,13 @@ mod tests {
 
     #[test]
     fn test_should_skip_hook_onchange_unchanged_in_persistent() {
-        use sha2::{Digest, Sha256};
-
         let temp = TempDir::new().unwrap();
         let collections = HookCollections::default();
 
         let hook = create_test_hook("test", HookMode::OnChange);
 
         // Compute expected hash
-        let mut hasher = Sha256::new();
-        hasher.update(hook.get_content().as_bytes());
-        let expected_hash = hasher.finalize().to_vec();
+        let expected_hash = crate::hash::hash_content(hook.get_content().as_bytes());
 
         let mut persistent_onchange = HashMap::new();
         persistent_onchange.insert("test".to_string(), expected_hash);

@@ -17,6 +17,7 @@ pub mod content;
 pub mod database;
 pub mod entry;
 pub mod git;
+pub mod hash;
 pub mod hooks;
 pub mod processor;
 pub mod state;

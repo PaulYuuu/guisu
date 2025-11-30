@@ -4,13 +4,13 @@
 
 use crate::attr::FileAttributes;
 use crate::entry::{DestEntry, SourceEntry, TargetEntry};
+use crate::hash;
 use crate::processor::ContentProcessor;
 use crate::system::System;
 use guisu_core::path::{AbsPath, RelPath, SourceRelPath};
 use guisu_core::{Error, Result};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -223,14 +223,14 @@ impl HookState {
         // Sort by path for deterministic hashing
         file_hashes.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Combine all hashes into a single hash
-        let mut hasher = Sha256::new();
+        // Combine all hashes into a single hash using blake3
+        let mut hasher = blake3::Hasher::new();
         for (path, hash) in file_hashes {
             hasher.update(path.as_bytes());
             hasher.update(&hash);
         }
 
-        Ok(hasher.finalize().to_vec())
+        Ok(hasher.finalize().as_bytes().to_vec())
     }
 
     /// Serialize to bytes for database storage using bincode
@@ -536,6 +536,16 @@ pub trait PersistentState: Send + Sync {
     /// Returns an error if the value cannot be stored (e.g., database error, write failure, transaction error)
     fn set(&self, bucket: &str, key: &[u8], value: &[u8]) -> Result<()>;
 
+    /// Set multiple values in a bucket in a single transaction
+    ///
+    /// This is more efficient than calling `set()` multiple times as it batches
+    /// all writes into a single database transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the values cannot be stored (e.g., database error, write failure, transaction error)
+    fn set_batch(&self, bucket: &str, entries: &[(&[u8], &[u8])]) -> Result<()>;
+
     /// Delete a key from a bucket
     ///
     /// # Errors
@@ -676,6 +686,36 @@ impl PersistentState for RedbPersistentState {
         Ok(())
     }
 
+    fn set_batch(&self, bucket: &str, entries: &[(&[u8], &[u8])]) -> Result<()> {
+        // Early return for empty batch
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        // Single transaction for all entries
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| crate::Error::State(format!("Failed to begin write transaction: {e}")))?;
+        {
+            let table_def = Self::table_def_with_storage(bucket);
+            let mut table = write_txn
+                .open_table(table_def)
+                .map_err(|e| crate::Error::State(format!("Failed to open table: {e}")))?;
+
+            // Insert all entries in the same transaction
+            for (key, value) in entries {
+                table.insert(*key, *value).map_err(|e| {
+                    crate::Error::State(format!("Failed to insert batch value: {e}"))
+                })?;
+            }
+        }
+        write_txn
+            .commit()
+            .map_err(|e| crate::Error::State(format!("Failed to commit batch transaction: {e}")))?;
+        Ok(())
+    }
+
     fn delete(&self, bucket: &str, key: &[u8]) -> Result<()> {
         let write_txn = self
             .db
@@ -750,9 +790,7 @@ impl PersistentState for RedbPersistentState {
 #[inline]
 #[must_use]
 pub fn hash_data(data: &[u8]) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.finalize().to_vec()
+    hash::hash_content(data)
 }
 
 /// Entry state - tracks file state
@@ -922,6 +960,23 @@ impl PersistentState for MockPersistentState {
         data.entry(bucket.to_string())
             .or_default()
             .insert(key.to_vec(), value.to_vec());
+        Ok(())
+    }
+
+    fn set_batch(&self, bucket: &str, entries: &[(&[u8], &[u8])]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut data = self
+            .data
+            .write()
+            .expect("MockPersistentState lock should not be poisoned");
+        let bucket_data = data.entry(bucket.to_string()).or_default();
+
+        for (key, value) in entries {
+            bucket_data.insert(key.to_vec(), value.to_vec());
+        }
         Ok(())
     }
 

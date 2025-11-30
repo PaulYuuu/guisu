@@ -49,6 +49,46 @@ pub fn save_entry_state(
     Ok(())
 }
 
+/// Save multiple entry states to database in a single transaction
+///
+/// This is more efficient than calling `save_entry_state()` multiple times
+/// as it batches all writes into a single database transaction.
+///
+/// # Errors
+///
+/// Returns an error if any state cannot be saved (e.g., serialization failure, write error)
+pub fn save_entry_states_batch(
+    db: &RedbPersistentState,
+    entries: &[(String, Vec<u8>, Option<u32>)],
+) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    // Pre-serialize all entries to detect serialization errors early
+    let serialized: Result<Vec<(Vec<u8>, Vec<u8>)>> = entries
+        .iter()
+        .map(|(path, content, mode)| {
+            let state = EntryState::new(content, *mode);
+            let serialized_state = state.to_bytes()?;
+            Ok((path.as_bytes().to_vec(), serialized_state))
+        })
+        .collect();
+
+    let serialized = serialized?;
+
+    // Convert to references for batch API
+    let mut batch_entries = Vec::with_capacity(serialized.len());
+    for (k, v) in &serialized {
+        batch_entries.push((k.as_slice(), v.as_slice()));
+    }
+
+    db.set_batch(ENTRY_STATE_BUCKET, &batch_entries)
+        .map_err(|e| Error::State(format!("Failed to save batch entries: {e}")))?;
+
+    Ok(())
+}
+
 /// Get entry state from database
 ///
 /// # Errors

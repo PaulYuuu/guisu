@@ -21,6 +21,7 @@ guisu-vault = { path = "../vault" }
 
 bincode.workspace = true
 bitflags.workspace = true
+blake3.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 duct.workspace = true

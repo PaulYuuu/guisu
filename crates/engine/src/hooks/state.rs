@@ -3,9 +3,9 @@
 //! Tracks hook configuration file changes using SHA256 hashing.
 //! This is separate from the execution state tracking in engine/state.rs.
 
+use crate::hash;
 use guisu_core::{Error, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 use std::time::SystemTime;
@@ -61,9 +61,7 @@ impl HookConfigState {
             ))
         })?;
 
-        let mut hasher = Sha256::new();
-        hasher.update(&content);
-        Ok(hasher.finalize().to_vec())
+        Ok(hash::hash_content(&content))
     }
 
     /// Check if configuration has changed since last execution
