@@ -374,7 +374,7 @@ fn run_impl(
     }
 
     // Check and display hooks status
-    print_hooks_status(source_dir, database)?;
+    print_hooks_status(source_dir, database);
 
     Ok(())
 }
@@ -970,8 +970,62 @@ fn render_tree(
     }
 }
 
+/// Check if there are hooks that would actually execute
+///
+/// This function checks if any hooks have changed in a way that would cause them to execute:
+/// - `mode = "always"`: Always executes (always returns true if exists)
+/// - `mode = "once"`: Only executes if not already executed
+/// - `mode = "onchange"`: Only executes if content hash changed
+fn check_executable_hooks_changed(
+    collections: &guisu_engine::hooks::config::HookCollections,
+    state: &guisu_engine::state::HookState,
+) -> bool {
+    use guisu_engine::hooks::config::HookMode;
+    use sha2::{Digest, Sha256};
+
+    let platform = guisu_core::platform::CURRENT_PLATFORM.os;
+
+    // Check both pre and post hooks
+    let all_hooks = collections.pre.iter().chain(collections.post.iter());
+
+    for hook in all_hooks {
+        // Skip hooks that don't run on this platform
+        if !hook.should_run_on(platform) {
+            continue;
+        }
+
+        // Check if hook would execute based on mode
+        let would_execute = match hook.mode {
+            HookMode::Always => {
+                // Always hooks always execute
+                true
+            }
+            HookMode::Once => {
+                // Once hooks only execute if not already executed
+                !state.has_executed_once(&hook.name)
+            }
+            HookMode::OnChange => {
+                // OnChange hooks execute if content hash changed
+                let content = hook.get_content();
+                let mut hasher = Sha256::new();
+                hasher.update(content.as_bytes());
+                let current_hash = hasher.finalize().to_vec();
+                state.hook_content_changed(&hook.name, &current_hash)
+            }
+        };
+
+        // If any hook would execute, we should warn
+        if would_execute {
+            return true;
+        }
+    }
+
+    // No hooks would execute
+    false
+}
+
 /// Check and print hooks status
-fn print_hooks_status(source_dir: &Path, db: &RedbPersistentState) -> Result<()> {
+fn print_hooks_status(source_dir: &Path, db: &RedbPersistentState) {
     use guisu_engine::hooks::HookLoader;
     use guisu_engine::state::HookStatePersistence;
 
@@ -979,29 +1033,31 @@ fn print_hooks_status(source_dir: &Path, db: &RedbPersistentState) -> Result<()>
 
     // Check if hooks directory exists
     if !hooks_dir.exists() {
-        return Ok(());
+        return;
     }
 
     // Load hooks
     let loader = HookLoader::new(source_dir);
     let Ok(collections) = loader.load() else {
-        return Ok(()); // Silently skip if hooks fail to load
+        return; // Silently skip if hooks fail to load
     };
 
     if collections.is_empty() {
-        return Ok(());
+        return;
     }
 
     // Load state from database (using provided database)
     let persistence = HookStatePersistence::new(db);
     let Ok(state) = persistence.load() else {
-        return Ok(()); // Silently skip if can't load state
+        return; // Silently skip if can't load state
     };
 
-    let has_changed = state.has_changed(&hooks_dir)?;
+    // Check if there are any hooks that would actually execute
+    // Don't warn about hooks that won't run (e.g., mode=once already executed)
+    let has_executable_changes = check_executable_hooks_changed(&collections, &state);
 
-    // Only show message if hooks have changed
-    if has_changed {
+    // Only show message if hooks that will actually execute have changed
+    if has_executable_changes {
         println!();
         println!(
             "{} {}",
@@ -1010,8 +1066,6 @@ fn print_hooks_status(source_dir: &Path, db: &RedbPersistentState) -> Result<()>
         );
         println!("  Run {} to execute hooks", "guisu hooks run".cyan());
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
