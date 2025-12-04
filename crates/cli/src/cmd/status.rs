@@ -374,7 +374,7 @@ fn run_impl(
     }
 
     // Check and display hooks status
-    print_hooks_status(source_dir, database);
+    print_hooks_status(source_dir, database, show_all, config);
 
     Ok(())
 }
@@ -515,7 +515,7 @@ fn process_entry_for_status(
     }
 
     // Skip if file is ignored
-    if ignore_matcher.is_ignored(target_path.as_path()) {
+    if ignore_matcher.is_ignored(target_path.as_path(), None) {
         return None;
     }
 
@@ -970,63 +970,75 @@ fn render_tree(
     }
 }
 
-/// Check if there are hooks that would actually execute
-///
-/// This function checks if any hooks have changed in a way that would cause them to execute:
-/// - `mode = "always"`: Always executes (always returns true if exists)
-/// - `mode = "once"`: Only executes if not already executed
-/// - `mode = "onchange"`: Only executes if content hash changed
-fn check_executable_hooks_changed(
-    collections: &guisu_engine::hooks::config::HookCollections,
-    state: &guisu_engine::state::HookState,
-) -> bool {
-    use guisu_engine::hooks::config::HookMode;
-    use sha2::{Digest, Sha256};
+/// Render hook template content
+fn render_hook_template(source_dir: &Path, content: &str, config: &Config) -> Result<String> {
+    use guisu_template::TemplateContext;
+    use std::sync::Arc;
 
-    let platform = guisu_core::platform::CURRENT_PLATFORM.os;
+    // Load age identities for encryption support in templates
+    let identities = Arc::new(config.age_identities().unwrap_or_else(|_| Vec::new()));
 
-    // Check both pre and post hooks
-    let all_hooks = collections.pre.iter().chain(collections.post.iter());
+    // Create template engine with bitwarden provider support
+    let engine = crate::create_template_engine(source_dir, &identities, config);
 
-    for hook in all_hooks {
-        // Skip hooks that don't run on this platform
-        if !hook.should_run_on(platform) {
-            continue;
-        }
+    // Get destination directory
+    let dst_dir = config
+        .general
+        .dst_dir
+        .clone()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("~"));
 
-        // Check if hook would execute based on mode
-        let would_execute = match hook.mode {
-            HookMode::Always => {
-                // Always hooks always execute
-                true
-            }
-            HookMode::Once => {
-                // Once hooks only execute if not already executed
-                !state.has_executed_once(&hook.name)
-            }
-            HookMode::OnChange => {
-                // OnChange hooks execute if content hash changed
-                let content = hook.get_content();
-                let mut hasher = Sha256::new();
-                hasher.update(content.as_bytes());
-                let current_hash = hasher.finalize().to_vec();
-                state.hook_content_changed(&hook.name, &current_hash)
-            }
-        };
+    // Create template context with guisu info and all variables
+    let working_tree = guisu_engine::git::find_working_tree(source_dir)
+        .unwrap_or_else(|| source_dir.to_path_buf());
+    let dotfiles_dir = config.dotfiles_dir(source_dir);
+    let template_ctx = TemplateContext::new()
+        .with_guisu_info(
+            crate::path_to_string(&dotfiles_dir),
+            crate::path_to_string(&working_tree),
+            crate::path_to_string(&dst_dir),
+            crate::path_to_string(&config.general.root_entry),
+        )
+        .with_loaded_variables(source_dir, config)
+        .map_err(|e| anyhow::anyhow!("Failed to load variables: {e}"))?;
 
-        // If any hook would execute, we should warn
-        if would_execute {
-            return true;
-        }
+    // Render template
+    engine
+        .render_str(content, &template_ctx)
+        .map_err(|e| anyhow::anyhow!("Template rendering error: {e}"))
+}
+
+/// Render script content, handling templates if needed
+fn render_script_content(
+    source_dir: &Path,
+    script: &str,
+    content: &str,
+    config: &Config,
+) -> String {
+    let is_template = Path::new(script)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("j2"));
+
+    if is_template {
+        render_hook_template(source_dir, content, config).unwrap_or_else(|e| {
+            tracing::warn!("Failed to render hook template: {}", e);
+            content.to_string()
+        })
+    } else {
+        content.to_string()
     }
-
-    // No hooks would execute
-    false
 }
 
 /// Check and print hooks status
-fn print_hooks_status(source_dir: &Path, db: &RedbPersistentState) {
+fn print_hooks_status(
+    source_dir: &Path,
+    db: &RedbPersistentState,
+    show_all: bool,
+    config: &Config,
+) {
     use guisu_engine::hooks::HookLoader;
+    use guisu_engine::hooks::config::HookMode;
     use guisu_engine::state::HookStatePersistence;
 
     let hooks_dir = source_dir.join(".guisu/hooks");
@@ -1048,23 +1060,107 @@ fn print_hooks_status(source_dir: &Path, db: &RedbPersistentState) {
 
     // Load state from database (using provided database)
     let persistence = HookStatePersistence::new(db);
-    let Ok(state) = persistence.load() else {
+    let Ok(mut state) = persistence.load() else {
         return; // Silently skip if can't load state
     };
 
-    // Check if there are any hooks that would actually execute
-    // Don't warn about hooks that won't run (e.g., mode=once already executed)
-    let has_executable_changes = check_executable_hooks_changed(&collections, &state);
+    let platform = guisu_core::platform::CURRENT_PLATFORM.os;
 
-    // Only show message if hooks that will actually execute have changed
-    if has_executable_changes {
+    // Check hook execution status and display
+    let mut hooks_to_display = Vec::new();
+
+    // Check if we have last_collections to compare against
+    let has_previous_state = state.last_collections.is_some();
+
+    for hook in collections.pre.iter().chain(collections.post.iter()) {
+        // Skip hooks that don't run on this platform
+        if !hook.should_run_on(platform) {
+            continue;
+        }
+
+        // Determine hook status based on hook definition changes
+        // This matches diff.rs logic
+        let status = if has_previous_state {
+            // Find the corresponding hook in last_collections
+            let last_hook = state.last_collections.as_ref().and_then(|last| {
+                last.pre
+                    .iter()
+                    .chain(last.post.iter())
+                    .find(|h| h.name == hook.name)
+            });
+
+            if let Some(last_hook) = last_hook {
+                // Check if hook definition changed (same logic as diff.rs)
+                // Compare basic fields: order, mode, cmd, script, script_content
+                let mut has_changes = hook.order != last_hook.order
+                    || hook.mode != last_hook.mode
+                    || hook.cmd != last_hook.cmd
+                    || hook.script != last_hook.script
+                    || hook.script_content != last_hook.script_content;
+
+                // For mode=onchange hooks, also check if rendered content hash changed
+                if !has_changes
+                    && hook.mode == HookMode::OnChange
+                    && let Some(content) = &hook.script_content
+                {
+                    // Render current content and compute hash
+                    let rendered = render_script_content(
+                        source_dir,
+                        hook.script.as_ref().unwrap_or(&String::new()),
+                        content,
+                        config,
+                    );
+                    let current_hash = guisu_engine::hash::hash_content(rendered.as_bytes());
+
+                    // Compare with saved hash
+                    if let Some(saved_hash) = state.onchange_hashes.get(&hook.name) {
+                        if &current_hash != saved_hash {
+                            has_changes = true;
+                        }
+                    } else {
+                        // No saved hash means first run
+                        has_changes = true;
+                    }
+                }
+
+                if has_changes {
+                    FileStatus::Behind
+                } else {
+                    FileStatus::Steady
+                }
+            } else {
+                // New hook
+                FileStatus::Latent
+            }
+        } else {
+            // No previous state, this is first run
+            FileStatus::Latent
+        };
+
+        // Skip Steady hooks if not in --all mode
+        if !show_all && status == FileStatus::Steady {
+            continue;
+        }
+
+        hooks_to_display.push((hook.name.clone(), status));
+    }
+
+    // Display hooks that need execution
+    if !hooks_to_display.is_empty() {
         println!();
-        println!(
-            "{} {}",
-            "Hooks:".bold(),
-            "Hooks have changed since last execution".yellow()
-        );
-        println!("  Run {} to execute hooks", "guisu hooks run".cyan());
+        println!("{}:", "Hooks".bold());
+
+        for (name, status) in hooks_to_display {
+            let status_str = status.color_str(status.label());
+            println!("  {}  {}", status_str.bold(), name);
+        }
+    }
+
+    // Update database state to mark hooks as "checked"
+    if let Err(e) = state.update_with_collections(&hooks_dir, collections) {
+        tracing::warn!("Failed to update hook state: {}", e);
+    } else if let Err(e) = persistence.save(&state) {
+        tracing::warn!("Failed to save hook state: {}", e);
     }
 }
 

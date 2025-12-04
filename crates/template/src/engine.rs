@@ -164,6 +164,7 @@ impl TemplateEngine {
         env.add_filter("trim", functions::trim);
         env.add_filter("trimStart", functions::trim_start);
         env.add_filter("trimEnd", functions::trim_end);
+        env.add_filter("blake3sum", functions::blake3sum);
 
         // Register string processing functions
         env.add_function("regexMatch", functions::regex_match);

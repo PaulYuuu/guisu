@@ -12,7 +12,6 @@ pub mod info;
 
 pub use context::TemplateContext;
 pub use engine::TemplateEngine;
-pub use functions::set_source_dir;
 pub use info::{AgeConfigInfo, BitwardenConfigInfo, ConfigInfo, UiConfigInfo};
 
 use thiserror::Error;

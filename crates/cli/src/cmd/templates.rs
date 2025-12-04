@@ -38,10 +38,6 @@ pub fn run_list(source_dir: &Path, _config: &Config) -> Result<()> {
 
     if !templates_dir.exists() {
         println!("No templates directory found.");
-        println!(
-            "\nTo create templates, add files to: {}",
-            templates_dir.display()
-        );
         return Ok(());
     }
 
@@ -80,9 +76,6 @@ pub fn run_list(source_dir: &Path, _config: &Config) -> Result<()> {
     // Display results
     if template_names.is_empty() {
         println!("No templates found.");
-        println!("\nTo create templates, add files to:");
-        println!("  {} (common)", templates_dir.display());
-        println!("  {} (platform-specific)", platform_dir.display());
     } else {
         for name in &template_names {
             println!("  {}", name.bright_white());

@@ -18,12 +18,15 @@ guisu-core = { path = "../core" }
 guisu-crypto = { path = "../crypto" }
 guisu-vault = { path = "../vault" }
 
+blake3.workspace = true
 chrono.workspace = true
+hex.workspace = true
 dirs.workspace = true
 hostname = "0.4"
 indexmap.workspace = true
 minijinja.workspace = true
 regex.workspace = true
+secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shell-words = "1.1"

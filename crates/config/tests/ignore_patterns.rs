@@ -69,7 +69,7 @@ darwin = [
         ("test-data.txt", true, "test-*.txt pattern"),
         ("test.txt", false, "Doesn't match test-*.txt"),
         // 4. Complex .config case - excluded items should NOT be ignored
-        (".config/random/file", true, "Matches .config/* - ignored"),
+        (".config/random", true, "Matches .config/* - ignored"),
         (
             ".config/atuin/config.toml",
             false,
@@ -110,7 +110,7 @@ darwin = [
     ];
 
     for (path, expected_ignored, description) in test_cases {
-        let is_ignored = matcher.is_ignored(Path::new(path));
+        let is_ignored = matcher.is_ignored(Path::new(path), None);
         assert_eq!(
             is_ignored, expected_ignored,
             "Failed: {description} | path={path} | ignored={is_ignored} (expected={expected_ignored})"
@@ -185,7 +185,7 @@ global = [
     ];
 
     for (path, expected_ignored, description) in test_cases {
-        let is_ignored = matcher.is_ignored(Path::new(path));
+        let is_ignored = matcher.is_ignored(Path::new(path), None);
         assert_eq!(
             is_ignored, expected_ignored,
             "Failed: {description} | path={path} | ignored={is_ignored} (expected={expected_ignored})"
@@ -214,9 +214,9 @@ darwin = [
 
     let matcher = IgnoreMatcher::from_ignores_toml(&test_dir).unwrap();
 
-    assert!(matcher.is_ignored(Path::new(".Trash/file")));
-    assert!(matcher.is_ignored(Path::new("Library/Caches/data")));
-    assert!(!matcher.is_ignored(Path::new("Library/Application Support/file")));
+    assert!(matcher.is_ignored(Path::new(".Trash/file"), None));
+    assert!(matcher.is_ignored(Path::new("Library/Caches/data"), None));
+    assert!(!matcher.is_ignored(Path::new("Library/Application Support/file"), None));
 
     std::fs::remove_dir_all(&test_dir).ok();
 }

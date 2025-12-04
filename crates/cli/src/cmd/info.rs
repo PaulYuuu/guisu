@@ -31,6 +31,7 @@ struct GuisuInfo {
     version: String,
     config: String,
     config_note: Option<String>,
+    editor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,10 +59,11 @@ struct GitInfo {
 
 #[derive(Debug, Serialize)]
 struct AgeInfo {
-    identity_files: Vec<String>,
-    identity_note: Option<String>,
+    identities: Vec<String>,
+    status: Option<String>,
     derive: Option<String>,
     public_keys: Vec<String>,
+    recipients: Option<String>,
     version: Option<String>,
 }
 
@@ -100,7 +102,7 @@ fn run_impl(source_dir: &Path, config: &Config, all: bool, json: bool) -> Result
     if json {
         display_json(&info, config, all)?;
     } else {
-        display_table(&info, config, all);
+        display_table(&info);
     }
 
     Ok(())
@@ -179,6 +181,11 @@ fn gather_info(source_dir: &Path, config: &Config, all: bool) -> InfoData {
             version: guisu_version,
             config: config_display,
             config_note,
+            editor: if all {
+                config.general.editor.clone()
+            } else {
+                None
+            },
         },
         build: build_info,
         system: SystemInfo {
@@ -194,10 +201,15 @@ fn gather_info(source_dir: &Path, config: &Config, all: bool) -> InfoData {
             dirty: git_dirty,
         },
         age: AgeInfo {
-            identity_files,
-            identity_note,
+            identities: identity_files,
+            status: identity_note,
             derive,
             public_keys,
+            recipients: if all && !config.age.recipients.is_empty() {
+                Some(format!("{} keys", config.age.recipients.len()))
+            } else {
+                None
+            },
             version: if all {
                 Some("builtin".to_string())
             } else {
@@ -408,17 +420,13 @@ fn extract_public_keys(config: &Config) -> Vec<String> {
 }
 
 /// Display information in table format
-fn display_table(info: &InfoData, config: &Config, all: bool) {
+fn display_table(info: &InfoData) {
     display_guisu_section(&info.guisu);
     display_build_section(info.build.as_ref());
     display_system_section(&info.system);
     display_git_section(&info.git);
     display_age_section(&info.age);
     display_bitwarden_section(&info.bitwarden);
-
-    if all {
-        show_config_table_simple(config);
-    }
 }
 
 /// Display guisu version and configuration
@@ -431,6 +439,9 @@ fn display_guisu_section(guisu: &GuisuInfo) {
         guisu.config_note.is_none(),
         guisu.config_note.as_deref(),
     );
+    if let Some(ref editor) = guisu.editor {
+        print_row("Editor", editor, true, None);
+    }
     println!();
 }
 
@@ -517,20 +528,24 @@ fn display_age_section(age: &AgeInfo) {
 
     display_age_public_keys(&age.public_keys);
 
+    if let Some(ref recipients) = age.recipients {
+        print_row("Recipients", recipients, true, None);
+    }
+
     println!();
 }
 
 /// Display age identity files (single or multiple)
 fn display_age_identity_files(age: &AgeInfo) {
-    if age.identity_files.len() == 1 {
+    if age.identities.len() == 1 {
         print_row(
             "Identity",
-            &age.identity_files[0],
-            age.identity_note.is_none(),
-            age.identity_note.as_deref(),
+            &age.identities[0],
+            age.status.is_none(),
+            age.status.as_deref(),
         );
     } else {
-        for (i, file) in age.identity_files.iter().enumerate() {
+        for (i, file) in age.identities.iter().enumerate() {
             let label = if i == 0 {
                 "Identities".to_string()
             } else {
@@ -539,12 +554,8 @@ fn display_age_identity_files(age: &AgeInfo) {
             print_row(
                 &label,
                 file,
-                age.identity_note.is_none(),
-                if i == 0 {
-                    age.identity_note.as_deref()
-                } else {
-                    None
-                },
+                age.status.is_none(),
+                if i == 0 { age.status.as_deref() } else { None },
             );
         }
     }
@@ -609,37 +620,6 @@ fn print_row(label: &str, value: &str, ok: bool, note: Option<&str>) {
     } else {
         println!("  {symbol} {label:14} {formatted_value}");
     }
-}
-
-/// Display configuration in simplified table format (for --all mode)
-fn show_config_table_simple(config: &Config) {
-    println!("{}", "Configuration".bright_white().bold());
-
-    // General section
-    if let Some(ref editor) = config.general.editor {
-        print_row("Editor", editor, true, None);
-    }
-
-    // Age section
-    if !config.age.recipients.is_empty() {
-        print_row(
-            "Age Recipients",
-            &format!("{} keys", config.age.recipients.len()),
-            true,
-            None,
-        );
-    }
-
-    // Ignore patterns
-    let total_ignores = config.ignore.global.len()
-        + config.ignore.darwin.len()
-        + config.ignore.linux.len()
-        + config.ignore.windows.len();
-    if total_ignores > 0 {
-        print_row("Ignore Patterns", &total_ignores.to_string(), true, None);
-    }
-
-    println!();
 }
 
 /// Validate configuration file
@@ -763,6 +743,7 @@ mod tests {
                 version: "test".to_string(),
                 config: "/test/.guisu.toml".to_string(),
                 config_note: Some("note".to_string()),
+                editor: None,
             },
             build: Some(BuildInfo {
                 rustc: "1.70.0".to_string(),
@@ -782,10 +763,11 @@ mod tests {
                 dirty: false,
             },
             age: AgeInfo {
-                identity_files: vec!["/path".to_string()],
-                identity_note: Some("note".to_string()),
+                identities: vec!["/path".to_string()],
+                status: Some("note".to_string()),
                 derive: None,
                 public_keys: vec!["key1".to_string()],
+                recipients: None,
                 version: Some("1.0".to_string()),
             },
             bitwarden: BitwardenInfo {
@@ -806,6 +788,7 @@ mod tests {
                 version: "test".to_string(),
                 config: "/config".to_string(),
                 config_note: None,
+                editor: None,
             },
             build: None,
             system: SystemInfo {
@@ -821,10 +804,11 @@ mod tests {
                 dirty: false,
             },
             age: AgeInfo {
-                identity_files: vec![],
-                identity_note: None,
+                identities: vec![],
+                status: None,
                 derive: None,
                 public_keys: vec![],
+                recipients: None,
                 version: None,
             },
             bitwarden: BitwardenInfo {
@@ -844,6 +828,7 @@ mod tests {
             version: "1.0.0".to_string(),
             config: "/config/.guisu.toml".to_string(),
             config_note: Some("Template file".to_string()),
+            editor: None,
         };
 
         let debug_str = format!("{guisu:?}");
@@ -857,6 +842,7 @@ mod tests {
             version: "1.0.0".to_string(),
             config: "/config/.guisu.toml".to_string(),
             config_note: None,
+            editor: None,
         };
 
         let json = serde_json::to_string(&guisu).unwrap();
@@ -947,30 +933,32 @@ mod tests {
     #[test]
     fn test_age_info_debug() {
         let age = AgeInfo {
-            identity_files: vec!["/path1".to_string(), "/path2".to_string()],
-            identity_note: Some("Template identity".to_string()),
+            identities: vec!["/path1".to_string(), "/path2".to_string()],
+            status: Some("Template identity".to_string()),
             derive: Some("key".to_string()),
             public_keys: vec!["age1...".to_string()],
+            recipients: None,
             version: Some("1.0".to_string()),
         };
 
         let debug_str = format!("{age:?}");
         assert!(debug_str.contains("AgeInfo"));
-        assert!(debug_str.contains("identity"));
+        assert!(debug_str.contains("identities"));
     }
 
     #[test]
     fn test_age_info_serialize() {
         let age = AgeInfo {
-            identity_files: vec!["/identity".to_string()],
-            identity_note: None,
+            identities: vec!["/identity".to_string()],
+            status: None,
             derive: None,
             public_keys: vec![],
+            recipients: None,
             version: None,
         };
 
         let json = serde_json::to_string(&age).unwrap();
-        assert!(json.contains("\"identity_files\":[\"/identity\"]"));
+        assert!(json.contains("\"identities\":[\"/identity\"]"));
     }
 
     #[test]

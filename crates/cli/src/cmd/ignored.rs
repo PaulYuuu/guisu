@@ -71,7 +71,7 @@ pub fn run_list(source_dir: &Path, config: &Config) -> Result<()> {
             let mut is_ignored = false;
 
             // Check the file itself (use relative path)
-            if matcher.is_ignored(target_path.as_path()) {
+            if matcher.is_ignored(target_path.as_path(), None) {
                 is_ignored = true;
             }
 
@@ -84,7 +84,7 @@ pub fn run_list(source_dir: &Path, config: &Config) -> Result<()> {
                         break;
                     }
 
-                    if matcher.is_ignored(parent) {
+                    if matcher.is_ignored(parent, None) {
                         is_ignored = true;
                         break;
                     }

@@ -6,7 +6,6 @@ use anyhow::{Context, Result, anyhow};
 use guisu_core::path::AbsPath;
 use guisu_engine::entry::TargetEntry;
 use owo_colors::OwoColorize;
-use sha2::{Digest, Sha256};
 use std::fs;
 
 use crate::ui::{
@@ -201,13 +200,8 @@ impl ConflictHandler {
         };
 
         // Compute hashes for three-way comparison
-        let mut hasher = Sha256::new();
-        hasher.update(&target_content_decrypted);
-        let target_hash = hasher.finalize().to_vec();
-
-        let mut hasher = Sha256::new();
-        hasher.update(&actual_content);
-        let actual_hash = hasher.finalize().to_vec();
+        let target_hash = guisu_engine::hash::hash_content(&target_content_decrypted);
+        let actual_hash = guisu_engine::hash::hash_content(&actual_content);
 
         // Use the unified three-way comparison function
         let result = compare_three_way(&target_hash, &actual_hash, last_written_hash);
@@ -466,12 +460,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
     use super::*;
 
-    // Helper function to create hash from string
+    // Helper function to create hash from string using blake3
     fn hash(s: &str) -> Vec<u8> {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(s.as_bytes());
-        hasher.finalize().to_vec()
+        guisu_engine::hash::hash_content(s.as_bytes())
     }
 
     // Tests for compare_three_way function

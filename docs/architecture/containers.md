@@ -584,7 +584,7 @@ pub trait PersistentState: Send + Sync {
 }
 
 pub struct EntryState {
-    pub content_hash: Vec<u8>,  // SHA256
+    pub content_hash: Vec<u8>,  // blake3
     pub mode: Option<u32>,
 }
 ```

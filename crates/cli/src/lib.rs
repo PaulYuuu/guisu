@@ -654,7 +654,6 @@ pub(crate) fn build_filter_paths(
             let file_abs = resolve_absolute_path(&expanded_path)?;
 
             // Convert to relative path under dest_dir
-            // Use map_err to avoid format! allocation unless error actually occurs
             file_abs.strip_prefix(dest_abs).map_err(|_| {
                 anyhow::anyhow!(
                     "File {} is not under destination directory {}",
@@ -725,7 +724,7 @@ fn resolve_absolute_path(path: &std::path::Path) -> Result<guisu_core::path::Abs
 /// This database-backed caching solves the circular dependency problem:
 /// - First load: Renders with minimal context, caches result
 /// - Subsequent loads: Uses cached config (fast path)
-/// - Cache invalidation: Automatic when template content changes (SHA256 hash)
+/// - Cache invalidation: Automatic when template content changes (blake3 hash)
 ///
 /// # Arguments
 ///

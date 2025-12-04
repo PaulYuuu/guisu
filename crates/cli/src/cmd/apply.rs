@@ -212,15 +212,30 @@ fn filter_entries_to_apply<'a>(
             let path_str = entry.path().to_string();
             let target_path = entry.path();
 
-            // If filtering by specific files, skip entries not in the filter
-            if let Some(filter) = filter_paths
-                && !filter.iter().any(|p| p == target_path)
-            {
-                return false;
+            // Filter by files or directories
+            if let Some(filter) = filter_paths {
+                let matches = filter.iter().any(|filter_path| {
+                    // Exact match (file or directory itself)
+                    if filter_path == target_path {
+                        return true;
+                    }
+
+                    // Check if target is under the filter directory
+                    // Ensure we don't match ".config/zsh-backup" when filter is ".config/zsh"
+                    let filter_str = filter_path.as_path().to_str().unwrap_or("");
+                    let target_str = target_path.as_path().to_str().unwrap_or("");
+
+                    target_str.starts_with(filter_str)
+                        && target_str.as_bytes().get(filter_str.len()) == Some(&b'/')
+                });
+
+                if !matches {
+                    return false;
+                }
             }
 
             // Skip if file is ignored
-            if ignore_matcher.is_ignored(entry.path().as_path()) {
+            if ignore_matcher.is_ignored(entry.path().as_path(), None) {
                 debug!(
                     path = %path_str,
                     "Skipping ignored file"
@@ -405,7 +420,20 @@ fn apply_entry_with_error_handling(
 
             // Return entry data for batch save (only for files)
             if let TargetEntry::File { content, mode, .. } = entry {
-                Some((entry.path().to_string(), content.clone(), *mode))
+                // Save decrypted content to match what was written to disk
+                let final_content = match decrypt_inline_age_values(
+                    content,
+                    identities,
+                    fail_on_decrypt_error,
+                ) {
+                    Ok(decrypted) => decrypted,
+                    Err(e) => {
+                        warn!(path = %entry.path(), error = %e, "Failed to decrypt inline age values for state saving");
+                        // Fall back to original content to avoid data loss
+                        content.clone()
+                    }
+                };
+                Some((entry.path().to_string(), final_content, *mode))
             } else {
                 None
             }
@@ -495,32 +523,27 @@ fn process_entries_sequential(
     Ok(())
 }
 
-/// Process entries in parallel (for non-interactive mode)
-fn process_entries_parallel(
+/// Get user confirmations for entries with local modifications
+fn get_user_confirmations(
     db: &guisu_engine::state::RedbPersistentState,
     entries: &[&TargetEntry],
     dest_abs: &AbsPath,
     identities: &[guisu_crypto::Identity],
-    stats: &ApplyStats,
-    show_icons: bool,
     fail_on_decrypt_error: bool,
-) -> Result<()> {
+) -> Result<std::collections::HashSet<String>> {
     use dialoguer::{Confirm, theme::ColorfulTheme};
     use std::collections::HashSet;
 
     let mut confirmed_paths = HashSet::new();
     let mut has_warnings = false;
 
-    // Pre-scan for local modifications and get confirmations
     for entry in entries {
         let dest_path = dest_abs.join(entry.path());
-
         if !needs_update(entry, &dest_path, identities, fail_on_decrypt_error)? {
             continue;
         }
 
         let last_written_hash = get_last_written_hash(db, entry);
-
         if let Ok(Some(change_type)) = ConflictHandler::detect_change_type(
             entry,
             dest_abs,
@@ -530,7 +553,6 @@ fn process_entries_parallel(
             match change_type {
                 ChangeType::LocalModification | ChangeType::TrueConflict => {
                     has_warnings = true;
-
                     let change_label = match change_type {
                         ChangeType::LocalModification => "Local modification",
                         ChangeType::TrueConflict => "Conflict (both local and source modified)",
@@ -571,46 +593,82 @@ fn process_entries_parallel(
         println!();
     }
 
+    Ok(confirmed_paths)
+}
+
+/// Process a single entry and return batch data if successful
+fn process_single_entry(
+    entry: &TargetEntry,
+    dest_abs: &AbsPath,
+    identities: &[guisu_crypto::Identity],
+    stats: &ApplyStats,
+    show_icons: bool,
+    fail_on_decrypt_error: bool,
+) -> Result<Option<BatchEntryData>> {
+    let dest_path = dest_abs.join(entry.path());
+
+    if !needs_update(entry, &dest_path, identities, fail_on_decrypt_error)? {
+        debug!(path = %entry.path(), "File is already up to date, skipping");
+        return Ok(None);
+    }
+
+    apply_target_entry(entry, &dest_path, identities, fail_on_decrypt_error)?;
+    debug!(path = %entry.path(), "Applied entry successfully");
+    print_success_entry(entry, show_icons);
+    stats.record_success(entry);
+
+    // Prepare entry data for batch save (only for files)
+    let state_data = if let TargetEntry::File { content, mode, .. } = entry {
+        let final_content = decrypt_inline_age_values(content, identities, fail_on_decrypt_error)
+            .unwrap_or_else(|e| {
+                warn!(path = %entry.path(), error = %e, "Failed to decrypt inline age values for state saving");
+                content.clone()
+            });
+        Some((entry.path().to_string(), final_content, *mode))
+    } else {
+        None
+    };
+
+    Ok(state_data)
+}
+
+/// Process entries in parallel (for non-interactive mode)
+fn process_entries_parallel(
+    db: &guisu_engine::state::RedbPersistentState,
+    entries: &[&TargetEntry],
+    dest_abs: &AbsPath,
+    identities: &[guisu_crypto::Identity],
+    stats: &ApplyStats,
+    show_icons: bool,
+    fail_on_decrypt_error: bool,
+) -> Result<()> {
+    // Get user confirmations for conflicting files
+    let confirmed_paths =
+        get_user_confirmations(db, entries, dest_abs, identities, fail_on_decrypt_error)?;
+
     // Process confirmed files in parallel
-    // Returns entry data for batch save if successfully applied
     let results: Vec<Result<Option<BatchEntryData>>> = entries
         .par_iter()
         .filter(|entry| confirmed_paths.contains(&entry.path().to_string()))
         .map(|entry| {
-            let dest_path = dest_abs.join(entry.path());
-
-            if !needs_update(entry, &dest_path, identities, fail_on_decrypt_error)? {
-                debug!(path = %entry.path(), "File is already up to date, skipping");
-                return Ok(None);
-            }
-
-            match apply_target_entry(entry, &dest_path, identities, fail_on_decrypt_error) {
-                Ok(()) => {
-                    debug!(path = %entry.path(), "Applied entry successfully");
-                    print_success_entry(entry, show_icons);
-                    stats.record_success(entry);
-
-                    // Prepare entry data for batch save
-                    let state_data = if let TargetEntry::File { content, mode, .. } = entry {
-                        Some((entry.path().to_string(), content.clone(), *mode))
-                    } else {
-                        None
-                    };
-
-                    Ok(state_data)
-                }
-                Err(e) => {
-                    warn!(path = %entry.path(), error = %e, "Failed to apply entry");
-                    print_error_entry(entry, &e, show_icons);
-                    stats.record_failure();
-                    Err(e)
-                }
-            }
+            process_single_entry(
+                entry,
+                dest_abs,
+                identities,
+                stats,
+                show_icons,
+                fail_on_decrypt_error,
+            )
+            .map_err(|e| {
+                warn!(path = %entry.path(), error = %e, "Failed to apply entry");
+                print_error_entry(entry, &e, show_icons);
+                stats.record_failure();
+                e
+            })
         })
         .collect();
 
-    // Collect successful entries for batch save and check for errors
-    // Pre-allocate capacity for worst case (all results successful)
+    // Collect successful entries and check for errors
     let mut batch_entries = Vec::with_capacity(results.len());
     for result in results {
         if let Some(data) = result? {
@@ -1199,9 +1257,7 @@ fn detect_config_drift(
     entries: &[&TargetEntry],
     dest_abs: &AbsPath,
 ) -> Vec<String> {
-    use sha2::{Digest, Sha256};
-
-    // Parallel processing of drift detection (3x SHA256 per file = CPU-intensive)
+    // Parallel processing of drift detection (3x blake3 hash per file = CPU-intensive)
     entries
         .par_iter()
         .filter_map(|entry| {
@@ -1241,15 +1297,8 @@ fn detect_config_drift(
                 }
             };
 
-            // Compute actual content hash
-            let mut hasher = Sha256::new();
-            hasher.update(&actual_content);
-            let actual_hash = hasher.finalize().to_vec();
-
-            // Compute target content hash
-            let mut hasher = Sha256::new();
-            hasher.update(target_content);
-            let target_hash = hasher.finalize().to_vec();
+            let actual_hash = guisu_engine::hash::hash_content(&actual_content);
+            let target_hash = guisu_engine::hash::hash_content(target_content);
 
             // Check for drift:
             // 1. actual != last_written (user modified)

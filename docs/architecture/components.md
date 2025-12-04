@@ -74,7 +74,7 @@ Engine Components
 ┌──────────────────┐        ┌──────────────────┐
 │ Destination State│◄──────►│ Persistent State │
 │  (Filesystem)    │        │   (Database)     │
-│  Example: ~/.bashrc       │  SHA256 + mode   │
+│  Example: ~/.bashrc       │  blake3 + mode   │
 └──────────────────┘        └──────────────────┘
 ```
 
@@ -520,7 +520,7 @@ pub trait PersistentState: Send + Sync {
 }
 
 pub struct EntryState {
-    pub content_hash: Vec<u8>,  // SHA256 (32 bytes)
+    pub content_hash: Vec<u8>,  // blake3 (32 bytes)
     pub mode: Option<u32>,      // Unix permissions
 }
 
@@ -755,7 +755,7 @@ pub fn compute_status(
 ┌──────────────────┐        ┌──────────────────┐
 │  目的地状态      │◄──────►│  持久化状态      │
 │ （文件系统）     │        │  （数据库）      │
-│  示例：~/.bashrc │        │  SHA256 + 权限   │
+│  示例：~/.bashrc │        │  blake3 + 权限   │
 └──────────────────┘        └──────────────────┘
 ```
 

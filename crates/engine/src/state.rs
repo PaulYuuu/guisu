@@ -59,16 +59,20 @@ pub struct HookState {
     #[serde(with = "systemtime_serde")]
     #[bincode(with_serde)]
     pub last_executed: Option<std::time::SystemTime>,
-    /// SHA256 hash of the hooks directory content
+    /// blake3 hash of the hooks directory content
     pub content_hash: Option<Vec<u8>>,
     /// Names of hooks that have been executed with mode=once
     /// These hooks will never be executed again unless state is reset
     #[serde(default)]
     pub once_executed: std::collections::HashSet<String>,
     /// Content hashes for hooks with mode=onchange
-    /// Maps hook name to SHA256 hash of its content (cmd or script)
+    /// Maps hook name to blake3 hash of its content (cmd or script)
     #[serde(default)]
     pub onchange_hashes: std::collections::HashMap<String, Vec<u8>>,
+    /// Rendered content for hooks with mode=onchange (for diff display)
+    /// Maps hook name to rendered script content
+    #[serde(default)]
+    pub onchange_rendered: std::collections::HashMap<String, String>,
     /// Snapshot of hooks from last execution (for diff display)
     #[serde(default)]
     pub last_collections: Option<crate::hooks::config::HookCollections>,
@@ -83,6 +87,7 @@ impl HookState {
             content_hash: None,
             once_executed: std::collections::HashSet::new(),
             onchange_hashes: std::collections::HashMap::new(),
+            onchange_rendered: std::collections::HashMap::new(),
             last_collections: None,
         }
     }
@@ -114,6 +119,11 @@ impl HookState {
     /// Update the content hash for a hook with mode=onchange
     pub fn update_onchange_hash(&mut self, hook_name: String, content_hash: Vec<u8>) {
         self.onchange_hashes.insert(hook_name, content_hash);
+    }
+
+    /// Update the rendered content for a hook with mode=onchange (for diff display)
+    pub fn update_onchange_rendered(&mut self, hook_name: String, rendered_content: String) {
+        self.onchange_rendered.insert(hook_name, rendered_content);
     }
 
     /// Update the state from a hooks directory
@@ -272,18 +282,24 @@ impl<'a, T: PersistentState> HookStatePersistence<'a, T> {
 
     /// Load hook state from database
     ///
-    /// Returns a new `HookState` if no state is stored.
+    /// Returns a new `HookState` if no state is stored or if deserialization fails
+    /// (e.g., when schema has changed).
     ///
     /// # Errors
     ///
-    /// Returns an error if the state cannot be loaded or deserialized (e.g., database error, corrupted data)
+    /// Returns an error if the state cannot be loaded from the database (e.g., database error)
     pub fn load(&self) -> Result<HookState> {
         const HOOK_STATE_KEY: &[u8] = b"hooks";
 
         match self.db.get(HOOK_STATE_BUCKET, HOOK_STATE_KEY)? {
-            Some(bytes) => HookState::from_bytes(&bytes).ok_or_else(|| {
-                Error::State("Failed to deserialize hook state from database".to_string())
-            }),
+            Some(bytes) => {
+                // Try to deserialize, but if it fails (e.g., schema changed), return new state
+                // This allows graceful migration when adding new fields
+                Ok(HookState::from_bytes(&bytes).unwrap_or_else(|| {
+                    tracing::warn!("Failed to deserialize hook state (possibly due to schema change), creating new state");
+                    HookState::new()
+                }))
+            }
             None => Ok(HookState::new()),
         }
     }
@@ -786,7 +802,7 @@ impl PersistentState for RedbPersistentState {
     }
 }
 
-/// Compute SHA256 hash of data
+/// Compute blake3 hash of data
 #[inline]
 #[must_use]
 pub fn hash_data(data: &[u8]) -> Vec<u8> {
@@ -796,7 +812,7 @@ pub fn hash_data(data: &[u8]) -> Vec<u8> {
 /// Entry state - tracks file state
 #[derive(Debug, Clone, PartialEq, Eq, bincode::Encode, bincode::Decode)]
 pub struct EntryState {
-    /// SHA256 hash of the file content
+    /// blake3 hash of the file content
     pub content_hash: Vec<u8>,
     /// File mode/permissions (Unix only)
     pub mode: Option<u32>,
@@ -834,7 +850,7 @@ impl EntryState {
 /// Script state - tracks script execution
 #[derive(Debug, Clone, PartialEq, Eq, bincode::Encode, bincode::Decode)]
 pub struct ScriptState {
-    /// SHA256 hash of the script content
+    /// blake3 hash of the script content
     pub content_hash: Vec<u8>,
 }
 
@@ -872,7 +888,7 @@ impl ScriptState {
 /// This enables caching: if the template hasn't changed, we can use the cached rendered config.
 #[derive(Debug, Clone, PartialEq, Eq, bincode::Encode, bincode::Decode)]
 pub struct ConfigMetadata {
-    /// SHA256 hash of the config template source file
+    /// blake3 hash of the config template source file
     /// Used to detect changes in .guisu.toml.j2
     pub template_hash: Vec<u8>,
     /// Rendered TOML configuration string
@@ -1093,7 +1109,7 @@ impl SourceState {
                 // Apply ignore matcher if provided
                 if let Some(matcher) = matcher
                     && let Ok(rel_path) = path.strip_prefix(root_path)
-                    && matcher.is_ignored(rel_path)
+                    && matcher.is_ignored(rel_path, None)
                 {
                     return None;
                 }
