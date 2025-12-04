@@ -1,6 +1,6 @@
 //! Hook configuration state tracking
 //!
-//! Tracks hook configuration file changes using SHA256 hashing.
+//! Tracks hook configuration file changes using blake3 hashing.
 //! This is separate from the execution state tracking in engine/state.rs.
 
 use crate::hash;
@@ -17,7 +17,7 @@ use subtle::ConstantTimeEq;
 /// For execution state (mode=once, mode=onchange), see engine/state.rs `HookState`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookConfigState {
-    /// SHA256 hash of the configuration file content
+    /// blake3 hash of the configuration file content
     pub config_hash: Vec<u8>,
 
     /// Last execution timestamp
@@ -47,7 +47,7 @@ impl HookConfigState {
         })
     }
 
-    /// Compute SHA256 hash of a configuration file
+    /// Compute blake3 hash of a configuration file
     ///
     /// # Errors
     ///
@@ -112,7 +112,7 @@ mod tests {
 
         // Hash should not be empty
         assert!(!state.config_hash.is_empty());
-        assert_eq!(state.config_hash.len(), 32); // SHA256 is 32 bytes
+        assert_eq!(state.config_hash.len(), 32); // blake3 is 32 bytes
 
         // Timestamp should be recent (not UNIX_EPOCH)
         assert_ne!(state.last_executed, SystemTime::UNIX_EPOCH);
@@ -136,7 +136,7 @@ mod tests {
         let hash = HookConfigState::compute_config_hash(temp_file.path()).unwrap();
 
         // Verify hash properties
-        assert_eq!(hash.len(), 32); // SHA256 is 32 bytes
+        assert_eq!(hash.len(), 32); // blake3 is 32 bytes
 
         // Computing hash again should give same result
         let hash2 = HookConfigState::compute_config_hash(temp_file.path()).unwrap();

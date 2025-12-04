@@ -139,6 +139,9 @@ pub fn run_hooks(
     for (hook_name, content_hash) in runner.get_onchange_hashes() {
         state.update_onchange_hash(hook_name, content_hash);
     }
+    for (hook_name, rendered_content) in runner.get_onchange_rendered() {
+        state.update_onchange_rendered(hook_name, rendered_content);
+    }
 
     // Update state in database
     let hooks_dir = source_dir.join(".guisu/hooks");
@@ -505,7 +508,6 @@ pub fn handle_hooks_pre(
     db: &RedbPersistentState,
 ) -> Result<()> {
     use guisu_engine::hooks::config::HookMode;
-    use sha2::{Digest, Sha256};
 
     let is_tty = std::io::stdout().is_terminal();
     let use_nerd_fonts = config.ui.icons.should_show_icons(is_tty);
@@ -540,18 +542,11 @@ pub fn handle_hooks_pre(
             }
 
             // Check if hook will actually execute based on mode
+            // Note: OnChange mode requires template rendering, which is done in the executor
+            // We skip the pre-check here and let the executor handle it
             match h.mode {
-                HookMode::Always => true,
                 HookMode::Once => !state.once_executed.contains(&h.name),
-                HookMode::OnChange => {
-                    // Check if content hash changed
-                    let content = h.get_content();
-                    let mut hasher = Sha256::new();
-                    hasher.update(content.as_bytes());
-                    let current_hash = hasher.finalize().to_vec();
-
-                    state.onchange_hashes.get(&h.name) != Some(&current_hash) // Execute if no previous hash
-                }
+                HookMode::Always | HookMode::OnChange => true, // Let executor decide after rendering templates
             }
         })
         .collect();
@@ -585,12 +580,16 @@ pub fn handle_hooks_pre(
         for (hook_name, content_hash) in runner.get_onchange_hashes() {
             state.update_onchange_hash(hook_name, content_hash);
         }
+        for (hook_name, rendered_content) in runner.get_onchange_rendered() {
+            state.update_onchange_rendered(hook_name, rendered_content);
+        }
 
         println!(
             "{} {}",
             StatusIcon::Success.get(use_nerd_fonts),
             "Pre hooks completed!".green()
         );
+        println!(); // Add blank line after pre hooks
     }
 
     // Always update state in database, even if no hooks ran
@@ -617,7 +616,6 @@ pub fn handle_hooks_post(
     db: &RedbPersistentState,
 ) -> Result<()> {
     use guisu_engine::hooks::config::HookMode;
-    use sha2::{Digest, Sha256};
 
     let is_tty = std::io::stdout().is_terminal();
     let use_nerd_fonts = config.ui.icons.should_show_icons(is_tty);
@@ -652,24 +650,19 @@ pub fn handle_hooks_post(
             }
 
             // Check if hook will actually execute based on mode
+            // Note: OnChange mode requires template rendering, which is done in the executor
+            // We skip the pre-check here and let the executor handle it
             match h.mode {
-                HookMode::Always => true,
                 HookMode::Once => !state.once_executed.contains(&h.name),
-                HookMode::OnChange => {
-                    // Check if content hash changed
-                    let content = h.get_content();
-                    let mut hasher = Sha256::new();
-                    hasher.update(content.as_bytes());
-                    let current_hash = hasher.finalize().to_vec();
-
-                    state.onchange_hashes.get(&h.name) != Some(&current_hash) // Execute if no previous hash
-                }
+                HookMode::Always | HookMode::OnChange => true, // Let executor decide after rendering templates
             }
         })
         .collect();
 
     // Only run hooks if there are active ones, but always update state
     if !active_hooks.is_empty() {
+        println!(); // Add blank line before post hooks
+
         // Display hooks being run
         for hook in &active_hooks {
             println!(
@@ -696,6 +689,9 @@ pub fn handle_hooks_post(
         }
         for (hook_name, content_hash) in runner.get_onchange_hashes() {
             state.update_onchange_hash(hook_name, content_hash);
+        }
+        for (hook_name, rendered_content) in runner.get_onchange_rendered() {
+            state.update_onchange_rendered(hook_name, rendered_content);
         }
 
         println!(
@@ -736,9 +732,10 @@ fn create_template_engine(source_dir: &Path, config: &Config) -> Result<impl Tem
     // Create template context with guisu info and all variables
     let working_tree = guisu_engine::git::find_working_tree(source_dir)
         .unwrap_or_else(|| source_dir.to_path_buf());
+    let dotfiles_dir = config.dotfiles_dir(source_dir);
     let context = TemplateContext::new()
         .with_guisu_info(
-            crate::path_to_string(source_dir),
+            crate::path_to_string(&dotfiles_dir),
             crate::path_to_string(&working_tree),
             crate::path_to_string(&dst_dir),
             crate::path_to_string(&config.general.root_entry),

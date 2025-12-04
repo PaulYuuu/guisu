@@ -95,7 +95,11 @@ impl Hook {
     pub fn get_content(&self) -> String {
         if let Some(cmd) = &self.cmd {
             cmd.clone()
+        } else if let Some(content) = &self.script_content {
+            // Use actual script content if available (for onchange detection)
+            content.clone()
         } else if let Some(script) = &self.script {
+            // Fallback to script path if content not loaded
             script.clone()
         } else {
             String::new()

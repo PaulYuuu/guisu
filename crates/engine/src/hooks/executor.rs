@@ -10,6 +10,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Result tuple from hook execution: (`cached_hash`, `rendered_content`, `execution_result`)
+type HookExecutionResult = (Option<Vec<u8>>, Option<String>, Result<()>);
+
 /// Template rendering trait for hook scripts
 pub trait TemplateRenderer {
     /// Render a template string
@@ -62,6 +65,8 @@ where
     persistent_onchange: std::collections::HashMap<String, Vec<u8>>,
     /// Content hashes for onchange hooks executed in this session (thread-safe)
     onchange_hashes: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    /// Rendered content for onchange hooks executed in this session (thread-safe)
+    onchange_rendered: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
 }
 
 impl<'a> HookRunner<'a, NoOpRenderer> {
@@ -141,16 +146,33 @@ where
             .clone()
     }
 
+    /// Get the rendered content for hooks with mode=onchange from this session
+    ///
+    /// This should be saved to persistent state after running hooks for diff display
+    ///
+    /// # Panics
+    ///
+    /// Panics if the mutex is poisoned (should never happen in normal operation)
+    pub fn get_onchange_rendered(&self) -> std::collections::HashMap<String, String> {
+        self.onchange_rendered
+            .lock()
+            .expect("OnChange rendered mutex poisoned")
+            .clone()
+    }
+
     /// Check if a hook should be skipped based on its mode
     ///
-    /// Returns (`should_skip`, reason, `cached_hash`) for logging and state update
-    /// The `cached_hash` is only computed for `OnChange` mode to avoid redundant hashing
+    /// Returns (`should_skip`, reason, `cached_hash`, `rendered_content`) for logging and state update
+    /// The `cached_hash` and `rendered_content` are only computed for `OnChange` mode to avoid redundant work
     #[tracing::instrument(skip(self), fields(hook_name = %hook.name, hook_mode = ?hook.mode))]
-    fn should_skip_hook(&self, hook: &Hook) -> (bool, &'static str, Option<Vec<u8>>) {
+    fn should_skip_hook(
+        &self,
+        hook: &Hook,
+    ) -> (bool, &'static str, Option<Vec<u8>>, Option<String>) {
         match hook.mode {
             HookMode::Always => {
                 tracing::trace!("Hook will run (mode=always)");
-                (false, "", None)
+                (false, "", None, None)
             }
 
             HookMode::Once => {
@@ -162,23 +184,48 @@ where
                     .contains(&hook.name)
                 {
                     tracing::debug!("Skipping hook: already executed in this session");
-                    return (true, "already executed in this session (mode=once)", None);
+                    return (
+                        true,
+                        "already executed in this session (mode=once)",
+                        None,
+                        None,
+                    );
                 }
 
                 // Check if executed in previous sessions
                 if self.persistent_once.contains(&hook.name) {
                     tracing::debug!("Skipping hook: already executed previously");
-                    return (true, "already executed previously (mode=once)", None);
+                    return (true, "already executed previously (mode=once)", None, None);
                 }
 
                 tracing::trace!("Hook will run (mode=once, first execution)");
-                (false, "", None)
+                (false, "", None, None)
             }
 
             HookMode::OnChange => {
                 // Compute content hash (cached for later use)
+                // For template scripts, use rendered content to detect changes in dependencies
                 let content = hook.get_content();
-                let current_hash = crate::hash::hash_content(content.as_bytes());
+                let content_to_hash = if let Some(script) = &hook.script {
+                    if script.to_lowercase().ends_with(".j2") {
+                        // Script is a template, render it to detect dependency changes
+                        match self.template_renderer.render(&content) {
+                            Ok(rendered) => rendered,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to render template for onchange detection: {}",
+                                    e
+                                );
+                                content // Fallback to original content
+                            }
+                        }
+                    } else {
+                        content
+                    }
+                } else {
+                    content
+                };
+                let current_hash = crate::hash::hash_content(content_to_hash.as_bytes());
 
                 // Check if content changed from this session
                 if let Some(session_hash) = self
@@ -193,6 +240,7 @@ where
                         true,
                         "content unchanged in this session (mode=onchange)",
                         Some(current_hash),
+                        Some(content_to_hash.clone()),
                     );
                 }
 
@@ -205,20 +253,26 @@ where
                             true,
                             "content unchanged (mode=onchange)",
                             Some(current_hash),
+                            Some(content_to_hash.clone()),
                         );
                     }
                 }
 
                 tracing::trace!("Hook will run (mode=onchange, content changed)");
-                (false, "", Some(current_hash))
+                (false, "", Some(current_hash), Some(content_to_hash))
             }
         }
     }
 
     /// Mark a hook as executed based on its mode
     ///
-    /// Accepts a `cached_hash` from `should_skip_hook` to avoid redundant hash computation
-    fn mark_hook_executed(&self, hook: &Hook, cached_hash: Option<Vec<u8>>) {
+    /// Accepts a `cached_hash` and `rendered_content` from `should_skip_hook` to avoid redundant work
+    fn mark_hook_executed(
+        &self,
+        hook: &Hook,
+        cached_hash: Option<Vec<u8>>,
+        rendered_content: Option<String>,
+    ) {
         match hook.mode {
             HookMode::Always => {
                 // No tracking needed
@@ -242,6 +296,14 @@ where
                     .lock()
                     .expect("OnChange hashes mutex poisoned")
                     .insert(hook.name.clone(), content_hash);
+
+                // Save rendered content if available (for diff display)
+                if let Some(content) = rendered_content {
+                    self.onchange_rendered
+                        .lock()
+                        .expect("OnChange rendered mutex poisoned")
+                        .insert(hook.name.clone(), content);
+                }
             }
         }
     }
@@ -252,6 +314,7 @@ where
     ///
     /// Returns an error if any hook execution fails (e.g., hook script fails, template rendering error, execution timeout)
     #[tracing::instrument(skip(self), fields(stage = %stage.name()))]
+    #[allow(clippy::too_many_lines)]
     pub fn run_stage(&self, stage: HookStage) -> Result<()> {
         use rayon::prelude::*;
         use std::collections::BTreeMap;
@@ -282,9 +345,11 @@ where
             }
 
             // Skip based on execution mode
-            let (should_skip, reason, _cached_hash) = self.should_skip_hook(hook);
+            let (should_skip, reason, cached_hash, rendered_content) = self.should_skip_hook(hook);
             if should_skip {
                 tracing::debug!("Skipping hook '{}' ({})", hook.name, reason);
+                // Save state even for skipped hooks (for diff display)
+                self.mark_hook_executed(hook, cached_hash, rendered_content);
                 continue;
             }
 
@@ -310,11 +375,12 @@ where
 
             // Parallel execution within same order group
             // All hooks with the same order number run concurrently
-            let results: Vec<(Option<Vec<u8>>, Result<()>)> = order_hooks
+            let results: Vec<HookExecutionResult> = order_hooks
                 .par_iter()
                 .map(|hook| {
-                    // Get cached hash for state tracking (avoids redundant hash computation)
-                    let (_should_skip, _reason, cached_hash) = self.should_skip_hook(hook);
+                    // Get cached hash and rendered content for state tracking (avoids redundant work)
+                    let (_should_skip, _reason, cached_hash, rendered_content) =
+                        self.should_skip_hook(hook);
 
                     // Create a span for this hook execution with structured fields
                     let span = tracing::info_span!(
@@ -358,16 +424,18 @@ where
                         }
                     }
 
-                    (cached_hash, result)
+                    (cached_hash, rendered_content, result)
                 })
                 .collect();
 
             // Process results: mark hooks as executed and check for errors
-            for ((cached_hash, result), hook) in results.into_iter().zip(order_hooks.iter()) {
+            for ((cached_hash, rendered_content, result), hook) in
+                results.into_iter().zip(order_hooks.iter())
+            {
                 match result {
                     Ok(()) => {
-                        // Mark hook as executed based on mode (with cached hash)
-                        self.mark_hook_executed(hook, cached_hash);
+                        // Mark hook as executed based on mode (with cached hash and rendered content)
+                        self.mark_hook_executed(hook, cached_hash, rendered_content);
                     }
                     Err(e) => {
                         if hook.failfast {
@@ -378,7 +446,7 @@ where
                             )));
                         }
                         // Still mark as executed for non-failfast hooks
-                        self.mark_hook_executed(hook, cached_hash);
+                        self.mark_hook_executed(hook, cached_hash, rendered_content);
                     }
                 }
             }
@@ -1049,6 +1117,9 @@ where
             onchange_hashes: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            onchange_rendered: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 }
@@ -1223,7 +1294,7 @@ mod tests {
         let runner = HookRunner::new(&collections, temp.path());
 
         let hook = create_test_hook("test", HookMode::Always);
-        let (should_skip, _reason, hash) = runner.should_skip_hook(&hook);
+        let (should_skip, _reason, hash, _rendered_content) = runner.should_skip_hook(&hook);
 
         assert!(!should_skip);
         assert!(hash.is_none());
@@ -1236,7 +1307,7 @@ mod tests {
         let runner = HookRunner::new(&collections, temp.path());
 
         let hook = create_test_hook("test", HookMode::Once);
-        let (should_skip, _reason, hash) = runner.should_skip_hook(&hook);
+        let (should_skip, _reason, hash, _rendered_content) = runner.should_skip_hook(&hook);
 
         assert!(!should_skip);
         assert!(hash.is_none());
@@ -1257,7 +1328,7 @@ mod tests {
             .unwrap()
             .insert("test".to_string());
 
-        let (should_skip, reason, _hash) = runner.should_skip_hook(&hook);
+        let (should_skip, reason, _hash, _rendered_content) = runner.should_skip_hook(&hook);
 
         assert!(should_skip);
         assert!(reason.contains("already executed in this session"));
@@ -1276,7 +1347,7 @@ mod tests {
             .build();
 
         let hook = create_test_hook("test", HookMode::Once);
-        let (should_skip, reason, _hash) = runner.should_skip_hook(&hook);
+        let (should_skip, reason, _hash, _rendered_content) = runner.should_skip_hook(&hook);
 
         assert!(should_skip);
         assert!(reason.contains("already executed previously"));
@@ -1289,7 +1360,7 @@ mod tests {
         let runner = HookRunner::new(&collections, temp.path());
 
         let hook = create_test_hook("test", HookMode::OnChange);
-        let (should_skip, _reason, hash) = runner.should_skip_hook(&hook);
+        let (should_skip, _reason, hash, _rendered_content) = runner.should_skip_hook(&hook);
 
         assert!(!should_skip);
         assert!(hash.is_some()); // Hash should be computed
@@ -1304,7 +1375,7 @@ mod tests {
         let hook = create_test_hook("test", HookMode::OnChange);
 
         // Get initial hash
-        let (_skip, _reason, hash) = runner.should_skip_hook(&hook);
+        let (_skip, _reason, hash, _rendered_content) = runner.should_skip_hook(&hook);
         let hash = hash.unwrap();
 
         // Store hash in session
@@ -1315,7 +1386,7 @@ mod tests {
             .insert("test".to_string(), hash);
 
         // Check again - should skip now
-        let (should_skip, reason, _hash) = runner.should_skip_hook(&hook);
+        let (should_skip, reason, _hash, _rendered_content) = runner.should_skip_hook(&hook);
 
         assert!(should_skip);
         assert!(reason.contains("content unchanged in this session"));
@@ -1338,7 +1409,7 @@ mod tests {
             .persistent_state(HashSet::new(), persistent_onchange)
             .build();
 
-        let (should_skip, reason, _hash) = runner.should_skip_hook(&hook);
+        let (should_skip, reason, _hash, _rendered_content) = runner.should_skip_hook(&hook);
 
         assert!(should_skip);
         assert!(reason.contains("content unchanged"));
@@ -1358,7 +1429,7 @@ mod tests {
             .build();
 
         let hook = create_test_hook("test", HookMode::OnChange);
-        let (should_skip, _reason, hash) = runner.should_skip_hook(&hook);
+        let (should_skip, _reason, hash, _rendered_content) = runner.should_skip_hook(&hook);
 
         assert!(!should_skip);
         assert!(hash.is_some());
@@ -1371,7 +1442,7 @@ mod tests {
         let runner = HookRunner::new(&collections, temp.path());
 
         let hook = create_test_hook("test", HookMode::Always);
-        runner.mark_hook_executed(&hook, None);
+        runner.mark_hook_executed(&hook, None, None);
 
         // Should not be tracked
         assert!(runner.once_executed.lock().unwrap().is_empty());
@@ -1385,7 +1456,7 @@ mod tests {
         let runner = HookRunner::new(&collections, temp.path());
 
         let hook = create_test_hook("test", HookMode::Once);
-        runner.mark_hook_executed(&hook, None);
+        runner.mark_hook_executed(&hook, None, None);
 
         // Should be in once_executed
         assert!(runner.once_executed.lock().unwrap().contains("test"));
@@ -1400,7 +1471,7 @@ mod tests {
         let hook = create_test_hook("test", HookMode::OnChange);
         let cached_hash = vec![0x12, 0x34, 0x56];
 
-        runner.mark_hook_executed(&hook, Some(cached_hash.clone()));
+        runner.mark_hook_executed(&hook, Some(cached_hash.clone()), None);
 
         // Should be in onchange_hashes
         let hashes = runner.onchange_hashes.lock().unwrap();
@@ -1414,7 +1485,7 @@ mod tests {
         let runner = HookRunner::new(&collections, temp.path());
 
         let hook = create_test_hook("test", HookMode::OnChange);
-        runner.mark_hook_executed(&hook, None);
+        runner.mark_hook_executed(&hook, None, None);
 
         // Should compute and store hash
         let hashes = runner.onchange_hashes.lock().unwrap();
