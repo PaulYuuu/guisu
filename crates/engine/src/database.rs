@@ -113,6 +113,33 @@ pub fn delete_entry_state(db: &RedbPersistentState, path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Get all entry states from database
+///
+/// Returns a `HashMap` of all entries in the database, keyed by path.
+/// This is useful for validation and bulk operations.
+///
+/// # Errors
+///
+/// Returns an error if entries cannot be retrieved from the database
+pub fn get_all_entry_states(
+    db: &RedbPersistentState,
+) -> Result<std::collections::HashMap<String, EntryState>> {
+    use crate::state::PersistentState;
+    use std::collections::HashMap;
+
+    let mut entries = HashMap::new();
+
+    db.for_each(ENTRY_STATE_BUCKET, |key, value| {
+        let path = String::from_utf8_lossy(key).to_string();
+        if let Some(state) = EntryState::from_bytes(value) {
+            entries.insert(path, state);
+        }
+        Ok(())
+    })?;
+
+    Ok(entries)
+}
+
 /// Save config metadata to database
 ///
 /// Stores the rendered configuration along with the template source hash for cache validation.

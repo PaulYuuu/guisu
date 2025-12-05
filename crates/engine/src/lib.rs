@@ -21,6 +21,7 @@ pub mod hash;
 pub mod hooks;
 pub mod processor;
 pub mod state;
+pub mod state_validator;
 pub mod system;
 
 // Re-export path types from core
