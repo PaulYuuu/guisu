@@ -708,7 +708,7 @@ impl Command for ApplyCommand {
         let database = context.database();
 
         if self.dry_run {
-            info!("{}", "Dry run mode - no changes will be made".dimmed());
+            info!("Dry run mode - no changes will be made");
         }
 
         // Load age identities for decryption
@@ -1140,6 +1140,13 @@ impl ApplyStats {
 /// Print a dry-run entry
 fn print_dry_run_entry(entry: &TargetEntry, use_nerd_fonts: bool) {
     use lscolors::{LsColors, Style};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Print blank line before first file to separate from INFO message
+    static FIRST_PRINT: AtomicBool = AtomicBool::new(true);
+    if FIRST_PRINT.swap(false, Ordering::Relaxed) {
+        println!();
+    }
 
     let lscolors = LsColors::from_env().unwrap_or_default();
     let path = entry.path();
@@ -1168,7 +1175,7 @@ fn print_dry_run_entry(entry: &TargetEntry, use_nerd_fonts: bool) {
     let styled_icon = file_style.paint(icon);
     let styled_path = file_style.paint(&display_path);
 
-    println!("  {} {} {}", "[dry-run]".dimmed(), styled_icon, styled_path);
+    println!("  {styled_icon} {styled_path}");
 }
 
 /// Print a successful entry
