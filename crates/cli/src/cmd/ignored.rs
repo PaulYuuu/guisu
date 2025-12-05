@@ -8,7 +8,10 @@ use anyhow::{Context, Result};
 use guisu_config::IgnoreMatcher;
 use guisu_config::IgnoresConfig;
 use guisu_core::platform::CURRENT_PLATFORM;
+use guisu_engine::entry::SourceEntry;
+use guisu_engine::state::SourceState;
 use lscolors::{LsColors, Style};
+use owo_colors::OwoColorize;
 use std::io::IsTerminal;
 use std::path::Path;
 
@@ -29,10 +32,6 @@ use guisu_config::Config;
 /// - Loading ignore patterns from .guisu/ignores.toml fails
 /// - Reading source state fails
 pub fn run_list(source_dir: &Path, config: &Config) -> Result<()> {
-    use guisu_engine::entry::SourceEntry;
-    use guisu_engine::state::SourceState;
-    use owo_colors::OwoColorize;
-
     let platform = CURRENT_PLATFORM.os;
 
     // Detect if output is to a terminal for icon auto mode
@@ -158,8 +157,6 @@ pub fn run_list(source_dir: &Path, config: &Config) -> Result<()> {
 ///
 /// Returns an error if loading .guisu/ignores.toml fails
 pub fn run_show(source_dir: &Path, _config: &Config, show_all: bool) -> Result<()> {
-    use owo_colors::OwoColorize;
-
     let platform = CURRENT_PLATFORM.os;
 
     // Load ignore config from source_dir/.guisu/ignores.toml

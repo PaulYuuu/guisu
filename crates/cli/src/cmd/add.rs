@@ -5,6 +5,7 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use guisu_core::path::AbsPath;
+use guisu_crypto::encrypt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::warn;
@@ -561,8 +562,6 @@ fn validate_encryption_config(config: &Config) -> Result<()> {
 
 /// Encrypt content using age
 fn encrypt_content(content: &[u8], config: &Config) -> Result<Vec<u8>> {
-    use guisu_crypto::encrypt;
-
     // Try to get recipients from config first (for team collaboration)
     let recipients = if let Some(recipients) = config.age_recipients()? {
         // Use configured recipients

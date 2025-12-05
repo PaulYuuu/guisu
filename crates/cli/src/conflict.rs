@@ -7,6 +7,7 @@ use guisu_core::path::AbsPath;
 use guisu_engine::entry::TargetEntry;
 use owo_colors::OwoColorize;
 use std::fs;
+use subtle::ConstantTimeEq;
 
 use crate::ui::{
     ChangePreview, ChangeSummary, ConflictAction, ConflictPrompt, DiffFormat, DiffViewer,
@@ -72,8 +73,6 @@ pub fn compare_three_way(
     dest_hash: &[u8],
     base_hash: Option<&[u8]>,
 ) -> ThreeWayComparisonResult {
-    use subtle::ConstantTimeEq;
-
     if let Some(base) = base_hash {
         // Three-way comparison with base state
         let source_changed = !bool::from(source_hash.ct_eq(base));

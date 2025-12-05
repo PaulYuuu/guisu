@@ -7,12 +7,15 @@ use clap::Args;
 use guisu_core::path::AbsPath;
 use guisu_engine::adapters::crypto::CryptoDecryptorAdapter;
 use guisu_engine::adapters::template::TemplateRendererAdapter;
-use guisu_engine::entry::TargetEntry;
+use guisu_engine::entry::{SourceEntry, TargetEntry};
+use guisu_engine::hooks::config::HookMode;
 use guisu_engine::processor::ContentProcessor;
 use guisu_engine::state::{RedbPersistentState, SourceState, TargetState};
+use guisu_template::TemplateContext;
 use owo_colors::OwoColorize;
 use rayon::prelude::*;
-use similar::TextDiff;
+use similar::{ChangeTag, TextDiff};
+use std::collections::HashSet;
 use std::env;
 use std::fmt::Write as FmtWrite;
 use std::fs;
@@ -26,6 +29,7 @@ use tracing::{debug, warn};
 use crate::command::Command;
 use crate::common::RuntimeContext;
 use crate::stats::DiffStats;
+use crate::ui::{FileDiff, FileStatus, InteractiveDiffViewer};
 use crate::utils::path::SourceDirExt;
 use guisu_config::Config;
 
@@ -123,8 +127,6 @@ fn build_diff_target_state(
     shown_decryption_error: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     config: &Config,
 ) -> TargetState {
-    use guisu_engine::entry::SourceEntry;
-
     let mut target_state = TargetState::new();
 
     for source_entry in source_state.entries() {
@@ -280,8 +282,6 @@ fn build_interactive_file_diffs(
     metadata: &guisu_engine::state::Metadata,
     dest_abs: &AbsPath,
 ) -> Vec<crate::ui::FileDiff> {
-    use crate::ui::{FileDiff, FileStatus};
-
     target_state
         .entries()
         .filter_map(|entry| {
@@ -491,8 +491,6 @@ fn run_impl(
 
     // If interactive mode is enabled, use the interactive diff viewer
     if interactive {
-        use crate::ui::InteractiveDiffViewer;
-
         let file_diffs =
             build_interactive_file_diffs(&target_state, filter_paths.as_ref(), &metadata, dest_abs);
 
@@ -643,8 +641,6 @@ fn generate_unified_diff(
     old_mode: Option<u32>,
     new_mode: Option<u32>,
 ) -> String {
-    use similar::ChangeTag;
-
     const PERM_MASK: u32 = 0o7777;
     let mut output = String::new();
 
@@ -697,13 +693,19 @@ fn generate_unified_diff(
         // Add changes using iter_changes to get proper change tags
         for op in group {
             for change in diff.iter_changes(op) {
-                let (sign, colored_value) = match change.tag() {
-                    ChangeTag::Delete => ("-", format!("{}", change.value().red())),
-                    ChangeTag::Insert => ("+", format!("{}", change.value().green())),
-                    ChangeTag::Equal => (" ", change.value().to_string()),
+                let sign = match change.tag() {
+                    ChangeTag::Delete => "-",
+                    ChangeTag::Insert => "+",
+                    ChangeTag::Equal => " ",
                 };
+                let line = format!("{}{}", sign, change.value());
+                let colored_line = match change.tag() {
+                    ChangeTag::Delete => line.red().to_string(),
+                    ChangeTag::Insert => line.green().to_string(),
+                    ChangeTag::Equal => line,
+                };
+                let _ = write!(output, "{colored_line}");
 
-                let _ = write!(output, "{sign}{colored_value}");
                 if !change.value().ends_with('\n') {
                     output.push('\n');
                 }
@@ -829,9 +831,6 @@ fn print_stats(stats: &DiffStats) {
 
 /// Render hook template content
 fn render_hook_template(source_dir: &Path, content: &str, config: &Config) -> Result<String> {
-    use guisu_template::TemplateContext;
-    use std::sync::Arc;
-
     // Load age identities for encryption support in templates
     let identities = Arc::new(config.age_identities().unwrap_or_else(|_| Vec::new()));
 
@@ -894,8 +893,6 @@ fn display_script_name(script: &str) -> &str {
 
 /// Print a new (added) hook with its full content
 fn print_new_hook_content(source_dir: &Path, current: &guisu_engine::hooks::Hook, config: &Config) {
-    use owo_colors::OwoColorize;
-
     if let Some(ref cmd) = current.cmd {
         println!("    {} cmd:", "+".bold());
         for line in cmd.lines() {
@@ -924,8 +921,6 @@ fn print_new_hook_content(source_dir: &Path, current: &guisu_engine::hooks::Hook
 
 /// Print cmd changes between hooks
 fn print_cmd_changes(old_cmd: Option<&str>, new_cmd: Option<&str>) {
-    use owo_colors::OwoColorize;
-
     if old_cmd == new_cmd {
         return;
     }
@@ -962,8 +957,6 @@ fn print_script_changes(
     current: &guisu_engine::hooks::Hook,
     config: &Config,
 ) {
-    use owo_colors::OwoColorize;
-
     // For non-template scripts, we can do an early return if content is identical
     // For template scripts, we need to render and compare since dependencies might have changed
     let is_template = current
@@ -1065,8 +1058,6 @@ fn print_script_changes(
 
 /// Print other attribute changes (order, mode)
 fn print_other_changes(prev: &guisu_engine::hooks::Hook, current: &guisu_engine::hooks::Hook) {
-    use owo_colors::OwoColorize;
-
     if current.order != prev.order {
         println!(
             "    {} order: {} -> {}",
@@ -1094,8 +1085,6 @@ fn print_hook_diff(
     platform: &str,
     config: &Config,
 ) {
-    use owo_colors::OwoColorize;
-
     let is_active = current.should_run_on(platform);
 
     match previous {
@@ -1123,19 +1112,23 @@ fn print_hook_diff(
 
 /// Generate unified diff for text content
 fn generate_text_diff(old: &str, new: &str) -> String {
-    use similar::{ChangeTag, TextDiff};
-
     let diff = TextDiff::from_lines(old, new);
     let mut output = String::new();
 
     for change in diff.iter_all_changes() {
-        let (sign, line_colored) = match change.tag() {
-            ChangeTag::Delete => ("-", format!("{}", change.value().red())),
-            ChangeTag::Insert => ("+", format!("{}", change.value().green())),
-            ChangeTag::Equal => (" ", change.value().to_string()),
+        let sign = match change.tag() {
+            ChangeTag::Delete => "-",
+            ChangeTag::Insert => "+",
+            ChangeTag::Equal => " ",
         };
+        let line = format!("{}{}", sign, change.value());
+        let colored_line = match change.tag() {
+            ChangeTag::Delete => line.red().to_string(),
+            ChangeTag::Insert => line.green().to_string(),
+            ChangeTag::Equal => line,
+        };
+        let _ = write!(output, "{colored_line}");
 
-        let _ = write!(output, "{sign} {line_colored}");
         if !change.value().ends_with('\n') {
             output.push('\n');
         }
@@ -1152,8 +1145,6 @@ fn print_removed_hook(
     platform: &str,
     config: &Config,
 ) {
-    use owo_colors::OwoColorize;
-
     let is_active = hook.should_run_on(platform);
 
     println!();
@@ -1210,9 +1201,6 @@ pub fn compare_and_print_hooks(
     onchange_hashes: &std::collections::HashMap<String, Vec<u8>>,
     onchange_rendered: &std::collections::HashMap<String, String>,
 ) -> bool {
-    use guisu_engine::hooks::config::HookMode;
-    use std::collections::HashSet;
-
     let last_names: HashSet<_> = last_hooks.iter().map(|h| h.name.as_str()).collect();
     let current_names: HashSet<_> = current_hooks.iter().map(|h| h.name.as_str()).collect();
     let mut any_printed = false;

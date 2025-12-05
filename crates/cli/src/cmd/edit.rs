@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
+use guisu_crypto::{decrypt, decrypt_file_content, encrypt, encrypt_inline};
 use owo_colors::OwoColorize;
 use std::env;
 use std::fs;
@@ -226,8 +227,6 @@ fn edit_file_with_inline_encryption(
     config: &Config,
     identities: &[guisu_crypto::Identity],
 ) -> Result<()> {
-    use guisu_crypto::{decrypt_file_content, encrypt_inline};
-
     // Read the original file content
     let original_content = fs::read_to_string(source_file)
         .with_context(|| format!("Failed to read file: {}", source_file.display()))?;
@@ -298,8 +297,6 @@ fn edit_file_with_inline_encryption(
 
 /// Edit an encrypted file with transparent decryption/encryption
 fn edit_encrypted_file(source_file: &Path, config: &Config) -> Result<()> {
-    use guisu_crypto::{decrypt, encrypt};
-
     // Load all configured identities
     let identities = config
         .age_identities()

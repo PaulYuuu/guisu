@@ -3,9 +3,14 @@
 //! Commands for generating and showing age identities.
 
 use anyhow::{Context, Result};
-use guisu_crypto::{Identity, IdentityFile};
+use guisu_crypto::{
+    Identity, IdentityFile, Recipient, decrypt_inline, encrypt_file_content, encrypt_inline,
+    load_identities,
+};
 use owo_colors::OwoColorize;
+use std::io::{self, Write};
 use std::path::PathBuf;
+use walkdir::WalkDir;
 
 use guisu_config::Config;
 
@@ -141,9 +146,6 @@ pub fn encrypt(
     recipient_strs: &[String],
     config: &Config,
 ) -> Result<()> {
-    use guisu_crypto::{Recipient, encrypt_inline};
-    use std::io::{self, Write};
-
     // Determine recipients
     let recipients = if recipient_strs.is_empty() {
         // No recipients specified, derive from all configured identities
@@ -208,8 +210,6 @@ pub fn encrypt(
 /// - Loading configured identities fails
 /// - Decryption fails (invalid format or wrong identity)
 pub fn decrypt(value: &str, config: &Config) -> Result<()> {
-    use guisu_crypto::decrypt_inline;
-
     // Load all configured identities
     let identities = config.age_identities()?;
 
@@ -227,9 +227,6 @@ fn load_migration_identities(
     old_identity_paths: &[PathBuf],
     new_identity_paths: &[PathBuf],
 ) -> Result<(Vec<guisu_crypto::Identity>, Vec<guisu_crypto::Recipient>)> {
-    use guisu_crypto::load_identities;
-    use owo_colors::OwoColorize;
-
     // Load old identities
     println!("{}", "Loading old identities...".dimmed());
     let mut old_identities = Vec::new();
@@ -261,9 +258,6 @@ fn load_migration_identities(
 
 /// Scan source directory for encrypted files
 fn scan_encrypted_files(source_dir: &std::path::Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
-    use owo_colors::OwoColorize;
-    use walkdir::WalkDir;
-
     println!("{}", "Scanning for encrypted files...".dimmed());
 
     let mut encrypted_files = Vec::new(); // .age files
@@ -307,8 +301,6 @@ fn display_migration_file_list(
     inline_files: &[PathBuf],
     source_dir: &std::path::Path,
 ) {
-    use owo_colors::OwoColorize;
-
     println!("{}", "Files to be migrated:".bold());
 
     if !encrypted_files.is_empty() {
@@ -337,9 +329,6 @@ fn perform_file_migrations(
     old_identities: &[guisu_crypto::Identity],
     new_recipients: &[guisu_crypto::Recipient],
 ) -> Result<(usize, usize)> {
-    use owo_colors::OwoColorize;
-    use std::io::{self, Write};
-
     println!("{}", "Migrating files...".bold().cyan());
 
     let mut migrated_count = 0;
@@ -409,9 +398,6 @@ pub fn migrate(
     dry_run: bool,
     yes: bool,
 ) -> Result<()> {
-    use owo_colors::OwoColorize;
-    use std::io::{self, Write};
-
     println!("{}", "Age Key Migration".bold().cyan());
     println!();
 
@@ -505,16 +491,14 @@ fn migrate_encrypted_file(
     old_identities: &[guisu_crypto::Identity],
     new_recipients: &[guisu_crypto::Recipient],
 ) -> Result<()> {
-    use guisu_crypto::{decrypt, encrypt};
-
     // Read and decrypt with old key
     let encrypted_content = std::fs::read(file_path)?;
-    let decrypted = decrypt(&encrypted_content, old_identities)
+    let decrypted = guisu_crypto::decrypt(&encrypted_content, old_identities)
         .context("Failed to decrypt with old identities")?;
 
     // Re-encrypt with new key
-    let re_encrypted =
-        encrypt(&decrypted, new_recipients).context("Failed to encrypt with new recipients")?;
+    let re_encrypted = guisu_crypto::encrypt(&decrypted, new_recipients)
+        .context("Failed to encrypt with new recipients")?;
 
     // Write back
     std::fs::write(file_path, re_encrypted)
@@ -529,8 +513,6 @@ fn migrate_inline_file(
     old_identities: &[guisu_crypto::Identity],
     new_recipients: &[guisu_crypto::Recipient],
 ) -> Result<()> {
-    use guisu_crypto::encrypt_file_content;
-
     // Read file content
     let content = std::fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
