@@ -510,8 +510,6 @@ pub fn handle_hooks_pre(
 ) -> Result<()> {
     use guisu_engine::hooks::config::HookMode;
 
-    let is_tty = std::io::stdout().is_terminal();
-    let use_nerd_fonts = config.ui.icons.should_show_icons(is_tty);
     // Load hooks using HookLoader
     let loader = HookLoader::new(source_dir);
 
@@ -554,15 +552,6 @@ pub fn handle_hooks_pre(
 
     // Only run hooks if there are active ones, but always update state
     if !active_hooks.is_empty() {
-        // Display hooks being run
-        for hook in &active_hooks {
-            println!(
-                "{} Running hook: {}",
-                StatusIcon::Hook.get(use_nerd_fonts),
-                hook.name.cyan()
-            );
-        }
-
         // Create template renderer
         let renderer = create_template_engine(source_dir, config)?;
 
@@ -584,13 +573,6 @@ pub fn handle_hooks_pre(
         for (hook_name, rendered_content) in runner.get_onchange_rendered() {
             state.update_onchange_rendered(hook_name, rendered_content);
         }
-
-        println!(
-            "{} {}",
-            StatusIcon::Success.get(use_nerd_fonts),
-            "Pre hooks completed!".green()
-        );
-        println!(); // Add blank line after pre hooks
     }
 
     // Always update state in database, even if no hooks ran
@@ -618,8 +600,6 @@ pub fn handle_hooks_post(
 ) -> Result<()> {
     use guisu_engine::hooks::config::HookMode;
 
-    let is_tty = std::io::stdout().is_terminal();
-    let use_nerd_fonts = config.ui.icons.should_show_icons(is_tty);
     // Load hooks using HookLoader
     let loader = HookLoader::new(source_dir);
 
@@ -662,17 +642,6 @@ pub fn handle_hooks_post(
 
     // Only run hooks if there are active ones, but always update state
     if !active_hooks.is_empty() {
-        println!(); // Add blank line before post hooks
-
-        // Display hooks being run
-        for hook in &active_hooks {
-            println!(
-                "{} Running hook: {}",
-                StatusIcon::Hook.get(use_nerd_fonts),
-                hook.name.cyan()
-            );
-        }
-
         // Create template renderer
         let renderer = create_template_engine(source_dir, config)?;
 
@@ -694,12 +663,6 @@ pub fn handle_hooks_post(
         for (hook_name, rendered_content) in runner.get_onchange_rendered() {
             state.update_onchange_rendered(hook_name, rendered_content);
         }
-
-        println!(
-            "{} {}",
-            StatusIcon::Success.get(use_nerd_fonts),
-            "Post hooks completed!".green()
-        );
     }
 
     // Always update state in database, even if no hooks ran
