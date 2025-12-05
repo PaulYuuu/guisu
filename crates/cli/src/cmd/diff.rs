@@ -25,6 +25,7 @@ use tracing::{debug, warn};
 
 use crate::command::Command;
 use crate::common::RuntimeContext;
+use crate::path_utils::SourceDirExt;
 use crate::stats::DiffStats;
 use guisu_config::Config;
 
@@ -1327,7 +1328,7 @@ fn print_hooks_status(source_dir: &Path, config: &Config, db: &RedbPersistentSta
     use guisu_engine::hooks::HookLoader;
     use guisu_engine::state::HookStatePersistence;
 
-    let hooks_dir = source_dir.join(".guisu/hooks");
+    let hooks_dir = source_dir.hooks_dir();
 
     // Check if hooks directory exists
     if !hooks_dir.exists() {
@@ -1346,7 +1347,7 @@ fn print_hooks_status(source_dir: &Path, config: &Config, db: &RedbPersistentSta
 
     // Load state from database (using provided database)
     let persistence = HookStatePersistence::new(db);
-    let Ok(mut state) = persistence.load() else {
+    let Ok(state) = persistence.load() else {
         return false;
     };
 
@@ -1396,13 +1397,9 @@ fn print_hooks_status(source_dir: &Path, config: &Config, db: &RedbPersistentSta
             println!();
         }
 
-        // Update database state to mark hooks as "checked"
-        // This prevents repeated warnings in subsequent diff/status calls
-        if let Err(e) = state.update_with_collections(&hooks_dir, collections) {
-            tracing::warn!("Failed to update hook state: {}", e);
-        } else if let Err(e) = persistence.save(&state) {
-            tracing::warn!("Failed to save hook state: {}", e);
-        }
+        // Note: We do NOT update database state here because `diff` is a read-only command.
+        // State updates should only happen during `apply` or `hooks run` commands.
+        // This prevents state pollution from read-only operations.
 
         return any_hooks_printed;
     }

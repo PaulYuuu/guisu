@@ -23,6 +23,7 @@ use tracing::debug;
 use crate::command::Command;
 use crate::common::RuntimeContext;
 use crate::conflict::{ThreeWayComparisonResult, compare_three_way};
+use crate::path_utils::SourceDirExt;
 use crate::ui::icons::{FileIconInfo, icon_for_file};
 use guisu_config::Config;
 use lscolors::{LsColors, Style};
@@ -1041,7 +1042,7 @@ fn print_hooks_status(
     use guisu_engine::hooks::config::HookMode;
     use guisu_engine::state::HookStatePersistence;
 
-    let hooks_dir = source_dir.join(".guisu/hooks");
+    let hooks_dir = source_dir.hooks_dir();
 
     // Check if hooks directory exists
     if !hooks_dir.exists() {
@@ -1060,7 +1061,7 @@ fn print_hooks_status(
 
     // Load state from database (using provided database)
     let persistence = HookStatePersistence::new(db);
-    let Ok(mut state) = persistence.load() else {
+    let Ok(state) = persistence.load() else {
         return; // Silently skip if can't load state
     };
 
@@ -1156,12 +1157,9 @@ fn print_hooks_status(
         }
     }
 
-    // Update database state to mark hooks as "checked"
-    if let Err(e) = state.update_with_collections(&hooks_dir, collections) {
-        tracing::warn!("Failed to update hook state: {}", e);
-    } else if let Err(e) = persistence.save(&state) {
-        tracing::warn!("Failed to save hook state: {}", e);
-    }
+    // Note: We do NOT update database state here because `status` is a read-only command.
+    // State updates should only happen during `apply` or `hooks run` commands.
+    // This prevents state pollution from read-only operations.
 }
 
 #[cfg(test)]
