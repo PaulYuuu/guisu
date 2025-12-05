@@ -271,7 +271,7 @@ fn run_impl(
     let identities = std::sync::Arc::new(config.age_identities().unwrap_or_default());
 
     // Load variables from .guisu/variables/ directory
-    let guisu_dir = source_dir.join(".guisu");
+    let guisu_dir = source_dir.guisu_dir();
     let platform_name = guisu_core::platform::CURRENT_PLATFORM.os;
 
     let guisu_variables = if guisu_dir.exists() {

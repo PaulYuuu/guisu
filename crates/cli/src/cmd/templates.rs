@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
+use crate::path_utils::SourceDirExt;
 use guisu_config::Config;
 
 /// Run templates list command
@@ -32,9 +33,8 @@ pub fn run_list(source_dir: &Path, _config: &Config) -> Result<()> {
         platform.bright_white()
     );
 
-    // Get the .guisu directory
-    let guisu_dir = source_dir.join(".guisu");
-    let templates_dir = guisu_dir.join("templates");
+    // Get the templates directory
+    let templates_dir = source_dir.templates_dir();
 
     if !templates_dir.exists() {
         println!("No templates directory found.");
@@ -120,9 +120,8 @@ pub fn run_show(
 ) -> Result<()> {
     let platform = CURRENT_PLATFORM.os;
 
-    // Get the .guisu directory
-    let guisu_dir = source_dir.join(".guisu");
-    let templates_dir = guisu_dir.join("templates");
+    // Get the templates directory
+    let templates_dir = source_dir.templates_dir();
 
     // Search for the template (platform-specific takes precedence)
     let platform_template = templates_dir.join(platform).join(template_name);
@@ -146,6 +145,7 @@ pub fn run_show(
     let identities = config.age_identities().unwrap_or_default();
 
     // Load variables from .guisu/variables/ directory
+    let guisu_dir = source_dir.guisu_dir();
     let guisu_variables = if guisu_dir.exists() {
         guisu_config::variables::load_variables(&guisu_dir, platform)
             .context("Failed to load variables from .guisu/variables/")?

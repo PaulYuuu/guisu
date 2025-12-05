@@ -20,6 +20,7 @@ use tracing::{debug, info, warn};
 use crate::command::Command;
 use crate::common::RuntimeContext;
 use crate::conflict::{ChangeType, ConflictHandler};
+use crate::path_utils::SourceDirExt;
 use crate::stats::ApplyStats;
 use crate::ui::ConflictAction;
 use crate::ui::progress;
@@ -82,7 +83,7 @@ fn load_all_variables(
 ) -> Result<indexmap::IndexMap<String, serde_json::Value>> {
     use guisu_config::variables;
 
-    let guisu_dir = source_dir.join(".guisu");
+    let guisu_dir = source_dir.guisu_dir();
     let platform_name = guisu_core::platform::CURRENT_PLATFORM.os;
 
     let guisu_variables = if guisu_dir.exists() {

@@ -404,7 +404,7 @@ fn run_impl(
     let dest_abs = &paths.dest_dir;
 
     // Get .guisu directory and platform name for loading variables and ignore patterns
-    let guisu_dir = source_dir.join(".guisu");
+    let guisu_dir = source_dir.guisu_dir();
     let platform_name = guisu_core::platform::CURRENT_PLATFORM.os;
 
     // Load metadata for create-once tracking

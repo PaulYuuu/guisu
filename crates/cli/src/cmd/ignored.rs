@@ -236,6 +236,7 @@ pub fn run_show(source_dir: &Path, _config: &Config, show_all: bool) -> Result<(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
     use super::*;
+    use crate::path_utils::SourceDirExt;
     use std::fs;
     use tempfile::TempDir;
 
@@ -245,7 +246,7 @@ mod tests {
         let source_dir = temp.path();
 
         // Create .guisu directory
-        let guisu_dir = source_dir.join(".guisu");
+        let guisu_dir = source_dir.guisu_dir();
         fs::create_dir_all(&guisu_dir).unwrap();
 
         // Create ignores.toml
@@ -317,7 +318,7 @@ windows = [
         let source_dir = temp.path();
 
         // Create .guisu but NO ignores.toml (will use default empty config)
-        let guisu_dir = source_dir.join(".guisu");
+        let guisu_dir = source_dir.guisu_dir();
         fs::create_dir_all(&guisu_dir).unwrap();
 
         let dotfiles_dir = source_dir.join("home");
@@ -340,7 +341,7 @@ windows = [
         let source_dir = temp.path();
 
         // Create .guisu/ignores.toml
-        let guisu_dir = source_dir.join(".guisu");
+        let guisu_dir = source_dir.guisu_dir();
         fs::create_dir_all(&guisu_dir).unwrap();
         fs::write(guisu_dir.join("ignores.toml"), "global = []").unwrap();
 
@@ -393,7 +394,7 @@ windows = [
         let temp = TempDir::new().unwrap();
         let source_dir = temp.path();
 
-        let guisu_dir = source_dir.join(".guisu");
+        let guisu_dir = source_dir.guisu_dir();
         fs::create_dir_all(&guisu_dir).unwrap();
 
         // Create empty ignores.toml
@@ -416,7 +417,7 @@ windows = [
         let temp = TempDir::new().unwrap();
         let source_dir = temp.path();
 
-        let guisu_dir = source_dir.join(".guisu");
+        let guisu_dir = source_dir.guisu_dir();
         fs::create_dir_all(&guisu_dir).unwrap();
 
         // Create invalid TOML
@@ -439,7 +440,7 @@ windows = [
         let temp = TempDir::new().unwrap();
         let source_dir = temp.path();
 
-        let guisu_dir = source_dir.join(".guisu");
+        let guisu_dir = source_dir.guisu_dir();
         fs::create_dir_all(&guisu_dir).unwrap();
 
         fs::write(
@@ -466,7 +467,7 @@ global = [
         let temp = TempDir::new().unwrap();
         let source_dir = temp.path();
 
-        let guisu_dir = source_dir.join(".guisu");
+        let guisu_dir = source_dir.guisu_dir();
         fs::create_dir_all(&guisu_dir).unwrap();
 
         fs::write(
@@ -504,7 +505,7 @@ global = [
         let temp = TempDir::new().unwrap();
         let source_dir = temp.path();
 
-        let guisu_dir = source_dir.join(".guisu");
+        let guisu_dir = source_dir.guisu_dir();
         fs::create_dir_all(&guisu_dir).unwrap();
 
         fs::write(
@@ -539,7 +540,7 @@ global = [
         let temp = TempDir::new().unwrap();
         let source_dir = temp.path();
 
-        let guisu_dir = source_dir.join(".guisu");
+        let guisu_dir = source_dir.guisu_dir();
         fs::create_dir_all(&guisu_dir).unwrap();
 
         fs::write(
@@ -565,7 +566,7 @@ global = [
         let temp = TempDir::new().unwrap();
         let source_dir = temp.path();
 
-        let guisu_dir = source_dir.join(".guisu");
+        let guisu_dir = source_dir.guisu_dir();
         fs::create_dir_all(&guisu_dir).unwrap();
 
         fs::write(
@@ -595,7 +596,7 @@ windows = ["Thumbs.db"]
         let temp = TempDir::new().unwrap();
         let source_dir = temp.path();
 
-        let guisu_dir = source_dir.join(".guisu");
+        let guisu_dir = source_dir.guisu_dir();
         fs::create_dir_all(&guisu_dir).unwrap();
 
         fs::write(guisu_dir.join("ignores.toml"), "global = []").unwrap();

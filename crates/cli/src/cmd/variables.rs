@@ -14,6 +14,7 @@ use guisu_config::Config;
 
 use crate::command::Command;
 use crate::common::RuntimeContext;
+use crate::path_utils::SourceDirExt;
 
 /// Variables command arguments
 #[derive(Debug, Args)]
@@ -154,7 +155,7 @@ fn run_impl(source_dir: &Path, config: &Config, json: bool, filter: VariableFilt
     // Get user-defined variables from both .guisu/variables/ and config (only if needed)
     let user_variables = if matches!(filter, VariableFilter::All | VariableFilter::UserOnly) {
         // Load variables from .guisu/variables/ directory
-        let guisu_dir = source_dir.join(".guisu");
+        let guisu_dir = source_dir.guisu_dir();
         let platform_name = guisu_core::platform::CURRENT_PLATFORM.os;
 
         let mut all_vars = if guisu_dir.exists() {
