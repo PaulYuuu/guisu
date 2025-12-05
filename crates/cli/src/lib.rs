@@ -9,6 +9,7 @@ pub mod common;
 pub mod conflict;
 pub mod error;
 pub mod logging;
+pub mod path_utils;
 pub mod stats;
 pub mod ui;
 

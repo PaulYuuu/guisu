@@ -12,6 +12,7 @@ use owo_colors::OwoColorize;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
+use crate::path_utils::SourceDirExt;
 use crate::ui::icons::StatusIcon;
 
 /// Run hooks
@@ -86,7 +87,7 @@ pub fn run_hooks(
     println!(
         "{} Hooks directory: {}",
         StatusIcon::Hook.get(use_nerd_fonts),
-        source_dir.join(".guisu/hooks").display().cyan()
+        source_dir.hooks_dir().display().cyan()
     );
     println!("Platform: {}", platform.cyan());
     println!("Total hooks: {total_hooks}");
@@ -144,7 +145,7 @@ pub fn run_hooks(
     }
 
     // Update state in database
-    let hooks_dir = source_dir.join(".guisu/hooks");
+    let hooks_dir = source_dir.hooks_dir();
     state
         .update(&hooks_dir)
         .context("Failed to update hook state")?;
@@ -185,7 +186,7 @@ pub fn run_list(source_dir: &Path, _config: &Config, format: &str) -> Result<()>
     if format == "json" {
         // JSON output
         let json = serde_json::json!({
-            "hooks_dir": source_dir.join(".guisu/hooks"),
+            "hooks_dir": source_dir.hooks_dir(),
             "platform": platform,
             "hooks": {
                 "pre": collections.pre,
@@ -197,7 +198,7 @@ pub fn run_list(source_dir: &Path, _config: &Config, format: &str) -> Result<()>
         // Simple output
         println!(
             "Hooks directory: {}",
-            source_dir.join(".guisu/hooks").display().cyan()
+            source_dir.hooks_dir().display().cyan()
         );
         println!("Platform: {}", platform.cyan());
         println!();
@@ -269,7 +270,7 @@ pub fn run_check(
     let persistence = HookStatePersistence::new(db);
     let state = persistence.load()?;
 
-    let hooks_dir = source_dir.join(".guisu/hooks");
+    let hooks_dir = source_dir.hooks_dir();
     let has_changed = state.has_changed(&hooks_dir)?;
     let platform = CURRENT_PLATFORM.os;
 
@@ -594,7 +595,7 @@ pub fn handle_hooks_pre(
 
     // Always update state in database, even if no hooks ran
     // This marks the hooks directory as "checked" and prevents repeated warnings
-    let hooks_dir = source_dir.join(".guisu/hooks");
+    let hooks_dir = source_dir.hooks_dir();
     state.update_with_collections(&hooks_dir, collections)?;
     persistence.save(&state)?;
 
@@ -703,7 +704,7 @@ pub fn handle_hooks_post(
 
     // Always update state in database, even if no hooks ran
     // This marks the hooks directory as "checked" and prevents repeated warnings
-    let hooks_dir = source_dir.join(".guisu/hooks");
+    let hooks_dir = source_dir.hooks_dir();
     state.update_with_collections(&hooks_dir, collections)?;
     persistence.save(&state)?;
 
@@ -765,7 +766,7 @@ mod tests {
         let source_dir = temp.path();
 
         // Create hooks directory structure
-        let hooks_dir = source_dir.join(".guisu/hooks");
+        let hooks_dir = source_dir.hooks_dir();
         fs::create_dir_all(hooks_dir.join("pre")).unwrap();
         fs::create_dir_all(hooks_dir.join("post")).unwrap();
 
@@ -822,7 +823,7 @@ order = 90
         let source_dir = temp.path();
 
         // Create empty hooks directory
-        let hooks_dir = source_dir.join(".guisu/hooks");
+        let hooks_dir = source_dir.hooks_dir();
         fs::create_dir_all(hooks_dir.join("pre")).unwrap();
         fs::create_dir_all(hooks_dir.join("post")).unwrap();
 
@@ -861,7 +862,7 @@ order = 90
         let temp = TempDir::new().unwrap();
         let source_dir = temp.path();
 
-        let hooks_dir = source_dir.join(".guisu/hooks");
+        let hooks_dir = source_dir.hooks_dir();
         fs::create_dir_all(hooks_dir.join("pre")).unwrap();
 
         // Create hook that only runs on Linux
@@ -906,7 +907,7 @@ cmd = "echo all"
         let temp = TempDir::new().unwrap();
         let source_dir = temp.path();
 
-        let hooks_dir = source_dir.join(".guisu/hooks");
+        let hooks_dir = source_dir.hooks_dir();
         fs::create_dir_all(hooks_dir.join("pre")).unwrap();
         fs::create_dir_all(hooks_dir.join("post")).unwrap();
 
@@ -957,7 +958,7 @@ order = {}
         let temp = TempDir::new().unwrap();
         let source_dir = temp.path();
 
-        let hooks_dir = source_dir.join(".guisu/hooks");
+        let hooks_dir = source_dir.hooks_dir();
         fs::create_dir_all(hooks_dir.join("pre")).unwrap();
 
         // Create invalid TOML file
