@@ -335,9 +335,9 @@ pub fn run_show(source_dir: &Path, config: &Config, hook_name: &str) -> Result<(
 
         display_basic_hook_info(hook, stage);
         display_platform_info(hook);
+        display_hook_settings(hook);
         display_script_or_command(hook, source_dir, config);
         display_environment_variables(hook);
-        display_hook_settings(hook);
 
         println!();
     } else {
@@ -468,17 +468,12 @@ fn display_environment_variables(hook: &guisu_engine::hooks::config::Hook) {
 
 /// Display timeout and failfast settings
 fn display_hook_settings(hook: &guisu_engine::hooks::config::Hook) {
-    println!("{} {} seconds", "Timeout:".bold(), hook.timeout);
-
-    if hook.failfast {
-        println!("{} {} (stop on error)", "Failfast:".bold(), "true".green());
-    } else {
-        println!(
-            "{} {} (continue on error)",
-            "Failfast:".bold(),
-            "false".yellow()
-        );
+    // Only display timeout if it's set (non-zero)
+    if hook.timeout > 0 {
+        println!("{} {} seconds", "Timeout:".bold(), hook.timeout);
     }
+
+    println!("{} {}", "Failfast:".bold(), hook.failfast);
 }
 
 /// Display message when hook is not found
