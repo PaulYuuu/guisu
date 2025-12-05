@@ -17,7 +17,6 @@ guisu-config = { path = "../config" }
 guisu-core = { path = "../core" }
 guisu-crypto = { path = "../crypto" }
 guisu-template = { path = "../template" }
-guisu-vault = { path = "../vault" }
 
 bincode.workspace = true
 bitflags.workspace = true
