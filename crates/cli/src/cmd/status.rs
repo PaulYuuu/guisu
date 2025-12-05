@@ -23,8 +23,8 @@ use tracing::debug;
 use crate::command::Command;
 use crate::common::RuntimeContext;
 use crate::conflict::{ThreeWayComparisonResult, compare_three_way};
-use crate::path_utils::SourceDirExt;
 use crate::ui::icons::{FileIconInfo, icon_for_file};
+use crate::utils::path::SourceDirExt;
 use guisu_config::Config;
 use lscolors::{LsColors, Style};
 use nu_ansi_term::Style as AnsiStyle;
@@ -1038,31 +1038,12 @@ fn print_hooks_status(
     show_all: bool,
     config: &Config,
 ) {
-    use guisu_engine::hooks::HookLoader;
     use guisu_engine::hooks::config::HookMode;
-    use guisu_engine::state::HookStatePersistence;
 
-    let hooks_dir = source_dir.hooks_dir();
-
-    // Check if hooks directory exists
-    if !hooks_dir.exists() {
+    // Load hooks and state using shared helper
+    let Some((collections, state)) = crate::utils::hooks::load_hooks_and_state(source_dir, db)
+    else {
         return;
-    }
-
-    // Load hooks
-    let loader = HookLoader::new(source_dir);
-    let Ok(collections) = loader.load() else {
-        return; // Silently skip if hooks fail to load
-    };
-
-    if collections.is_empty() {
-        return;
-    }
-
-    // Load state from database (using provided database)
-    let persistence = HookStatePersistence::new(db);
-    let Ok(state) = persistence.load() else {
-        return; // Silently skip if can't load state
     };
 
     let platform = guisu_core::platform::CURRENT_PLATFORM.os;

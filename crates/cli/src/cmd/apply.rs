@@ -20,10 +20,10 @@ use tracing::{debug, info, warn};
 use crate::command::Command;
 use crate::common::RuntimeContext;
 use crate::conflict::{ChangeType, ConflictHandler};
-use crate::path_utils::SourceDirExt;
 use crate::stats::ApplyStats;
 use crate::ui::ConflictAction;
 use crate::ui::progress;
+use crate::utils::path::SourceDirExt;
 
 /// Type alias for batch entry state data (path, content, mode)
 type BatchEntryData = (String, Vec<u8>, Option<u32>);

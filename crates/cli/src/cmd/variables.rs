@@ -14,7 +14,7 @@ use guisu_config::Config;
 
 use crate::command::Command;
 use crate::common::RuntimeContext;
-use crate::path_utils::SourceDirExt;
+use crate::utils::path::SourceDirExt;
 
 /// Variables command arguments
 #[derive(Debug, Args)]

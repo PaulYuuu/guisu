@@ -25,8 +25,8 @@ use tracing::{debug, warn};
 
 use crate::command::Command;
 use crate::common::RuntimeContext;
-use crate::path_utils::SourceDirExt;
 use crate::stats::DiffStats;
+use crate::utils::path::SourceDirExt;
 use guisu_config::Config;
 
 /// Diff command
@@ -1325,29 +1325,9 @@ pub fn compare_and_print_hooks(
 /// Check and print hooks status
 /// Returns true if any hooks were displayed
 fn print_hooks_status(source_dir: &Path, config: &Config, db: &RedbPersistentState) -> bool {
-    use guisu_engine::hooks::HookLoader;
-    use guisu_engine::state::HookStatePersistence;
-
-    let hooks_dir = source_dir.hooks_dir();
-
-    // Check if hooks directory exists
-    if !hooks_dir.exists() {
-        return false;
-    }
-
-    // Load hooks
-    let loader = HookLoader::new(source_dir);
-    let Ok(collections) = loader.load() else {
-        return false;
-    };
-
-    if collections.is_empty() {
-        return false;
-    }
-
-    // Load state from database (using provided database)
-    let persistence = HookStatePersistence::new(db);
-    let Ok(state) = persistence.load() else {
+    // Load hooks and state using shared helper
+    let Some((collections, state)) = crate::utils::hooks::load_hooks_and_state(source_dir, db)
+    else {
         return false;
     };
 

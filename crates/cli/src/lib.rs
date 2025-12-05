@@ -9,9 +9,9 @@ pub mod common;
 pub mod conflict;
 pub mod error;
 pub mod logging;
-pub mod path_utils;
 pub mod stats;
 pub mod ui;
+pub mod utils;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};

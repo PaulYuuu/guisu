@@ -12,8 +12,8 @@ use owo_colors::OwoColorize;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use crate::path_utils::SourceDirExt;
 use crate::ui::icons::StatusIcon;
+use crate::utils::path::SourceDirExt;
 
 /// Run hooks
 ///

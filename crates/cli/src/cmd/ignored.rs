@@ -236,7 +236,7 @@ pub fn run_show(source_dir: &Path, _config: &Config, show_all: bool) -> Result<(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
     use super::*;
-    use crate::path_utils::SourceDirExt;
+    use crate::utils::path::SourceDirExt;
     use std::fs;
     use tempfile::TempDir;
 

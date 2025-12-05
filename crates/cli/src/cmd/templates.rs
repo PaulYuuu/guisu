@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use crate::path_utils::SourceDirExt;
+use crate::utils::path::SourceDirExt;
 use guisu_config::Config;
 
 /// Run templates list command
