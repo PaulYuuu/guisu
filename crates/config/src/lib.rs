@@ -17,6 +17,13 @@ pub mod variables;
 // Re-export error types from core
 pub use guisu_core::{Error, Result};
 
+// Type aliases for common data structures
+use indexmap::IndexMap;
+use serde_json::Value as JsonValue;
+
+/// Template variables map (used for configuration and template rendering)
+pub type Variables = IndexMap<String, JsonValue>;
+
 // Re-export main types
 pub use config::{
     AgeConfig, BitwardenConfig, Config, GeneralConfig, IconMode, IgnoreConfig, UiConfig,

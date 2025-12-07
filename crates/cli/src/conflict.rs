@@ -14,6 +14,9 @@ use crate::ui::{
 };
 use guisu_config::Config;
 
+// File permission constants
+const PERM_MASK: u32 = 0o7777; // Permission bits mask (rwxrwxrwx)
+
 /// Type of change detected
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeType {
@@ -402,13 +405,12 @@ impl ConflictHandler {
 
         // Show mode diff if applicable
         #[cfg(unix)]
-        if let (Some(target_m), Some(actual_m)) = (target_mode, actual_mode) {
-            const PERM_MASK: u32 = 0o7777;
-            if (target_m & PERM_MASK) != (actual_m & PERM_MASK) {
-                println!();
-                println!("old mode {actual_m:06o}");
-                println!("new mode {target_m:06o}");
-            }
+        if let (Some(target_m), Some(actual_m)) = (target_mode, actual_mode)
+            && (target_m & PERM_MASK) != (actual_m & PERM_MASK)
+        {
+            println!();
+            println!("old mode {actual_m:06o}");
+            println!("new mode {target_m:06o}");
         }
 
         Ok(())

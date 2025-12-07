@@ -33,6 +33,14 @@ use crate::ui::{FileDiff, FileStatus, InteractiveDiffViewer};
 use crate::utils::path::SourceDirExt;
 use guisu_config::Config;
 
+// File permission constants
+const PERM_MASK: u32 = 0o7777; // Permission bits mask (rwxrwxrwx)
+const S_IFREG: u32 = 0o100_000; // Regular file type bit
+const DEFAULT_FILE_MODE: u32 = 0o644; // Default file permissions (rw-r--r--)
+
+// Binary detection constants
+const BINARY_CHECK_BYTES: usize = 8000; // Check first 8KB for null bytes
+
 /// Diff command
 #[derive(Args)]
 pub struct DiffCommand {
@@ -554,7 +562,6 @@ fn diff_target_entry(entry: &TargetEntry, dest_abs: &AbsPath, stats: &DiffStats)
     let mode_differs = if let Some(src_mode) = source_mode {
         if let Some(dst_mode) = dest_mode {
             // Mask to get only permission bits (lower 12 bits)
-            const PERM_MASK: u32 = 0o7777;
             (src_mode & PERM_MASK) != (dst_mode & PERM_MASK)
         } else {
             true // dest doesn't have mode
@@ -606,12 +613,9 @@ fn diff_target_entry(entry: &TargetEntry, dest_abs: &AbsPath, stats: &DiffStats)
 
 /// Format mode diff header
 fn format_mode_diff(old_mode: Option<u32>, new_mode: Option<u32>) -> String {
-    const S_IFREG: u32 = 0o100_000; // Regular file type bit
-    const DEFAULT_MODE: u32 = 0o644; // Default file permissions
-
     // Ensure both modes include file type bits for consistent display
-    let old_mode_full = old_mode.unwrap_or(DEFAULT_MODE | S_IFREG);
-    let new_mode_full = new_mode.map_or(DEFAULT_MODE | S_IFREG, |m| {
+    let old_mode_full = old_mode.unwrap_or(DEFAULT_FILE_MODE | S_IFREG);
+    let new_mode_full = new_mode.map_or(DEFAULT_FILE_MODE | S_IFREG, |m| {
         // If mode only has permission bits (< octal 10000), add file type
         if m < 0o10000 { m | S_IFREG } else { m }
     });
@@ -620,9 +624,11 @@ fn format_mode_diff(old_mode: Option<u32>, new_mode: Option<u32>) -> String {
 }
 
 /// Check if content is binary
+///
+/// Uses a simple heuristic: checks for null bytes in the first 8KB of content.
+/// This is a fast approximation that works well for most text vs binary detection.
 fn is_binary(content: &[u8]) -> bool {
-    // Simple heuristic: check for null bytes in first 8KB
-    content.iter().take(8000).any(|&b| b == 0)
+    content.iter().take(BINARY_CHECK_BYTES).any(|&b| b == 0)
 }
 
 /// Generate colored unified diff string using similar's native API
@@ -639,7 +645,6 @@ fn generate_unified_diff(
     old_mode: Option<u32>,
     new_mode: Option<u32>,
 ) -> String {
-    const PERM_MASK: u32 = 0o7777;
     let mut output = String::new();
 
     // Add mode diff if permission bits differ

@@ -25,6 +25,10 @@ use crate::ui::ConflictAction;
 use crate::ui::progress;
 use crate::utils::path::SourceDirExt;
 
+// File permission constants
+const PERM_MASK: u32 = 0o777; // Permission bits mask (rwxrwxrwx)
+const DEFAULT_SECURE_MODE: u32 = 0o600; // Default secure file mode (rw-------)
+
 /// Type alias for batch entry state data (path, content, mode)
 type BatchEntryData = (String, Vec<u8>, Option<u32>);
 
@@ -908,7 +912,7 @@ fn needs_update(
                 if let Some(target_mode) = mode
                     && let Ok(metadata) = fs::metadata(dest_path.as_path())
                 {
-                    let current_mode = metadata.permissions().mode() & 0o777;
+                    let current_mode = metadata.permissions().mode() & PERM_MASK;
                     if current_mode != *target_mode {
                         return Ok(true);
                     }
@@ -936,7 +940,7 @@ fn needs_update(
                 if let Some(target_mode) = mode
                     && let Ok(metadata) = fs::metadata(dest_path.as_path())
                 {
-                    let current_mode = metadata.permissions().mode() & 0o777;
+                    let current_mode = metadata.permissions().mode() & PERM_MASK;
                     if current_mode != *target_mode {
                         return Ok(true);
                     }
@@ -1020,7 +1024,7 @@ fn apply_target_entry(
                 // - If source has mode, use it (source is authoritative)
                 // - Otherwise, preserve existing permissions if file existed
                 // - Default to 0o600 (owner read/write only) for security
-                let mode_to_use = mode.or(existing_mode).unwrap_or(0o600);
+                let mode_to_use = mode.or(existing_mode).unwrap_or(DEFAULT_SECURE_MODE);
 
                 // Create file with permissions atomically (no TOCTOU window)
                 let mut file = fs::OpenOptions::new()

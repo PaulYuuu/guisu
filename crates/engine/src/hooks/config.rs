@@ -7,6 +7,9 @@ use guisu_core::{Error, Result};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+/// Type alias for hook environment variables
+pub type HookEnvVars = IndexMap<String, String>;
+
 /// Collections of hooks for different stages
 #[derive(Debug, Clone, Default, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct HookCollections {
@@ -62,7 +65,7 @@ pub struct Hook {
     /// Environment variables to set
     #[serde(default)]
     #[bincode(with_serde)]
-    pub env: IndexMap<String, String>,
+    pub env: HookEnvVars,
 
     /// Fail fast on error (default: true)
     ///
