@@ -508,10 +508,8 @@ fn add_symlink(
 /// This allows us to fail fast before modifying any files
 fn validate_encryption_config(config: &Config) -> Result<()> {
     // Try to get recipients from config first (for team collaboration)
-    if let Some(_recipients) = config.age_recipients()? {
-        // Recipients configured, all good
-        Ok(())
-    } else {
+    let recipients = config.age_recipients()?;
+    if recipients.is_empty() {
         // No recipients configured - check if symmetric mode is enabled
         if !config.age.derive {
             anyhow::bail!(
@@ -557,16 +555,17 @@ fn validate_encryption_config(config: &Config) -> Result<()> {
         )?;
 
         Ok(())
+    } else {
+        // Recipients configured, all good
+        Ok(())
     }
 }
 
 /// Encrypt content using age
 fn encrypt_content(content: &[u8], config: &Config) -> Result<Vec<u8>> {
     // Try to get recipients from config first (for team collaboration)
-    let recipients = if let Some(recipients) = config.age_recipients()? {
-        // Use configured recipients
-        recipients
-    } else {
+    let recipients = config.age_recipients()?;
+    let recipients = if recipients.is_empty() {
         // No recipients configured - check if symmetric mode is enabled
         if !config.age.derive {
             anyhow::bail!(
@@ -613,10 +612,10 @@ fn encrypt_content(content: &[u8], config: &Config) -> Result<Vec<u8>> {
              Generate age key with: guisu age generate",
         )?;
 
-        identities
-            .iter()
-            .map(guisu_crypto::Identity::to_public)
-            .collect()
+        guisu_crypto::identities_to_recipients(&identities)
+    } else {
+        // Use configured recipients
+        recipients
     };
 
     // Encrypt the content with all recipients
@@ -782,6 +781,16 @@ fn calculate_entropy(s: &str) -> f64 {
     entropy.max(0.0)
 }
 
+/// A replacement to be made in the text
+struct Replacement {
+    /// Start byte offset in the original text
+    start: usize,
+    /// End byte offset in the original text (exclusive)
+    end: usize,
+    /// Template variable string to insert
+    text: String,
+}
+
 /// Auto-detect template variables in content and replace them
 ///
 /// Returns (`templated_content`, `has_replacements`)
@@ -822,8 +831,7 @@ fn auto_template_content(content: &[u8], config: &Config) -> Result<(Vec<u8>, bo
     });
 
     // Collect all replacements with their positions
-    // Positions are stored as (start, end, replacement_string)
-    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    let mut replacements: Vec<Replacement> = Vec::new();
 
     for var in variables {
         // Skip very short values to avoid false matches
@@ -838,13 +846,17 @@ fn auto_template_content(content: &[u8], config: &Config) -> Result<(Vec<u8>, bo
             let end = start + var.value.len();
 
             // Check if this region overlaps with any existing replacement
-            let overlaps = replacements.iter().any(|(r_start, r_end, _)| {
-                (start >= *r_start && start < *r_end) || (end > *r_start && end <= *r_end)
-            });
+            let overlaps = replacements
+                .iter()
+                .any(|r| (start >= r.start && start < r.end) || (end > r.start && end <= r.end));
 
             if !overlaps {
                 let template_var = format!("{{{{ {} }}}}", var.path);
-                replacements.push((start, end, template_var));
+                replacements.push(Replacement {
+                    start,
+                    end,
+                    text: template_var,
+                });
             }
 
             pos = end;
@@ -852,7 +864,7 @@ fn auto_template_content(content: &[u8], config: &Config) -> Result<(Vec<u8>, bo
     }
 
     // Sort replacements by position (earlier positions first)
-    replacements.sort_by_key(|(start, _, _)| *start);
+    replacements.sort_by_key(|r| r.start);
 
     // Build result string in one pass if there are replacements
     let (result, has_replacements) = if replacements.is_empty() {
@@ -861,12 +873,12 @@ fn auto_template_content(content: &[u8], config: &Config) -> Result<(Vec<u8>, bo
         let mut result = String::with_capacity(text.len());
         let mut last_end = 0;
 
-        for (start, end, replacement) in replacements {
+        for r in replacements {
             // Copy text between last replacement and this one
-            result.push_str(&text[last_end..start]);
+            result.push_str(&text[last_end..r.start]);
             // Add the replacement
-            result.push_str(&replacement);
-            last_end = end;
+            result.push_str(&r.text);
+            last_end = r.end;
         }
 
         // Copy remaining text after last replacement

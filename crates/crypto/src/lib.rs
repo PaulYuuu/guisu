@@ -16,6 +16,27 @@ pub use age::{
 pub use identity::{Identity, IdentityFile, load_identities};
 pub use recipient::Recipient;
 
+/// Convert a slice of identities to their corresponding recipients (public keys)
+///
+/// This is a convenience function that extracts the public key from each identity.
+/// Useful when you need to encrypt data that can be decrypted by the same identities.
+///
+/// # Examples
+///
+/// ```
+/// use guisu_crypto::{Identity, identities_to_recipients};
+///
+/// let identities = vec![Identity::generate(), Identity::generate()];
+/// let recipients = identities_to_recipients(&identities);
+///
+/// // Now you can encrypt data for these recipients
+/// guisu_crypto::encrypt(b"secret", &recipients).unwrap();
+/// ```
+#[must_use]
+pub fn identities_to_recipients(identities: &[Identity]) -> Vec<Recipient> {
+    identities.iter().map(Identity::to_public).collect()
+}
+
 /// Age encryption provider that implements the `EncryptionProvider` trait
 ///
 /// This struct wraps recipients and identities to provide encryption/decryption

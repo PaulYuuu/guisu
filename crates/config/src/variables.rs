@@ -38,9 +38,11 @@ pub fn load_variables(guisu_dir: &Path, platform: &str) -> Result<IndexMap<Strin
             .filter_map(|path| load_variable_file(path).ok().flatten())
             .collect();
 
-        for (file_stem, vars) in loaded {
-            let wrapped =
-                IndexMap::from([(file_stem, JsonValue::Object(vars.into_iter().collect()))]);
+        for var_file in loaded {
+            let wrapped = IndexMap::from([(
+                var_file.stem,
+                JsonValue::Object(var_file.variables.into_iter().collect()),
+            )]);
             merge_variables(&mut variables, wrapped);
         }
     }
@@ -61,9 +63,11 @@ pub fn load_variables(guisu_dir: &Path, platform: &str) -> Result<IndexMap<Strin
             .filter_map(|path| load_variable_file(path).ok().flatten())
             .collect();
 
-        for (file_stem, vars) in loaded {
-            let wrapped =
-                IndexMap::from([(file_stem, JsonValue::Object(vars.into_iter().collect()))]);
+        for var_file in loaded {
+            let wrapped = IndexMap::from([(
+                var_file.stem,
+                JsonValue::Object(var_file.variables.into_iter().collect()),
+            )]);
             merge_variables(&mut variables, wrapped);
         }
     }
@@ -71,9 +75,18 @@ pub fn load_variables(guisu_dir: &Path, platform: &str) -> Result<IndexMap<Strin
     Ok(variables)
 }
 
+/// Represents a loaded variable file with its name and contents
+#[derive(Debug)]
+struct VariableFile {
+    /// File name without extension (e.g., "colors" from "colors.toml")
+    stem: String,
+    /// Variables loaded from the file
+    variables: IndexMap<String, JsonValue>,
+}
+
 /// Load a single variable file (TOML only)
 /// Returns the file stem (name without extension) and the loaded variables
-fn load_variable_file(path: &Path) -> Result<Option<(String, IndexMap<String, JsonValue>)>> {
+fn load_variable_file(path: &Path) -> Result<Option<VariableFile>> {
     // Only process .toml files
     if path.extension().and_then(|s| s.to_str()) != Some("toml") {
         return Ok(None);
@@ -101,7 +114,10 @@ fn load_variable_file(path: &Path) -> Result<Option<(String, IndexMap<String, Js
         .map_err(|e| guisu_core::Error::Message(format!("Failed to convert TOML to JSON: {e}")))?;
 
     if let JsonValue::Object(map) = json_value {
-        Ok(Some((file_stem, map.into_iter().collect())))
+        Ok(Some(VariableFile {
+            stem: file_stem,
+            variables: map.into_iter().collect(),
+        }))
     } else {
         Ok(None)
     }
@@ -264,10 +280,10 @@ platform_key = "linux-specific"
         let result = load_variable_file(&file_path).unwrap();
         assert!(result.is_some());
 
-        let (stem, vars) = result.unwrap();
-        assert_eq!(stem, "test");
-        assert_eq!(vars.get("key"), Some(&json!("value")));
-        assert_eq!(vars.get("number"), Some(&json!(42)));
+        let var_file = result.unwrap();
+        assert_eq!(var_file.stem, "test");
+        assert_eq!(var_file.variables.get("key"), Some(&json!("value")));
+        assert_eq!(var_file.variables.get("number"), Some(&json!(42)));
     }
 
     #[test]

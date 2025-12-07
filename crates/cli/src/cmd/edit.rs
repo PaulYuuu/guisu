@@ -268,10 +268,7 @@ fn edit_file_with_inline_encryption(
     let mut final_content = edited_content;
 
     // Convert all identities to recipients for re-encryption
-    let recipients: Vec<_> = identities
-        .iter()
-        .map(guisu_crypto::Identity::to_public)
-        .collect();
+    let recipients = guisu_crypto::identities_to_recipients(identities);
 
     for (_, _, encrypted_value) in encrypted_positions {
         if let Ok(decrypted_value) = guisu_crypto::decrypt_inline(&encrypted_value, identities)
@@ -338,10 +335,7 @@ fn edit_encrypted_file(source_file: &Path, config: &Config) -> Result<()> {
     }
 
     // Re-encrypt the content with all recipients
-    let recipients: Vec<_> = identities
-        .iter()
-        .map(guisu_crypto::Identity::to_public)
-        .collect();
+    let recipients = guisu_crypto::identities_to_recipients(&identities);
     let reencrypted_content =
         encrypt(&edited_content, &recipients).context("Failed to re-encrypt file")?;
 

@@ -267,7 +267,7 @@ impl IdentityFile {
     /// ```
     #[must_use]
     pub fn to_recipients(&self) -> Vec<Recipient> {
-        self.identities.iter().map(Identity::to_public).collect()
+        crate::identities_to_recipients(&self.identities)
     }
 
     /// Write recipients (public keys) to a file or writer

@@ -671,7 +671,7 @@ impl Config {
     /// # Errors
     ///
     /// Returns error if recipient string parsing fails
-    pub fn age_recipients(&self) -> Result<Option<Vec<guisu_crypto::Recipient>>> {
+    pub fn age_recipients(&self) -> Result<Vec<guisu_crypto::Recipient>> {
         // Collect recipients from both fields
         let mut recipient_strings = Vec::new();
 
@@ -686,7 +686,7 @@ impl Config {
         }
 
         if recipient_strings.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
         // Parse all recipient strings
@@ -702,7 +702,7 @@ impl Config {
             recipients.push(recipient);
         }
 
-        Ok(Some(recipients))
+        Ok(recipients)
     }
 
     /// Load all age identities from configuration
@@ -1451,7 +1451,7 @@ identity = "./key.txt"
         let config = Config::default();
         let result = config.age_recipients().unwrap();
 
-        assert!(result.is_none());
+        assert!(result.is_empty());
     }
 
     #[test]
