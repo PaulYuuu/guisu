@@ -368,6 +368,20 @@ impl DestinationState {
             .expect("entry was just inserted into cache"))
     }
 
+    /// Extract file mode from metadata (Unix-specific)
+    #[cfg(unix)]
+    #[allow(clippy::unnecessary_wraps)]
+    fn extract_mode(metadata: &std::fs::Metadata) -> Option<u32> {
+        use std::os::unix::fs::PermissionsExt;
+        Some(metadata.permissions().mode())
+    }
+
+    /// Extract file mode from metadata (non-Unix always returns None)
+    #[cfg(not(unix))]
+    fn extract_mode(_metadata: &std::fs::Metadata) -> Option<u32> {
+        None
+    }
+
     /// Read an entry from the filesystem
     fn read_entry<S: System>(
         rel_path: &RelPath,
@@ -381,34 +395,15 @@ impl DestinationState {
         let metadata = system.metadata(abs_path)?;
 
         if metadata.is_dir() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = Some(metadata.permissions().mode());
-                Ok(DestEntry::directory(rel_path.clone(), mode))
-            }
-
-            #[cfg(not(unix))]
-            {
-                Ok(DestEntry::directory(rel_path.clone(), None))
-            }
+            let mode = Self::extract_mode(&metadata);
+            Ok(DestEntry::directory(rel_path.clone(), mode))
         } else if metadata.is_symlink() {
             let target = system.read_link(abs_path)?;
             Ok(DestEntry::symlink(rel_path.clone(), target))
         } else {
             let content = system.read_file(abs_path)?;
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = Some(metadata.permissions().mode());
-                Ok(DestEntry::file(rel_path.clone(), content, mode))
-            }
-
-            #[cfg(not(unix))]
-            {
-                Ok(DestEntry::file(rel_path.clone(), content, None))
-            }
+            let mode = Self::extract_mode(&metadata);
+            Ok(DestEntry::file(rel_path.clone(), content, mode))
         }
     }
 

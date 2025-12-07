@@ -95,7 +95,7 @@ fn load_all_variables(
 
     // Merge variables: guisu variables + config variables (config overrides)
     let mut all_variables = guisu_variables;
-    all_variables.extend(config.variables.iter().map(|(k, v)| (k.clone(), v.clone())));
+    all_variables.extend(config.variables.clone());
 
     Ok(all_variables)
 }
@@ -115,11 +115,10 @@ fn setup_content_processor(
     let template_engine = crate::create_template_engine(source_dir, identities, config);
 
     // Use Arc to share identity without cloning
-    let identity_arc = if let Some(first) = identities.first() {
-        Arc::new(first.clone())
-    } else {
-        Arc::new(guisu_crypto::Identity::generate())
-    };
+    let identity_arc = identities.first().map_or_else(
+        || Arc::new(guisu_crypto::Identity::generate()),
+        |id| Arc::new(id.clone()),
+    );
 
     let decryptor = CryptoDecryptorAdapter::from_arc(identity_arc);
     let renderer = TemplateRendererAdapter::new(template_engine);
@@ -177,14 +176,13 @@ fn build_target_state(
         ))
     };
 
-    let template_context = guisu_template::TemplateContext::new()
-        .with_variables(all_variables)
-        .with_guisu_info(
-            source_abs.to_string(),
-            working_tree.display().to_string(),
-            dest_abs.to_string(),
-            config.general.root_entry.display().to_string(),
-        );
+    let template_context = guisu_template::TemplateContext::with_guisu_context(
+        source_abs.to_string(),
+        working_tree.display().to_string(),
+        dest_abs.to_string(),
+        config.general.root_entry.display().to_string(),
+        all_variables,
+    );
 
     let template_context_value =
         serde_json::to_value(&template_context).context("Failed to serialize template context")?;

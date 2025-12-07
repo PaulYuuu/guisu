@@ -155,7 +155,7 @@ pub fn run_show(
 
     // Merge variables: first from .guisu/variables/, then from config (config overrides)
     let mut all_variables = guisu_variables;
-    all_variables.extend(config.variables.iter().map(|(k, v)| (k.clone(), v.clone())));
+    all_variables.extend(config.variables.clone());
 
     // Create template context
     let context = create_template_context(config, source_dir, dest_dir, all_variables);

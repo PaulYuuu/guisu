@@ -147,6 +147,33 @@ impl TemplateContext {
         self
     }
 
+    /// Convenience method to create a context with both variables and guisu info
+    ///
+    /// This is a common pattern used across CLI commands to set up template rendering.
+    ///
+    /// # Arguments
+    ///
+    /// * `source_abs` - Absolute path to the source directory (dotfiles)
+    /// * `working_tree` - Working tree path (git root or source dir)
+    /// * `dest_abs` - Absolute path to the destination directory
+    /// * `root_entry` - Root entry path from config
+    /// * `variables` - User-defined and system variables
+    #[must_use]
+    pub fn with_guisu_context(
+        src_dir: String,
+        working_tree: String,
+        dst_dir: String,
+        root_entry: String,
+        variables: IndexMap<String, serde_json::Value>,
+    ) -> Self {
+        Self::new().with_variables(variables).with_guisu_info(
+            src_dir,
+            working_tree,
+            dst_dir,
+            root_entry,
+        )
+    }
+
     /// Set guisu-specific information with config
     #[must_use]
     pub fn with_guisu_info_and_config(

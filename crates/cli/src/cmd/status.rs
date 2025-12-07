@@ -283,18 +283,17 @@ fn run_impl(
 
     // Merge variables: guisu variables + config variables (config overrides)
     let mut all_variables = guisu_variables;
-    all_variables.extend(config.variables.iter().map(|(k, v)| (k.clone(), v.clone())));
+    all_variables.extend(config.variables.clone());
 
     // Create template engine with identities, template directory, and bitwarden provider
     let template_engine = crate::create_template_engine(source_dir, &identities, config);
 
     // Create content processor with real decryptor and renderer
     // Use Arc to share identity without unnecessary cloning
-    let identity_arc = if let Some(first) = identities.first() {
-        Arc::new(first.clone())
-    } else {
-        Arc::new(guisu_crypto::Identity::generate())
-    };
+    let identity_arc = identities.first().map_or_else(
+        || Arc::new(guisu_crypto::Identity::generate()),
+        |id| Arc::new(id.clone()),
+    );
     let decryptor = CryptoDecryptorAdapter::from_arc(identity_arc);
     let renderer = TemplateRendererAdapter::new(template_engine);
     let processor = ContentProcessor::new(decryptor, renderer);
@@ -321,14 +320,13 @@ fn run_impl(
     // Create template context with system variables and guisu info
     let working_tree = guisu_engine::git::find_working_tree(source_dir)
         .unwrap_or_else(|| source_dir.to_path_buf());
-    let template_context = guisu_template::TemplateContext::new()
-        .with_variables(all_variables)
-        .with_guisu_info(
-            source_abs.to_string(),
-            working_tree.display().to_string(),
-            dest_abs.to_string(),
-            config.general.root_entry.display().to_string(),
-        );
+    let template_context = guisu_template::TemplateContext::with_guisu_context(
+        source_abs.to_string(),
+        working_tree.display().to_string(),
+        dest_abs.to_string(),
+        config.general.root_entry.display().to_string(),
+        all_variables,
+    );
     let template_ctx_value =
         serde_json::to_value(&template_context).context("Failed to serialize template context")?;
 
