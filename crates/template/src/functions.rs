@@ -24,7 +24,8 @@ static HOME_DIR_CACHE: OnceLock<String> = OnceLock::new();
 
 // Regex cache - stores compiled regexes to avoid repeated compilation
 // Limited to 32 entries to prevent unbounded memory growth
-static REGEX_CACHE: OnceLock<Mutex<HashMap<String, regex::Regex>>> = OnceLock::new();
+// Uses RwLock for better concurrency - multiple readers can access simultaneously
+static REGEX_CACHE: OnceLock<std::sync::RwLock<HashMap<String, regex::Regex>>> = OnceLock::new();
 const MAX_REGEX_CACHE_SIZE: usize = 32;
 
 use secrecy::{ExposeSecret, SecretString};
@@ -317,13 +318,7 @@ pub fn from_json(value: &str) -> Result<Value, minijinja::Error> {
 /// ```
 #[must_use]
 pub fn trim(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.len() == value.len() {
-        // No trimming needed - avoid allocation
-        value.to_string()
-    } else {
-        trimmed.to_string()
-    }
+    value.trim().to_string()
 }
 
 /// Trim whitespace from the start (left) of a string
@@ -338,13 +333,7 @@ pub fn trim(value: &str) -> String {
 /// ```
 #[must_use]
 pub fn trim_start(value: &str) -> String {
-    let trimmed = value.trim_start();
-    if trimmed.len() == value.len() {
-        // No trimming needed - avoid allocation
-        value.to_string()
-    } else {
-        trimmed.to_string()
-    }
+    value.trim_start().to_string()
 }
 
 /// Trim whitespace from the end (right) of a string
@@ -359,13 +348,7 @@ pub fn trim_start(value: &str) -> String {
 /// ```
 #[must_use]
 pub fn trim_end(value: &str) -> String {
-    let trimmed = value.trim_end();
-    if trimmed.len() == value.len() {
-        // No trimming needed - avoid allocation
-        value.to_string()
-    } else {
-        trimmed.to_string()
-    }
+    value.trim_end().to_string()
 }
 
 /// Test if a string matches a regular expression
@@ -404,16 +387,30 @@ pub fn regex_match(text: &str, pattern: &str) -> Result<bool, minijinja::Error> 
 }
 
 /// Get a compiled regex from cache or compile and cache it
+///
+/// Uses `RwLock` for better concurrency - multiple threads can read from cache simultaneously.
+/// Only locks for writes when compiling new regexes.
 fn get_compiled_regex(pattern: &str) -> Result<regex::Regex, minijinja::Error> {
-    let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache_guard = cache.lock().expect("Regex cache mutex poisoned");
+    let cache = REGEX_CACHE.get_or_init(|| std::sync::RwLock::new(HashMap::new()));
 
-    // Check cache first
-    if let Some(re) = cache_guard.get(pattern) {
+    // Try read lock first (allows concurrent access)
+    {
+        let read_guard = cache.read().expect("Regex cache poisoned");
+        if let Some(re) = read_guard.get(pattern) {
+            return Ok(re.clone());
+        }
+    } // Read lock released here
+
+    // Cache miss - need to compile and insert
+    // Get write lock for modification
+    let mut write_guard = cache.write().expect("Regex cache poisoned");
+
+    // Double-check pattern (another thread might have inserted it while we waited for write lock)
+    if let Some(re) = write_guard.get(pattern) {
         return Ok(re.clone());
     }
 
-    // Cache miss - compile regex
+    // Compile regex
     let re = regex::RegexBuilder::new(pattern)
         .size_limit(10 * (1 << 20)) // 10MB
         .dfa_size_limit(2 * (1 << 20)) // 2MB
@@ -426,12 +423,12 @@ fn get_compiled_regex(pattern: &str) -> Result<regex::Regex, minijinja::Error> {
         })?;
 
     // Clear cache if it's getting too large (simple eviction strategy)
-    if cache_guard.len() >= MAX_REGEX_CACHE_SIZE {
-        cache_guard.clear();
+    if write_guard.len() >= MAX_REGEX_CACHE_SIZE {
+        write_guard.clear();
     }
 
     // Store in cache
-    cache_guard.insert(pattern.to_string(), re.clone());
+    write_guard.insert(pattern.to_string(), re.clone());
     Ok(re)
 }
 

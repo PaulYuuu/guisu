@@ -14,7 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 use walkdir::WalkDir;
@@ -1114,6 +1114,9 @@ impl SourceState {
             .collect();
 
         // Now process all files in parallel (metadata reading + attribute parsing)
+        // Pre-wrap root_path in Arc to avoid cloning in parallel error paths
+        let root_path_arc = Arc::new(root_path.to_path_buf());
+
         let entries: Result<Vec<_>> = file_paths
             .par_iter()
             .map(|path| {
@@ -1121,8 +1124,8 @@ impl SourceState {
                 let rel_path =
                     path.strip_prefix(root_path)
                         .map_err(|_| Error::InvalidPathPrefix {
-                            path: std::sync::Arc::new(path.clone()),
-                            base: std::sync::Arc::new(root_path.to_path_buf()),
+                            path: Arc::new(path.clone()),
+                            base: Arc::clone(&root_path_arc),
                         })?;
 
                 let source_rel_path = SourceRelPath::new(rel_path.to_path_buf())?;
