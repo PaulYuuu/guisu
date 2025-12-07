@@ -21,8 +21,8 @@ pub mod hash;
 pub mod hooks;
 pub mod processor;
 pub mod state;
-pub mod state_validator;
 pub mod system;
+pub mod validator;
 
 // Re-export path types from core
 pub use guisu_core::path::{AbsPath, RelPath, SourceRelPath};
