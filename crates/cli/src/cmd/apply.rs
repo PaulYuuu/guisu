@@ -212,7 +212,6 @@ fn filter_entries_to_apply<'a>(
     let mut entries: Vec<&TargetEntry> = target_state
         .entries()
         .filter(|entry| {
-            let path_str = entry.path().to_string();
             let target_path = entry.path();
 
             // Filter by files or directories
@@ -240,18 +239,19 @@ fn filter_entries_to_apply<'a>(
             // Skip if file is ignored
             if ignore_matcher.is_ignored(entry.path().as_path(), None) {
                 debug!(
-                    path = %path_str,
+                    path = %target_path,
                     "Skipping ignored file"
                 );
                 return false;
             }
 
-            // If file is marked as create-once and already exists, skip it
-            if metadata.is_create_once(&path_str) {
+            if let Some(path_str) = target_path.as_path().to_str()
+                && metadata.is_create_once(path_str)
+            {
                 let dest_path = dest_abs.join(entry.path());
                 if dest_path.as_path().exists() {
                     debug!(
-                        path = %path_str,
+                        path = %target_path,
                         "Skipping create-once file that already exists"
                     );
                     return false;
@@ -1274,6 +1274,7 @@ fn detect_config_drift(
             // Only check files
             let TargetEntry::File {
                 content: target_content,
+                content_hash: target_hash,
                 ..
             } = entry
             else {
@@ -1287,18 +1288,16 @@ fn detect_config_drift(
                 return None;
             }
 
-            // Get last written state from database
-            let path_str = entry.path().to_string();
-            let last_written_state = match guisu_engine::database::get_entry_state(db, &path_str) {
+            let path_str = entry.path().as_path().to_str()?;
+            let last_written_state = match guisu_engine::database::get_entry_state(db, path_str) {
                 Ok(Some(state)) => state,
-                Ok(None) => return None, // No previous state, can't detect drift
+                Ok(None) => return None,
                 Err(e) => {
-                    warn!(path = %path_str, error = %e, "Failed to read entry state");
+                    warn!(path = %entry.path(), error = %e, "Failed to read entry state");
                     return None;
                 }
             };
 
-            // Read actual content from destination
             let actual_content = match fs::read(dest_path.as_path()) {
                 Ok(content) => content,
                 Err(e) => {
@@ -1308,7 +1307,6 @@ fn detect_config_drift(
             };
 
             let actual_hash = guisu_engine::hash::hash_content(&actual_content);
-            let target_hash = guisu_engine::hash::hash_content(target_content);
 
             // Check for drift:
             // 1. actual != last_written (user modified)
@@ -1321,7 +1319,7 @@ fn detect_config_drift(
             let contents_differ = target_content != &actual_content;
 
             if user_modified && source_updated && contents_differ {
-                Some(path_str)
+                Some(path_str.to_string())
             } else {
                 None
             }

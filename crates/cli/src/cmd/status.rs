@@ -190,9 +190,11 @@ fn build_status_target_state(
                         }
 
                         let mode = attributes.mode();
+                        let content_hash = guisu_engine::hash::hash_content(&content);
                         target_state.add(TargetEntry::File {
                             path: target_path.clone(),
                             content,
+                            content_hash,
                             mode,
                         });
                     }

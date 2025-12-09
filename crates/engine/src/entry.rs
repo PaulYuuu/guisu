@@ -113,6 +113,9 @@ pub enum TargetEntry {
         /// File content (after template rendering and decryption)
         content: Vec<u8>,
 
+        /// Content hash (blake3) for fast drift detection
+        content_hash: [u8; 32],
+
         /// Unix file permissions mode (optional)
         mode: Option<u32>,
     },

@@ -1331,12 +1331,13 @@ impl TargetState {
                 let processed_content =
                     processor.process_file(&abs_source_path, attributes, context)?;
 
-                // Get the file mode from attributes
                 let mode = attributes.mode();
+                let content_hash = crate::hash::hash_content(&processed_content);
 
                 Ok(TargetEntry::File {
                     path: target_path.clone(),
                     content: processed_content,
+                    content_hash,
                     mode,
                 })
             }
