@@ -500,9 +500,7 @@ fn run_impl(
         let file_diffs =
             build_interactive_file_diffs(&target_state, filter_paths.as_ref(), &metadata, dest_abs);
 
-        if file_diffs.is_empty() {
-            println!("No differences to display");
-        } else {
+        if !file_diffs.is_empty() {
             let mut viewer = InteractiveDiffViewer::new(file_diffs);
             viewer.run()?;
         }
@@ -1201,7 +1199,7 @@ pub fn compare_and_print_hooks(
     stage: &str,
     platform: &str,
     config: &Config,
-    onchange_hashes: &std::collections::HashMap<String, Vec<u8>>,
+    onchange_hashes: &std::collections::HashMap<String, [u8; 32]>,
     onchange_rendered: &std::collections::HashMap<String, String>,
 ) -> bool {
     let last_names: HashSet<_> = last_hooks.iter().map(|h| h.name.as_str()).collect();
@@ -1257,7 +1255,7 @@ pub fn compare_and_print_hooks(
 
                 // Compare with saved hash
                 if let Some(saved_hash) = onchange_hashes.get(&hook.name) {
-                    if &current_hash != saved_hash {
+                    if current_hash != *saved_hash {
                         has_changes = true;
                     }
                 } else {

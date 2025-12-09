@@ -17,8 +17,8 @@ use subtle::ConstantTimeEq;
 /// For execution state (mode=once, mode=onchange), see engine/state.rs `HookState`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookConfigState {
-    /// blake3 hash of the configuration file content
-    pub config_hash: Vec<u8>,
+    /// blake3 hash of the configuration file content (fixed 32-byte array)
+    pub config_hash: [u8; 32],
 
     /// Last execution timestamp
     pub last_executed: SystemTime,
@@ -27,7 +27,7 @@ pub struct HookConfigState {
 impl Default for HookConfigState {
     fn default() -> Self {
         Self {
-            config_hash: Vec::new(),
+            config_hash: [0; 32],
             last_executed: SystemTime::UNIX_EPOCH,
         }
     }
@@ -52,7 +52,7 @@ impl HookConfigState {
     /// # Errors
     ///
     /// Returns an error if the config file cannot be read (e.g., file not found, permission denied, I/O error)
-    pub fn compute_config_hash(config_path: &Path) -> Result<Vec<u8>> {
+    pub fn compute_config_hash(config_path: &Path) -> Result<[u8; 32]> {
         let content = fs::read(config_path).map_err(|e| {
             Error::State(format!(
                 "Failed to read config file {}: {}",
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn test_default_state() {
         let state = HookConfigState::default();
-        assert!(state.config_hash.is_empty());
+        assert_eq!(state.config_hash, [0; 32]);
         assert_eq!(state.last_executed, SystemTime::UNIX_EPOCH);
     }
 

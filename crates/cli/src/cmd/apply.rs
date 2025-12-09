@@ -67,7 +67,7 @@ pub struct ApplyCommand {
 fn get_last_written_hash(
     db: &guisu_engine::state::RedbPersistentState,
     entry: &TargetEntry,
-) -> Option<Vec<u8>> {
+) -> Option<[u8; 32]> {
     match entry {
         TargetEntry::File { .. } => {
             let path_str = entry.path().to_string();
@@ -326,7 +326,7 @@ fn handle_interactive_conflict(
     let change_type = ConflictHandler::detect_change_type(
         entry,
         dest_abs,
-        last_written_hash.as_deref(),
+        last_written_hash.as_ref().map(|arr| &arr[..]),
         identities,
     )?;
 
@@ -366,7 +366,7 @@ fn handle_non_interactive_conflict(
     let change_type = ConflictHandler::detect_change_type(
         entry,
         dest_abs,
-        last_written_hash.as_deref(),
+        last_written_hash.as_ref().map(|arr| &arr[..]),
         identities,
     )?;
 
@@ -550,7 +550,7 @@ fn get_user_confirmations(
         if let Ok(Some(change_type)) = ConflictHandler::detect_change_type(
             entry,
             dest_abs,
-            last_written_hash.as_deref(),
+            last_written_hash.as_ref().map(|arr| &arr[..]),
             identities,
         ) {
             match change_type {

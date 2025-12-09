@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Result tuple from hook execution: (`cached_hash`, `rendered_content`, `execution_result`)
-type HookExecutionResult = (Option<Vec<u8>>, Option<String>, Result<()>);
+type HookExecutionResult = (Option<[u8; 32]>, Option<String>, Result<()>);
 
 /// Template rendering trait for hook scripts
 pub trait TemplateRenderer {
@@ -61,10 +61,10 @@ where
     once_executed: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// State from persistent storage (for checking already executed once hooks)
     persistent_once: std::collections::HashSet<String>,
-    /// Content hashes for onchange hooks from persistent storage
-    persistent_onchange: std::collections::HashMap<String, Vec<u8>>,
-    /// Content hashes for onchange hooks executed in this session (thread-safe)
-    onchange_hashes: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    /// Content hashes for onchange hooks from persistent storage (blake3 hashes, 32 bytes)
+    persistent_onchange: std::collections::HashMap<String, [u8; 32]>,
+    /// Content hashes for onchange hooks executed in this session (thread-safe, blake3 hashes, 32 bytes)
+    onchange_hashes: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, [u8; 32]>>>,
     /// Rendered content for onchange hooks executed in this session (thread-safe)
     onchange_rendered: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
 }
@@ -139,7 +139,7 @@ where
     /// # Panics
     ///
     /// Panics if the mutex is poisoned (should never happen in normal operation)
-    pub fn get_onchange_hashes(&self) -> std::collections::HashMap<String, Vec<u8>> {
+    pub fn get_onchange_hashes(&self) -> std::collections::HashMap<String, [u8; 32]> {
         self.onchange_hashes
             .lock()
             .expect("OnChange hashes mutex poisoned")
@@ -168,7 +168,7 @@ where
     fn should_skip_hook(
         &self,
         hook: &Hook,
-    ) -> (bool, &'static str, Option<Vec<u8>>, Option<String>) {
+    ) -> (bool, &'static str, Option<[u8; 32]>, Option<String>) {
         match hook.mode {
             HookMode::Always => {
                 tracing::trace!("Hook will run (mode=always)");
@@ -270,7 +270,7 @@ where
     fn mark_hook_executed(
         &self,
         hook: &Hook,
-        cached_hash: Option<Vec<u8>>,
+        cached_hash: Option<[u8; 32]>,
         rendered_content: Option<String>,
     ) {
         match hook.mode {
@@ -955,7 +955,7 @@ where
     env_vars: IndexMap<String, String>,
     template_renderer: R,
     persistent_once: std::collections::HashSet<String>,
-    persistent_onchange: std::collections::HashMap<String, Vec<u8>>,
+    persistent_onchange: std::collections::HashMap<String, [u8; 32]>,
 }
 
 impl<'a> HookRunnerBuilder<'a, NoOpRenderer> {
@@ -1044,7 +1044,7 @@ where
     pub fn persistent_state(
         mut self,
         once_executed: std::collections::HashSet<String>,
-        onchange_hashes: std::collections::HashMap<String, Vec<u8>>,
+        onchange_hashes: std::collections::HashMap<String, [u8; 32]>,
     ) -> Self {
         self.persistent_once = once_executed;
         self.persistent_onchange = onchange_hashes;
@@ -1215,7 +1215,10 @@ mod tests {
         once_executed.insert("hook1".to_string());
 
         let mut onchange_hashes = HashMap::new();
-        onchange_hashes.insert("hook2".to_string(), vec![0x12, 0x34]);
+        let mut hash = [0u8; 32];
+        hash[0] = 0x12;
+        hash[1] = 0x34;
+        onchange_hashes.insert("hook2".to_string(), hash);
 
         let runner = HookRunnerBuilder::new(&collections, temp.path())
             .persistent_state(once_executed.clone(), onchange_hashes.clone())
@@ -1422,7 +1425,11 @@ mod tests {
 
         // Store hash for different content
         let mut persistent_onchange = HashMap::new();
-        persistent_onchange.insert("test".to_string(), vec![0x00, 0x11, 0x22]);
+        let mut different_hash = [0u8; 32];
+        different_hash[0] = 0x00;
+        different_hash[1] = 0x11;
+        different_hash[2] = 0x22;
+        persistent_onchange.insert("test".to_string(), different_hash);
 
         let runner = HookRunnerBuilder::new(&collections, temp.path())
             .persistent_state(HashSet::new(), persistent_onchange)
@@ -1469,9 +1476,12 @@ mod tests {
         let runner = HookRunner::new(&collections, temp.path());
 
         let hook = create_test_hook("test", HookMode::OnChange);
-        let cached_hash = vec![0x12, 0x34, 0x56];
+        let mut cached_hash = [0u8; 32];
+        cached_hash[0] = 0x12;
+        cached_hash[1] = 0x34;
+        cached_hash[2] = 0x56;
 
-        runner.mark_hook_executed(&hook, Some(cached_hash.clone()), None);
+        runner.mark_hook_executed(&hook, Some(cached_hash), None);
 
         // Should be in onchange_hashes
         let hashes = runner.onchange_hashes.lock().unwrap();
@@ -1522,21 +1532,26 @@ mod tests {
         let collections = HookCollections::default();
         let runner = HookRunner::new(&collections, temp.path());
 
+        let mut hash1 = [0u8; 32];
+        hash1[0] = 0x12;
+        let mut hash2 = [0u8; 32];
+        hash2[0] = 0x34;
+
         runner
             .onchange_hashes
             .lock()
             .unwrap()
-            .insert("hook1".to_string(), vec![0x12]);
+            .insert("hook1".to_string(), hash1);
         runner
             .onchange_hashes
             .lock()
             .unwrap()
-            .insert("hook2".to_string(), vec![0x34]);
+            .insert("hook2".to_string(), hash2);
 
         let hashes = runner.get_onchange_hashes();
         assert_eq!(hashes.len(), 2);
-        assert_eq!(hashes.get("hook1"), Some(&vec![0x12]));
-        assert_eq!(hashes.get("hook2"), Some(&vec![0x34]));
+        assert_eq!(hashes.get("hook1"), Some(&hash1));
+        assert_eq!(hashes.get("hook2"), Some(&hash2));
     }
 
     // ======================================================================

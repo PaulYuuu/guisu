@@ -17,6 +17,9 @@ use std::path::Path;
 /// blake3 achieves ~3-10 GB/s throughput on modern CPUs through SIMD optimization
 /// and parallel processing, making it 3-10x faster than SHA256.
 ///
+/// Returns a fixed-size array allocated on the stack (zero heap allocations),
+/// which is more efficient than returning a `Vec<u8>` for comparison operations.
+///
 /// # Security
 ///
 /// blake3 is cryptographically secure and suitable for:
@@ -34,8 +37,8 @@ use std::path::Path;
 /// assert_eq!(hash.len(), 32); // 256-bit hash
 /// ```
 #[must_use]
-pub fn hash_content(content: &[u8]) -> Vec<u8> {
-    blake3::hash(content).as_bytes().to_vec()
+pub fn hash_content(content: &[u8]) -> [u8; 32] {
+    *blake3::hash(content).as_bytes()
 }
 
 /// Hash a large file with buffered reading
@@ -47,6 +50,8 @@ pub fn hash_content(content: &[u8]) -> Vec<u8> {
 ///
 /// For files larger than 1MB, this is more efficient than reading the
 /// entire file into memory before hashing.
+///
+/// Returns a fixed-size array allocated on the stack (zero heap allocations).
 ///
 /// # Examples
 ///
@@ -64,12 +69,12 @@ pub fn hash_content(content: &[u8]) -> Vec<u8> {
 /// # Errors
 ///
 /// Returns an error if the file cannot be opened or read.
-pub fn hash_file(path: &Path) -> IoResult<Vec<u8>> {
+pub fn hash_file(path: &Path) -> IoResult<[u8; 32]> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut hasher = blake3::Hasher::new();
     std::io::copy(&mut reader, &mut hasher)?;
-    Ok(hasher.finalize().as_bytes().to_vec())
+    Ok(*hasher.finalize().as_bytes())
 }
 
 #[cfg(test)]

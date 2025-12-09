@@ -463,7 +463,7 @@ mod tests {
 
     // Helper function to create hash from string using blake3
     fn hash(s: &str) -> Vec<u8> {
-        guisu_engine::hash::hash_content(s.as_bytes())
+        guisu_engine::hash::hash_content(s.as_bytes()).to_vec()
     }
 
     // Tests for compare_three_way function

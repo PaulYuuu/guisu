@@ -59,16 +59,16 @@ pub struct HookState {
     #[serde(with = "systemtime_serde")]
     #[bincode(with_serde)]
     pub last_executed: Option<std::time::SystemTime>,
-    /// blake3 hash of the hooks directory content
-    pub content_hash: Option<Vec<u8>>,
+    /// blake3 hash of the hooks directory content (fixed 32-byte array)
+    pub content_hash: Option<[u8; 32]>,
     /// Names of hooks that have been executed with mode=once
     /// These hooks will never be executed again unless state is reset
     #[serde(default)]
     pub once_executed: std::collections::HashSet<String>,
     /// Content hashes for hooks with mode=onchange
-    /// Maps hook name to blake3 hash of its content (cmd or script)
+    /// Maps hook name to blake3 hash of its content (cmd or script, fixed 32-byte array)
     #[serde(default)]
-    pub onchange_hashes: std::collections::HashMap<String, Vec<u8>>,
+    pub onchange_hashes: std::collections::HashMap<String, [u8; 32]>,
     /// Rendered content for hooks with mode=onchange (for diff display)
     /// Maps hook name to rendered script content
     #[serde(default)]
@@ -117,7 +117,7 @@ impl HookState {
     }
 
     /// Update the content hash for a hook with mode=onchange
-    pub fn update_onchange_hash(&mut self, hook_name: String, content_hash: Vec<u8>) {
+    pub fn update_onchange_hash(&mut self, hook_name: String, content_hash: [u8; 32]) {
         self.onchange_hashes.insert(hook_name, content_hash);
     }
 
@@ -192,7 +192,7 @@ impl HookState {
     /// 2. Reading files and computing hashes in parallel
     /// 3. Sorting by path for deterministic ordering
     /// 4. Computing a final combined hash
-    fn compute_directory_hash(dir: &Path) -> Result<Vec<u8>> {
+    fn compute_directory_hash(dir: &Path) -> Result<[u8; 32]> {
         use rayon::prelude::*;
 
         // First pass: collect all file paths (must be sequential due to WalkDir)
@@ -206,7 +206,7 @@ impl HookState {
 
         // Second pass: parallel processing of files (read + hash)
         // This is where the performance benefit comes from for large hook directories
-        let file_hashes: Result<Vec<(String, Vec<u8>)>> = file_paths
+        let file_hashes: Result<Vec<(String, [u8; 32])>> = file_paths
             .par_iter()
             .map(|path| {
                 // Get relative path
@@ -240,7 +240,7 @@ impl HookState {
             hasher.update(&hash);
         }
 
-        Ok(hasher.finalize().as_bytes().to_vec())
+        Ok(*hasher.finalize().as_bytes())
     }
 
     /// Serialize to bytes for database storage using bincode
@@ -800,15 +800,15 @@ impl PersistentState for RedbPersistentState {
 /// Compute blake3 hash of data
 #[inline]
 #[must_use]
-pub fn hash_data(data: &[u8]) -> Vec<u8> {
+pub fn hash_data(data: &[u8]) -> [u8; 32] {
     hash::hash_content(data)
 }
 
 /// Entry state - tracks file state
 #[derive(Debug, Clone, PartialEq, Eq, bincode::Encode, bincode::Decode)]
 pub struct EntryState {
-    /// blake3 hash of the file content
-    pub content_hash: Vec<u8>,
+    /// blake3 hash of the file content (fixed 32-byte array)
+    pub content_hash: [u8; 32],
     /// File mode/permissions (Unix only)
     pub mode: Option<u32>,
 }
@@ -845,8 +845,8 @@ impl EntryState {
 /// Script state - tracks script execution
 #[derive(Debug, Clone, PartialEq, Eq, bincode::Encode, bincode::Decode)]
 pub struct ScriptState {
-    /// blake3 hash of the script content
-    pub content_hash: Vec<u8>,
+    /// blake3 hash of the script content (fixed 32-byte array)
+    pub content_hash: [u8; 32],
 }
 
 impl ScriptState {
@@ -883,9 +883,9 @@ impl ScriptState {
 /// This enables caching: if the template hasn't changed, we can use the cached rendered config.
 #[derive(Debug, Clone, PartialEq, Eq, bincode::Encode, bincode::Decode)]
 pub struct ConfigMetadata {
-    /// blake3 hash of the config template source file
+    /// blake3 hash of the config template source file (fixed 32-byte array)
     /// Used to detect changes in .guisu.toml.j2
-    pub template_hash: Vec<u8>,
+    pub template_hash: [u8; 32],
     /// Rendered TOML configuration string
     /// Result of processing the template with full context
     pub rendered_config: String,
@@ -1405,5 +1405,64 @@ impl TargetState {
 impl Default for TargetState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod bincode_compat_verification {
+    use super::*;
+
+    #[derive(Debug, bincode::Encode, bincode::Decode)]
+    struct OldEntryState {
+        content_hash: Vec<u8>,
+        mode: Option<u32>,
+    }
+
+    #[test]
+    fn verify_vec_to_array_breaks_compatibility() {
+        // 模拟旧数据库中的 EntryState (使用 Vec<u8>)
+        let old = OldEntryState {
+            content_hash: vec![0xAB; 32],
+            mode: Some(0o644),
+        };
+
+        let old_bytes = bincode::encode_to_vec(&old, bincode::config::standard()).unwrap();
+        println!("\n=== Bincode 兼容性测试 ===");
+        println!("旧格式 Vec<u8>(len=32): {} bytes", old_bytes.len());
+
+        // 尝试用新的 EntryState ([u8; 32]) 读取旧数据
+        let result = EntryState::from_bytes(&old_bytes);
+
+        if result.is_some() {
+            println!("❌ 警告: 竟然能读取! 这不应该发生!");
+            panic!("Vec<u8> 和 [u8; 32] 应该不兼容!");
+        } else {
+            println!("✅ 确认: Vec<u8> → [u8; 32] 是破坏性变更");
+            println!("   旧数据库将无法读取!");
+        }
+    }
+
+    #[test]
+    fn compare_serialization_sizes() {
+        // Vec<u8> 格式 (旧)
+        let old = OldEntryState {
+            content_hash: vec![0x12; 32],
+            mode: Some(0o644),
+        };
+        let old_bytes = bincode::encode_to_vec(&old, bincode::config::standard()).unwrap();
+
+        // [u8; 32] 格式 (新)
+        let new = EntryState::new(&[0x12; 32], Some(0o644));
+        let new_bytes = new.to_bytes().unwrap();
+
+        println!("\n=== 序列化大小对比 ===");
+        println!("Vec<u8>:   {} bytes (包含长度前缀)", old_bytes.len());
+        println!("[u8; 32]:  {} bytes (无长度前缀)", new_bytes.len());
+        println!(
+            "差异: {} bytes",
+            old_bytes.len() as i32 - new_bytes.len() as i32
+        );
+
+        assert_ne!(old_bytes.len(), new_bytes.len(), "序列化格式完全不同!");
     }
 }
