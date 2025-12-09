@@ -15,7 +15,6 @@ use guisu_config::Config;
 
 use serde::Serialize;
 
-// Constants - use &'static str for zero allocations (#4)
 const NOT_FOUND: &str = "not found";
 const SOME_FILES_NOT_FOUND: &str = "some files not found";
 const UNCOMMITTED_CHANGES: &str = "uncommitted changes";
@@ -36,7 +35,7 @@ struct InfoData {
 struct GuisuInfo {
     version: String,
     config: String,
-    config_exists: bool, // #2: Changed from Option<String> config_note
+    config_exists: bool,
     editor: Option<String>,
 }
 
@@ -56,7 +55,7 @@ struct SystemInfo {
 
 #[derive(Debug, Serialize)]
 struct GitInfo {
-    version: Option<&'static str>, // #4: Changed from Option<String>
+    version: Option<&'static str>,
     repository: Option<String>,
     branch: Option<String>,
     sha: Option<String>,
@@ -66,11 +65,11 @@ struct GitInfo {
 #[derive(Debug, Serialize)]
 struct AgeInfo {
     identities: Vec<String>,
-    all_files_exist: bool, // #3: Changed from Option<String> status
-    derive: String,        // #1: Changed from Option<String> (always has value)
+    all_files_exist: bool,
+    derive: String,
     public_keys: Vec<String>,
-    recipient_count: Option<usize>, // #14: Changed from Option<String> ("3 keys")
-    version: Option<&'static str>,  // #4: Changed from Option<String>
+    recipient_count: Option<usize>,
+    version: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -118,14 +117,11 @@ fn run_impl(source_dir: &Path, config: &Config, all: bool, json: bool) -> Result
 fn gather_info(source_dir: &Path, config: &Config, all: bool) -> InfoData {
     debug!("Gathering system information");
 
-    // Guisu information
     let guisu_version = env!("CARGO_PKG_VERSION").to_string();
-    let config_file_path = find_config_file(source_dir); // #12: Returns Option<PathBuf>
+    let config_file_path = find_config_file(source_dir);
 
-    // Build information (only in --all mode)
     let build_info = if all {
         Some(BuildInfo {
-            // #5: Simplified BuildInfo parsing
             rustc: option_env!("VERGEN_RUSTC_SEMVER")
                 .unwrap_or(env!("CARGO_PKG_RUST_VERSION"))
                 .to_string(),
@@ -134,35 +130,25 @@ fn gather_info(source_dir: &Path, config: &Config, all: bool) -> InfoData {
                     .ok()
                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
             }),
-            git_sha: option_env!("VERGEN_GIT_SHA").map(str::to_string), // #5: Use str::to_string
+            git_sha: option_env!("VERGEN_GIT_SHA").map(str::to_string),
         })
     } else {
         None
     };
 
-    // System information
     let os = get_os_name();
     let architecture = std::env::consts::ARCH.to_string();
     let kernel = all.then(get_kernel_version);
 
-    // Git information - #8: Return GitInfo directly (removed GitInfoResult)
-    let git = get_git_info(source_dir);
-
-    // Age encryption information - #9: Return AgeInfo directly (removed AgeInfoResult)
+    let git = get_git_info(source_dir, all);
     let age = get_age_info(config, all);
-
-    // Bitwarden information - #10: Return BitwardenInfo directly (removed BitwardenInfoResult)
     let bitwarden = get_bitwarden_info(config, all);
 
-    // Config display: filename in normal mode, full path in --all mode
-    // #2: Simplified using config_exists: bool instead of config_note
     let (config_display, config_exists) = match config_file_path {
         Some(ref path) => {
             let display = if all {
-                // All mode: show full path
                 path.display().to_string()
             } else {
-                // Normal mode: show filename only
                 path.file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or_else(|| path.to_str().unwrap_or(NOT_FOUND))
@@ -178,7 +164,7 @@ fn gather_info(source_dir: &Path, config: &Config, all: bool) -> InfoData {
             version: guisu_version,
             config: config_display,
             config_exists,
-            editor: all.then(|| config.general.editor.clone()).flatten(), // #13: Keeping as-is (this is actually idiomatic)
+            editor: all.then(|| config.general.editor.clone()).flatten(),
         },
         build: build_info,
         system: SystemInfo {
@@ -193,7 +179,6 @@ fn gather_info(source_dir: &Path, config: &Config, all: bool) -> InfoData {
 }
 
 /// Find config file path
-/// #12: Changed to return Option<PathBuf> instead of Option<String>
 fn find_config_file(source_dir: &Path) -> Option<PathBuf> {
     let config_path = source_dir.join(".guisu.toml");
     let template_path = source_dir.join(".guisu.toml.j2");
@@ -208,9 +193,7 @@ fn find_config_file(source_dir: &Path) -> Option<PathBuf> {
 }
 
 /// Get git repository information
-/// #8: Removed `GitInfoResult` struct, return `GitInfo` directly
-fn get_git_info(source_dir: &Path) -> GitInfo {
-    // Check if source_dir is a git repository
+fn get_git_info(source_dir: &Path, all: bool) -> GitInfo {
     if !source_dir.join(".git").exists() {
         return GitInfo {
             version: None,
@@ -221,22 +204,18 @@ fn get_git_info(source_dir: &Path) -> GitInfo {
         };
     }
 
-    // Try to get git information using git2
     match git2::Repository::open(source_dir) {
         Ok(repo) => {
-            // Get repository URL
             let repository = repo
                 .find_remote("origin")
                 .ok()
                 .and_then(|remote| remote.url().map(str::to_string));
 
-            // Get current branch
             let branch = repo
                 .head()
                 .ok()
                 .and_then(|head| head.shorthand().map(str::to_string))
                 .or_else(|| {
-                    // If HEAD doesn't exist (no commits yet), parse .git/HEAD file
                     let git_head = source_dir.join(".git").join("HEAD");
                     std::fs::read_to_string(git_head).ok().and_then(|content| {
                         content
@@ -245,22 +224,25 @@ fn get_git_info(source_dir: &Path) -> GitInfo {
                     })
                 });
 
-            // Get HEAD commit SHA
-            // #11: Using pattern matching instead of .expect()
-            let sha = repo.head().ok().and_then(|head| {
-                head.peel_to_commit()
-                    .ok()
-                    .map(|commit| commit.id().to_string()[..8].to_string())
-            });
+            let sha = if all {
+                repo.head().ok().and_then(|head| {
+                    head.peel_to_commit()
+                        .ok()
+                        .map(|commit| commit.id().to_string()[..8].to_string())
+                })
+            } else {
+                None
+            };
 
-            // Check if working tree is dirty (exclude ignored files)
-            let dirty = {
+            let dirty = if all {
                 let mut opts = git2::StatusOptions::new();
                 opts.include_untracked(true);
                 opts.include_ignored(false);
                 repo.statuses(Some(&mut opts))
                     .map(|statuses| !statuses.is_empty())
                     .unwrap_or(false)
+            } else {
+                false
             };
 
             GitInfo {
@@ -282,12 +264,8 @@ fn get_git_info(source_dir: &Path) -> GitInfo {
 }
 
 /// Get bitwarden provider and command version
-/// #10: Removed `BitwardenInfoResult`, return `BitwardenInfo` directly
 fn get_bitwarden_info(config: &Config, all: bool) -> BitwardenInfo {
-    // #6: Use reference instead of clone
     let provider = &config.bitwarden.provider;
-
-    // Get command version based on provider
     let version = ProcessCommand::new(provider)
         .arg("--version")
         .output()
@@ -296,12 +274,10 @@ fn get_bitwarden_info(config: &Config, all: bool) -> BitwardenInfo {
         .and_then(|output| {
             let version_str = String::from_utf8_lossy(&output.stdout);
             let trimmed = version_str.trim();
-            // Remove provider prefix (e.g., "rbw 1.14.1" -> "1.14.1")
             let cleaned = trimmed
                 .strip_prefix("rbw ")
                 .or_else(|| trimmed.strip_prefix("bw "))
                 .unwrap_or(trimmed);
-            // Only include version in --all mode
             all.then(|| cleaned.to_string())
         });
 
@@ -311,11 +287,10 @@ fn get_bitwarden_info(config: &Config, all: bool) -> BitwardenInfo {
     }
 }
 
-/// Get kernel version using rustix uname system call
+/// Get kernel version
 fn get_kernel_version() -> String {
     #[cfg(unix)]
     {
-        // Safe: rustix provides a safe wrapper around uname()
         let info = rustix::system::uname();
         let release = info.release().to_string_lossy().to_string();
         if release.is_empty() {
@@ -345,9 +320,7 @@ fn get_os_name() -> String {
 }
 
 /// Get age encryption information
-/// #9: Removed `AgeInfoResult`, return `AgeInfo` directly with optimized fields
 fn get_age_info(config: &Config, all: bool) -> AgeInfo {
-    // Collect all configured identity file paths
     let identity_paths: Vec<&PathBuf> = config
         .age
         .identity
@@ -355,14 +328,13 @@ fn get_age_info(config: &Config, all: bool) -> AgeInfo {
         .chain(config.age.identities.iter().flatten())
         .collect();
 
-    // If no identities configured, use default path for display
     if identity_paths.is_empty() {
         let default_path = guisu_config::dirs::default_age_identity()
             .unwrap_or_else(|| PathBuf::from("~/.config/guisu/key.txt"));
         return AgeInfo {
             identities: vec![default_path.display().to_string()],
-            all_files_exist: false, // #3: Using bool instead of Option<String>
-            derive: config.age.derive.to_string(), // #1: Always has value, no Option
+            all_files_exist: false,
+            derive: config.age.derive.to_string(),
             public_keys: vec![],
             recipient_count: None,
             version: None,
@@ -374,33 +346,29 @@ fn get_age_info(config: &Config, all: bool) -> AgeInfo {
         .map(|p| p.display().to_string())
         .collect();
 
-    // Check if all files exist - #3: Store as bool instead of Option<String>
     let all_files_exist = identity_paths.iter().all(|p| p.exists());
 
-    // Try to extract public keys (only in --all mode)
     let public_keys = if all {
         extract_public_keys(config)
     } else {
         Vec::new()
     };
 
-    // #14: Use recipient_count: Option<usize> instead of Option<String>
     let recipient_count =
         (all && !config.age.recipients.is_empty()).then_some(config.age.recipients.len());
 
     AgeInfo {
         identities: identity_files,
         all_files_exist,
-        derive: config.age.derive.to_string(), // #1: Always has value
+        derive: config.age.derive.to_string(),
         public_keys,
         recipient_count,
-        version: all.then_some(BUILTIN), // #4: Use &'static str
+        version: all.then_some(BUILTIN),
     }
 }
 
 /// Extract all public keys from configured identities
 fn extract_public_keys(config: &Config) -> Vec<String> {
-    // Load all configured identities and return all public keys
     match config.age_identities() {
         Ok(identities) => identities
             .iter()
@@ -471,7 +439,6 @@ fn display_system_section(system: &SystemInfo) {
 }
 
 /// Display git repository information
-/// #7: Simplified Git dirty display logic
 fn display_git_section(git: &GitInfo) {
     if git.version.is_some()
         || git.repository.is_some()
@@ -489,8 +456,7 @@ fn display_git_section(git: &GitInfo) {
         }
 
         if let Some(branch) = git.branch.as_ref() {
-            let note = git.dirty.then_some(UNCOMMITTED_CHANGES);
-            print_row("Branch", branch, !git.dirty, note);
+            print_row("Branch", branch, true, None);
         }
 
         if let Some(sha) = git.sha.as_ref() {
@@ -516,7 +482,6 @@ fn display_age_section(age: &AgeInfo) {
 
     display_age_public_keys(&age.public_keys);
 
-    // #14: Display recipient count directly
     if let Some(count) = age.recipient_count {
         let recipients_str = format!("{count} keys");
         print_row("Recipients", &recipients_str, true, None);
