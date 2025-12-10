@@ -238,7 +238,7 @@ mod tests {
         fs::write(&file_path, b"original content").unwrap();
 
         let mut state = HookConfigState::new(&file_path).unwrap();
-        let original_hash = state.config_hash.clone();
+        let original_hash = state.config_hash;
         let original_time = state.last_executed;
 
         // Small delay to ensure timestamp changes

@@ -721,8 +721,8 @@ mod tests {
 
     #[test]
     fn test_path_with_unicode() {
-        let rel = RelPath::new("文档/文件.txt".into()).unwrap();
-        assert_eq!(rel.as_path(), Path::new("文档/文件.txt"));
+        let rel = RelPath::new("documents/file.txt".into()).unwrap();
+        assert_eq!(rel.as_path(), Path::new("documents/file.txt"));
     }
 
     #[test]

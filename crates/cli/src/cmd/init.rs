@@ -7,7 +7,7 @@ use git2::{FetchOptions, RemoteCallbacks, Repository, SubmoduleUpdateOptions};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Run the init command
 ///
@@ -36,7 +36,6 @@ pub fn run(
     debug!(path = %target_path.display(), is_clone, "Initializing guisu");
 
     if is_clone {
-        // Clone from GitHub
         let repo_url = path_or_repo.expect("path_or_repo is Some when is_clone is true");
         clone_from_github(
             repo_url,
@@ -46,11 +45,6 @@ pub fn run(
             use_ssh,
             recurse_submodules,
         )?;
-        println!("\nGuisu dotfiles cloned successfully!");
-        println!("Source directory: {}", target_path.display());
-        println!("\nNext steps:");
-        println!("  1. Review files: guisu status");
-        println!("  2. Apply changes: guisu apply");
         return Ok(Some(target_path));
     }
 
@@ -137,34 +131,39 @@ fn clone_from_github(
         }
     };
 
-    info!(
-        url = %repo_url,
-        path = %target_path.display(),
-        depth = ?depth,
-        branch = ?branch,
-        use_ssh,
-        recurse_submodules,
-        "Cloning repository"
-    );
-    println!("Cloning from: {repo_url}");
-    if let Some(d) = depth {
-        println!("  Depth: {} commit{}", d, if d == 1 { "" } else { "s" });
-    }
-    if let Some(b) = branch {
-        println!("  Branch: {b}");
-    }
-    if recurse_submodules {
-        println!("  Recurse submodules: yes");
-    }
-    println!("Target directory: {}", target_path.display());
+    // Check if directory is already a git repository
+    if target_path.exists() {
+        if let Ok(existing_repo) = Repository::open(target_path) {
+            // Directory is already a git repository, skip cloning
+            if let Ok(remote) = existing_repo.find_remote("origin")
+                && let Some(existing_url) = remote.url()
+            {
+                // Check if user is trying to init a different repository
+                if existing_url != repo_url {
+                    warn!(
+                        "Source directory is using a different repository: {}",
+                        existing_url
+                    );
+                    return Ok(());
+                }
+                info!("Source directory is already initialized");
+                return Ok(());
+            }
 
-    // Remove target directory if it exists and is not empty
-    if target_path.exists() && target_path.read_dir()?.next().is_some() {
-        return Err(anyhow!(
-            "Target directory is not empty: {}",
-            target_path.display()
-        ));
+            info!("Source directory is already initialized");
+            return Ok(());
+        }
+
+        // Not a git repository, check if empty
+        if target_path.read_dir()?.next().is_some() {
+            return Err(anyhow!(
+                "Target directory is not empty and not a git repository: {}",
+                target_path.display()
+            ));
+        }
     }
+
+    info!("Cloning repository from {}", repo_url);
 
     let progress_bar = ProgressBar::new(100);
     progress_bar.set_style(
@@ -233,18 +232,13 @@ fn clone_from_github(
             )
         })?;
 
-    progress_bar.finish_with_message("Clone complete");
-    info!(path = %target_path.display(), "Repository cloned successfully");
+    progress_bar.finish_and_clear();
+    info!("Repository cloned successfully");
 
-    // Initialize submodules recursively if requested
     if recurse_submodules {
         debug!("Initializing submodules recursively");
-        println!("\nInitializing submodules...");
-
         init_submodules_recursive(&repo, target_path)?;
-
         info!("Submodules initialized successfully");
-        println!("✓ Submodules initialized");
     }
 
     Ok(())
@@ -293,7 +287,7 @@ fn init_submodules_recursive(repo: &Repository, repo_path: &Path) -> Result<()> 
             .update(true, Some(&mut update_options))
             .with_context(|| format!("Failed to update submodule '{name}'"))?;
 
-        println!("  Submodule: {name}");
+        debug!(name = %name, "Submodule initialized");
 
         // Recursively initialize submodules of this submodule
         let submodule_path = repo_path.join(&path);
@@ -307,24 +301,17 @@ fn init_submodules_recursive(repo: &Repository, repo_path: &Path) -> Result<()> 
 
 /// Initialize a local directory
 fn initialize_local_directory(path: &Path) -> Result<()> {
-    info!(path = %path.display(), "Initializing source directory");
-    println!("Initializing guisu source directory at: {}", path.display());
+    info!("Initializing source directory");
 
-    // Create the directory if it doesn't exist
     if path.exists() {
         debug!(path = %path.display(), "Directory already exists");
-        println!("Directory already exists: {}", path.display());
     } else {
         fs::create_dir_all(path)
             .with_context(|| format!("Failed to create directory: {}", path.display()))?;
         debug!(path = %path.display(), "Created directory");
-        println!("Created directory: {}", path.display());
     }
 
-    println!("\nGuisu source directory initialized successfully!");
-    println!("\nNext steps:");
-    println!("  1. Add files: guisu add ~/.bashrc");
-    println!("  2. Apply changes: guisu apply");
+    info!("Source directory initialized successfully");
 
     Ok(())
 }

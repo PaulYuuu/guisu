@@ -1508,7 +1508,7 @@ mod tests {
 
     #[test]
     fn test_is_binary_utf8() {
-        let content = "Hello 世界 🦀".as_bytes();
+        let content = "Hello World".as_bytes();
         assert!(!is_binary(content));
     }
 

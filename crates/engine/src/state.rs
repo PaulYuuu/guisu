@@ -1410,6 +1410,11 @@ impl Default for TargetState {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
 mod bincode_compat_verification {
     use super::*;
 
@@ -1421,49 +1426,54 @@ mod bincode_compat_verification {
 
     #[test]
     fn verify_vec_to_array_breaks_compatibility() {
-        // 模拟旧数据库中的 EntryState (使用 Vec<u8>)
+        // Simulate old EntryState in database (using Vec<u8>)
         let old = OldEntryState {
             content_hash: vec![0xAB; 32],
             mode: Some(0o644),
         };
 
-        let old_bytes = bincode::encode_to_vec(&old, bincode::config::standard()).unwrap();
-        println!("\n=== Bincode 兼容性测试 ===");
-        println!("旧格式 Vec<u8>(len=32): {} bytes", old_bytes.len());
+        let old_bytes =
+            bincode::encode_to_vec(&old, bincode::config::standard()).expect("Failed to encode");
+        println!("\n=== Bincode Compatibility Test ===");
+        println!("Old format Vec<u8>(len=32): {} bytes", old_bytes.len());
 
-        // 尝试用新的 EntryState ([u8; 32]) 读取旧数据
+        // Try to read old data with new EntryState ([u8; 32])
         let result = EntryState::from_bytes(&old_bytes);
 
         if result.is_some() {
-            println!("❌ 警告: 竟然能读取! 这不应该发生!");
-            panic!("Vec<u8> 和 [u8; 32] 应该不兼容!");
+            println!("Warning: Successfully read! This should not happen!");
+            panic!("Vec<u8> and [u8; 32] should be incompatible!");
         } else {
-            println!("✅ 确认: Vec<u8> → [u8; 32] 是破坏性变更");
-            println!("   旧数据库将无法读取!");
+            println!("Confirmed: Vec<u8> -> [u8; 32] is a breaking change");
+            println!("   Old database will not be readable!");
         }
     }
 
     #[test]
     fn compare_serialization_sizes() {
-        // Vec<u8> 格式 (旧)
+        // Vec<u8> format (old)
         let old = OldEntryState {
             content_hash: vec![0x12; 32],
             mode: Some(0o644),
         };
-        let old_bytes = bincode::encode_to_vec(&old, bincode::config::standard()).unwrap();
+        let old_bytes =
+            bincode::encode_to_vec(&old, bincode::config::standard()).expect("Failed to encode");
 
-        // [u8; 32] 格式 (新)
+        // [u8; 32] format (new)
         let new = EntryState::new(&[0x12; 32], Some(0o644));
-        let new_bytes = new.to_bytes().unwrap();
+        let new_bytes = new.to_bytes().expect("Failed to convert to bytes");
 
-        println!("\n=== 序列化大小对比 ===");
-        println!("Vec<u8>:   {} bytes (包含长度前缀)", old_bytes.len());
-        println!("[u8; 32]:  {} bytes (无长度前缀)", new_bytes.len());
-        println!(
-            "差异: {} bytes",
-            old_bytes.len() as i32 - new_bytes.len() as i32
+        println!("\n=== Serialization Size Comparison ===");
+        println!("Vec<u8>:   {} bytes (with length prefix)", old_bytes.len());
+        println!("[u8; 32]:  {} bytes (no length prefix)", new_bytes.len());
+
+        let size_diff = old_bytes.len().saturating_sub(new_bytes.len());
+        println!("Difference: {size_diff} bytes");
+
+        assert_ne!(
+            old_bytes.len(),
+            new_bytes.len(),
+            "Serialization formats are completely different!"
         );
-
-        assert_ne!(old_bytes.len(), new_bytes.len(), "序列化格式完全不同!");
     }
 }

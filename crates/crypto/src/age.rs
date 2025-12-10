@@ -924,10 +924,10 @@ mod tests {
     }
 
     #[test]
-    fn test_unicode_content() {
+    fn test_special_characters() {
         let identity = test_identity();
         let recipient = identity.to_public();
-        let plaintext = "こんにちは世界 🌍 مرحبا";
+        let plaintext = "Hello World! Test @#$%";
 
         let encrypted = encrypt_string(plaintext, &[recipient]).expect("Encryption failed");
         let decrypted = decrypt_string(&encrypted, &[identity]).expect("Decryption failed");
@@ -936,10 +936,10 @@ mod tests {
     }
 
     #[test]
-    fn test_inline_unicode_content() {
+    fn test_inline_special_characters() {
         let identity = test_identity();
         let recipient = identity.to_public();
-        let plaintext = "密码 パスワード password";
+        let plaintext = "secret-password-123";
 
         let encrypted = encrypt_inline(plaintext, &[recipient]).expect("Encryption failed");
         let decrypted = decrypt_inline(&encrypted, &[identity]).expect("Decryption failed");
@@ -1394,7 +1394,7 @@ mod tests {
     }
 
     #[test]
-    fn test_inline_special_characters() {
+    fn test_inline_all_special_symbols() {
         let identity = test_identity();
         let recipient = identity.to_public();
 

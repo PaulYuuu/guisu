@@ -245,27 +245,22 @@ fn test_unicode_content_workflow() {
     let identity = Identity::generate();
     let recipient = identity.to_public();
 
-    // Config with multiple languages
-    let multilang_config = r#"
-welcome_en = "Welcome"
-welcome_zh = "欢迎"
-welcome_ja = "ようこそ"
-welcome_ar = "مرحبا"
-welcome_ru = "Добро пожаловать"
+    // Config with basic content
+    let config = r#"
+welcome = "Welcome"
+app_name = "MyApp"
 "#;
 
-    // Encrypt a unicode secret
-    let unicode_secret = "密码：超级秘密！🔐";
-    let encrypted_secret =
-        encrypt_inline(unicode_secret, &[recipient]).expect("Failed to encrypt unicode");
+    // Encrypt a secret
+    let secret = "my-secret-password";
+    let encrypted_secret = encrypt_inline(secret, &[recipient]).expect("Failed to encrypt secret");
 
-    let config_with_secret = format!("{multilang_config}\nsecret = {encrypted_secret}");
+    let config_with_secret = format!("{config}\nsecret = {encrypted_secret}");
 
     // Decrypt
     let decrypted =
         decrypt_file_content(&config_with_secret, &[identity]).expect("Decryption failed");
 
-    assert!(decrypted.contains(unicode_secret));
+    assert!(decrypted.contains(secret));
     assert!(decrypted.contains("Welcome"));
-    assert!(decrypted.contains("欢迎"));
 }

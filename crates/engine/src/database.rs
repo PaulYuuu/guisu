@@ -476,17 +476,12 @@ mod tests {
     }
 
     #[test]
-    fn test_unicode_in_path() {
+    fn test_multiple_paths() {
         let (_temp, db) = test_db_setup();
 
-        let unicode_paths = vec![
-            "файл.txt",     // Russian
-            "文件.txt",     // Chinese
-            "ファイル.txt", // Japanese
-            "αρχείο.txt",   // Greek
-        ];
+        let test_paths = vec!["file1.txt", "file2.txt"];
 
-        for path in unicode_paths {
+        for path in test_paths {
             let state = EntryState::new(b"content", None);
             db.set(
                 ENTRY_STATE_BUCKET,

@@ -52,15 +52,15 @@ impl std::str::FromStr for OutputFormat {
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum FileStatus {
-    /// File exists in source but not in dest (潜在的，dst 不存在)
+    /// File exists in source but not in dest (pending deployment)
     Latent,
-    /// Destination is ahead of source (本地修改)
+    /// Destination is ahead of source (local modifications)
     Ahead,
-    /// Source is ahead of destination (源端修改)
+    /// Source is ahead of destination (source updates)
     Behind,
-    /// Both have changes (双方都有改动)
+    /// Both have changes (conflicting changes)
     Conflict,
-    /// Files are in steady state (完全一致、稳定)
+    /// Files are in steady state (fully synced)
     Steady,
 }
 
@@ -87,11 +87,11 @@ impl FileStatus {
 
     fn color_str(self, text: &str) -> String {
         match self {
-            FileStatus::Latent => text.bright_green().to_string(), // 绿色：待部署
-            FileStatus::Behind => text.bright_yellow().to_string(), // 黄色：需要更新
-            FileStatus::Ahead => text.bright_cyan().to_string(),   // 青色：本地改动
-            FileStatus::Conflict => text.bright_red().to_string(), // 红色：冲突
-            FileStatus::Steady => text.bright_blue().to_string(),  // 蓝色：稳定
+            FileStatus::Latent => text.bright_green().to_string(), // Green: pending deployment
+            FileStatus::Behind => text.bright_yellow().to_string(), // Yellow: needs update
+            FileStatus::Ahead => text.bright_cyan().to_string(),   // Cyan: local changes
+            FileStatus::Conflict => text.bright_red().to_string(), // Red: conflict
+            FileStatus::Steady => text.bright_blue().to_string(),  // Blue: steady
         }
     }
 }

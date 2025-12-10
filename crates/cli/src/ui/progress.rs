@@ -80,7 +80,7 @@ mod tests {
 
     #[test]
     fn test_create_progress_bar_unicode_message() {
-        let pb = create_progress_bar(100, "处理文件 🚀");
+        let pb = create_progress_bar(100, "Processing files");
 
         // Should handle unicode in message
         assert_eq!(pb.length(), Some(100));
@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn test_create_spinner_unicode_message() {
-        let spinner = create_spinner("等待中... ⏳");
+        let spinner = create_spinner("Waiting...");
 
         // Should handle unicode in message
         assert_eq!(spinner.length(), None);

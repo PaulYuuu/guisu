@@ -701,7 +701,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_detect_distro() {
-        let (name, id, version) = SystemInfo::detect_distro();
+        let (name, id, _version) = SystemInfo::detect_distro();
 
         // On Linux, should detect some distribution info
         // At minimum, one of these should be non-empty
