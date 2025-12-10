@@ -111,6 +111,7 @@ fn is_github_reference(input: &str) -> bool {
 }
 
 /// Clone a repository from GitHub
+#[allow(clippy::too_many_lines)]
 fn clone_from_github(
     repo_ref: &str,
     target_path: &Path,
@@ -165,17 +166,19 @@ fn clone_from_github(
         ));
     }
 
-    // Set up progress bar
     let progress_bar = ProgressBar::new(100);
     progress_bar.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}% {msg}")
+            .template("  {spinner:.cyan} {bar:50.cyan/black} {pos:>3}% {msg:.white.dim}")
             .expect("Invalid progress bar template")
-            .progress_chars("#>-"),
+            .progress_chars("━━╸ "),
     );
 
-    // Set up git2 callbacks for progress reporting
     let mut callbacks = RemoteCallbacks::new();
+    let git_config = git2::Config::open_default()
+        .unwrap_or_else(|_| git2::Config::new().expect("Failed to create git config"));
+    let mut credential_handler = git2_credentials::CredentialHandler::new(git_config);
+
     callbacks.transfer_progress(|stats| {
         let received = stats.received_objects();
         let total = stats.total_objects();
@@ -201,22 +204,22 @@ fn clone_from_github(
         true
     });
 
-    // Configure fetch options with callbacks
+    callbacks.credentials(move |url, username_from_url, allowed_types| {
+        credential_handler.try_next_credential(url, username_from_url, allowed_types)
+    });
+
     let mut fetch_options = FetchOptions::new();
     fetch_options.remote_callbacks(callbacks);
 
-    // Set depth for shallow clone if specified
     if let Some(depth_value) = depth {
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         fetch_options.depth(depth_value as i32);
     }
 
-    // Clone the repository
     debug!(url = %repo_url, path = %target_path.display(), "Starting git clone");
     let mut builder = git2::build::RepoBuilder::new();
     builder.fetch_options(fetch_options);
 
-    // Set branch if specified
     if let Some(branch_name) = branch {
         builder.branch(branch_name);
     }
@@ -271,10 +274,17 @@ fn init_submodules_recursive(repo: &Repository, repo_path: &Path) -> Result<()> 
         // Update the submodule (clone and checkout)
         let mut update_options = SubmoduleUpdateOptions::new();
 
-        // Set up fetch options with callbacks
+        // Set up fetch options with credentials
         let mut fetch_options = FetchOptions::new();
         let mut callbacks = RemoteCallbacks::new();
+        let git_config = git2::Config::open_default()
+            .unwrap_or_else(|_| git2::Config::new().expect("Failed to create git config"));
+        let mut credential_handler = git2_credentials::CredentialHandler::new(git_config);
+
         callbacks.transfer_progress(|_| true);
+        callbacks.credentials(move |url, username_from_url, allowed_types| {
+            credential_handler.try_next_credential(url, username_from_url, allowed_types)
+        });
         fetch_options.remote_callbacks(callbacks);
 
         update_options.fetch(fetch_options);

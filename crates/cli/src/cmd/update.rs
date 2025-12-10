@@ -11,16 +11,15 @@ use tracing::{debug, info, warn};
 
 use crate::command::Command;
 use crate::common::RuntimeContext;
-use guisu_config::Config;
 
 /// Update command
 #[derive(Args)]
 pub struct UpdateCommand {
     /// Apply changes after pulling (default: true)
-    #[arg(short, long, default_value_t = true)]
+    #[arg(short, long, default_value_t = true, hide_possible_values = true)]
     pub apply: bool,
 
-    /// Use rebase instead of merge when branches have diverged
+    /// Use rebase instead of merge when branches diverge
     #[arg(short, long)]
     pub rebase: bool,
 }
@@ -28,20 +27,12 @@ pub struct UpdateCommand {
 impl Command for UpdateCommand {
     type Output = ();
     fn execute(&self, context: &RuntimeContext) -> crate::error::Result<()> {
-        run_impl(
-            context.source_dir(),
-            context.dest_dir().as_path(),
-            self.apply,
-            self.rebase,
-            &context.config,
-        )
-        .map_err(Into::into)
+        run_impl(context, self.apply, self.rebase).map_err(Into::into)
     }
 }
 
 /// Validate source directory and open repository
 fn validate_and_open_repository(source_dir: &Path) -> Result<Repository> {
-    // Verify source directory exists
     if !source_dir.exists() {
         return Err(anyhow!(
             "Source directory does not exist: {}",
@@ -49,7 +40,6 @@ fn validate_and_open_repository(source_dir: &Path) -> Result<Repository> {
         ));
     }
 
-    // Open the repository
     Repository::open(source_dir).with_context(|| {
         format!(
             "Failed to open git repository at {}. Did you initialize with 'guisu init'?",
@@ -58,24 +48,71 @@ fn validate_and_open_repository(source_dir: &Path) -> Result<Repository> {
     })
 }
 
+/// Get the default remote for the repository
+fn get_default_remote(repo: &Repository) -> Result<String> {
+    if let Ok(head) = repo.head()
+        && let Some(branch_name) = head.shorthand()
+        && let Ok(branch) = repo.find_branch(branch_name, git2::BranchType::Local)
+        && let Ok(upstream) = branch.upstream()
+        && let Some(upstream_name) = upstream.name()?
+        && let Some(remote_name) = upstream_name.split('/').nth(2)
+    {
+        return Ok(remote_name.to_string());
+    }
+
+    let remotes = repo.remotes()?;
+    if let Some(first_remote) = remotes.get(0) {
+        Ok(first_remote.to_string())
+    } else {
+        Err(anyhow!(
+            "No remotes found. Make sure this repository has at least one remote."
+        ))
+    }
+}
+
+/// Get the upstream branch refspec for the current branch
+fn get_upstream_refspec(repo: &Repository) -> Result<Option<String>> {
+    if let Ok(head) = repo.head()
+        && let Some(branch_name) = head.shorthand()
+        && let Ok(branch) = repo.find_branch(branch_name, git2::BranchType::Local)
+        && let Ok(upstream) = branch.upstream()
+        && let Some(upstream_name) = upstream.name()?
+    {
+        // Extract branch name from refs/remotes/<remote>/<branch>
+        // e.g., "refs/remotes/origin/main" -> "main"
+        if let Some(branch_part) = upstream_name.strip_prefix("refs/remotes/")
+            && let Some((_remote, branch)) = branch_part.split_once('/')
+        {
+            return Ok(Some(branch.to_string()));
+        }
+    }
+    Ok(None)
+}
+
 /// Setup and perform fetch with progress bar
 fn setup_fetch_with_progress(repo: &Repository) -> Result<()> {
-    // Get the remote (default to "origin")
-    let mut remote = repo
-        .find_remote("origin")
-        .with_context(|| "No remote 'origin' found. Make sure this repository was cloned.")?;
+    let remote_name = get_default_remote(repo)?;
+    let mut remote = repo.find_remote(&remote_name)?;
 
-    // Set up progress bar for fetch
+    let refspecs = if let Some(branch) = get_upstream_refspec(repo)? {
+        vec![branch]
+    } else {
+        vec![]
+    };
+
     let progress_bar = ProgressBar::new(100);
     progress_bar.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}% {msg}")
+            .template("  {spinner:.cyan} {bar:50.cyan/black} {pos:>3}% {msg:.white.dim}")
             .expect("Invalid progress bar template")
-            .progress_chars("#>-"),
+            .progress_chars("━━╸ "),
     );
 
-    // Set up git2 callbacks for progress reporting
     let mut callbacks = RemoteCallbacks::new();
+    let git_config = git2::Config::open_default()
+        .unwrap_or_else(|_| git2::Config::new().expect("Failed to create git config"));
+    let mut credential_handler = git2_credentials::CredentialHandler::new(git_config);
+
     callbacks.transfer_progress(|stats| {
         let received = stats.received_objects();
         let total = stats.total_objects();
@@ -101,17 +138,19 @@ fn setup_fetch_with_progress(repo: &Repository) -> Result<()> {
         true
     });
 
-    // Configure fetch options with callbacks
+    callbacks.credentials(move |url, username_from_url, allowed_types| {
+        credential_handler.try_next_credential(url, username_from_url, allowed_types)
+    });
+
     let mut fetch_options = FetchOptions::new();
     fetch_options.remote_callbacks(callbacks);
     fetch_options.download_tags(AutotagOption::Auto);
 
-    // Fetch from remote
-    debug!("Fetching from remote origin");
+    debug!("Fetching from remote");
     progress_bar.set_message("Fetching updates...");
 
     remote
-        .fetch(&["HEAD"], Some(&mut fetch_options), None)
+        .fetch(&refspecs, Some(&mut fetch_options), None)
         .with_context(|| "Failed to fetch from remote. Check your network connection.")?;
 
     progress_bar.finish_and_clear();
@@ -121,7 +160,6 @@ fn setup_fetch_with_progress(repo: &Repository) -> Result<()> {
 
 /// Analyze fetch result and return merge analysis
 fn analyze_fetch_result(repo: &Repository) -> Result<AnnotatedCommit<'_>> {
-    // Get FETCH_HEAD to analyze what was fetched
     let fetch_head = repo
         .find_reference("FETCH_HEAD")
         .context("Failed to find FETCH_HEAD after fetch")?;
@@ -137,20 +175,16 @@ fn handle_merge_scenarios(
     source_dir: &Path,
     rebase: bool,
 ) -> Result<()> {
-    // Analyze the fetch
     let analysis = repo
         .merge_analysis(&[fetch_commit])
         .context("Failed to analyze merge")?;
 
-    // Handle different merge scenarios
     if analysis.0.is_up_to_date() {
         info!("Already up to date");
-        println!("✓ Already up to date");
         return Ok(());
     }
 
     if analysis.0.is_fast_forward() {
-        // Fast-forward merge
         debug!("Performing fast-forward merge");
         perform_fast_forward(repo, fetch_commit).context("Failed to perform fast-forward merge")?;
 
@@ -162,9 +196,7 @@ fn handle_merge_scenarios(
             if commit_count == 1 { "" } else { "s" }
         );
     } else if analysis.0.is_normal() {
-        // Normal merge required - branches have diverged
         if rebase {
-            // Perform rebase
             debug!("Performing rebase");
             println!("Branches have diverged. Rebasing local changes...");
 
@@ -202,10 +234,7 @@ fn handle_merge_scenarios(
 }
 
 /// Apply changes after update
-fn apply_changes_after_update(config: &Config, dotfiles_dir: &Path, dest_dir: &Path) -> Result<()> {
-    println!("\nApplying changes...");
-
-    // Create ApplyCommand with default options (all files)
+fn apply_changes_after_update(context: &RuntimeContext) -> Result<()> {
     let apply_cmd = crate::cmd::apply::ApplyCommand {
         files: vec![],
         dry_run: false,
@@ -215,30 +244,27 @@ fn apply_changes_after_update(config: &Config, dotfiles_dir: &Path, dest_dir: &P
         exclude: vec![],
     };
 
-    // Create RuntimeContext and execute
-    let context = crate::common::RuntimeContext::new(config.clone(), dotfiles_dir, dest_dir)?;
     apply_cmd
-        .execute(&context)
+        .execute(context)
         .context("Failed to apply changes")
-        .map(|_| ()) // Discard ApplyStats, return ()
+        .map(|_| ())
 }
 
 /// Run the update command implementation
 ///
 /// Pulls the latest changes from the remote repository and optionally applies them.
-fn run_impl(
-    source_dir: &Path,
-    dest_dir: &Path,
-    apply: bool,
-    rebase: bool,
-    config: &Config,
-) -> Result<()> {
-    let dotfiles_dir = config.dotfiles_dir(source_dir);
-
-    info!(path = %source_dir.display(), "Updating repository");
-    println!("Updating from: {}", source_dir.display());
-
+fn run_impl(context: &RuntimeContext, apply: bool, rebase: bool) -> Result<()> {
+    let source_dir = context.source_dir();
     let repo = validate_and_open_repository(source_dir)?;
+
+    let remote_name = get_default_remote(&repo)?;
+    let remote_url = repo
+        .find_remote(&remote_name)
+        .ok()
+        .and_then(|r| r.url().map(str::to_string))
+        .unwrap_or_else(|| source_dir.display().to_string());
+
+    info!("Updating repository from {}", remote_url);
 
     setup_fetch_with_progress(&repo)?;
 
@@ -246,12 +272,8 @@ fn run_impl(
 
     handle_merge_scenarios(&repo, &fetch_commit, source_dir, rebase)?;
 
-    // Apply changes if requested
     if apply {
-        apply_changes_after_update(config, &dotfiles_dir, dest_dir)?;
-    } else {
-        println!("\nTo apply these changes, run:");
-        println!("  guisu apply");
+        apply_changes_after_update(context)?;
     }
 
     Ok(())
@@ -259,14 +281,11 @@ fn run_impl(
 
 /// Perform a fast-forward merge
 fn perform_fast_forward(repo: &Repository, fetch_commit: &AnnotatedCommit) -> Result<()> {
-    // Get the commit object
     let commit_id = fetch_commit.id();
 
-    // Update HEAD to point to the new commit
     let main_ref_name = "refs/heads/main";
     let master_ref_name = "refs/heads/master";
 
-    // Try to find the current branch reference
     let reference = repo
         .find_reference("HEAD")
         .context("Failed to find HEAD reference")?;
@@ -274,7 +293,6 @@ fn perform_fast_forward(repo: &Repository, fetch_commit: &AnnotatedCommit) -> Re
     let reference = if reference.is_branch() {
         reference
     } else {
-        // Detached HEAD, try to find main or master branch
         repo.find_reference(main_ref_name)
             .or_else(|_| repo.find_reference(master_ref_name))
             .context("Failed to find main/master branch")?
@@ -284,16 +302,14 @@ fn perform_fast_forward(repo: &Repository, fetch_commit: &AnnotatedCommit) -> Re
         .name()
         .ok_or_else(|| anyhow!("Invalid reference name"))?;
 
-    // Update the reference to point to the new commit
     repo.reference(
         current_ref_name,
         commit_id,
-        true, // force
+        true,
         &format!("guisu update: fast-forward to {commit_id}"),
     )
     .context("Failed to update reference")?;
 
-    // Update the working directory
     repo.checkout_head(Some(
         git2::build::CheckoutBuilder::new()
             .force()
@@ -309,14 +325,12 @@ fn perform_fast_forward(repo: &Repository, fetch_commit: &AnnotatedCommit) -> Re
 fn perform_rebase(repo: &Repository, fetch_commit: &AnnotatedCommit) -> Result<()> {
     use git2::RebaseOptions;
 
-    // Get the current HEAD
     let head = repo.head().context("Failed to get HEAD")?;
     let head_commit_obj = head.peel_to_commit().context("Failed to get HEAD commit")?;
     let head_commit = repo
         .find_annotated_commit(head_commit_obj.id())
         .context("Failed to convert HEAD commit to annotated commit")?;
 
-    // Get current branch name for updating later
     let branch_name = head
         .shorthand()
         .ok_or_else(|| anyhow!("Failed to get branch name"))?
@@ -324,32 +338,26 @@ fn perform_rebase(repo: &Repository, fetch_commit: &AnnotatedCommit) -> Result<(
 
     debug!(branch = %branch_name, "Starting rebase");
 
-    // Initialize rebase
     let mut rebase_options = RebaseOptions::new();
     let mut rebase = repo
         .rebase(
-            Some(&head_commit), // branch to rebase (our local commits)
-            Some(fetch_commit), // upstream (their commits)
-            None,               // onto (use upstream)
+            Some(&head_commit),
+            Some(fetch_commit),
+            None,
             Some(&mut rebase_options),
         )
         .context("Failed to initialize rebase")?;
 
-    // Process each rebase operation
     while let Some(op) = rebase.next() {
         let operation = op.context("Failed to get rebase operation")?;
-
-        // Get the commit being rebased
         let commit_id = operation.id();
         debug!(commit = %commit_id, "Rebasing commit");
 
-        // Perform the rebase operation (apply the commit)
         rebase
             .commit(None, &repo.signature()?, None)
             .with_context(|| format!("Failed to apply commit {commit_id} during rebase"))?;
     }
 
-    // Finish the rebase
     rebase.finish(None).context("Failed to finish rebase")?;
 
     debug!("Rebase complete");
@@ -358,18 +366,15 @@ fn perform_rebase(repo: &Repository, fetch_commit: &AnnotatedCommit) -> Result<(
 
 /// Count how many new commits were pulled
 fn count_new_commits(repo: &Repository, new_commit: &AnnotatedCommit) -> Result<usize> {
-    // Get HEAD commit
     let head = repo.head().context("Failed to get HEAD")?;
     let head_commit = head
         .peel_to_commit()
         .context("Failed to peel HEAD to commit")?;
 
-    // Get the new commit
     let new_commit_obj = repo
         .find_commit(new_commit.id())
         .context("Failed to find new commit")?;
 
-    // Count commits between old HEAD and new commit
     let mut revwalk = repo.revwalk().context("Failed to create revwalk")?;
     revwalk
         .push(new_commit_obj.id())

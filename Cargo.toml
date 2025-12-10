@@ -68,6 +68,7 @@ rayon = "1.10"
 
 redb = "3.1"
 git2 = "0.20"
+git2_credentials = "0.15"
 similar = "2.7"
 os_info = "3.9"
 libc = "0.2"

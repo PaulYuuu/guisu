@@ -31,6 +31,7 @@ crossterm.workspace = true
 dialoguer = "0.12"
 dirs.workspace = true
 git2.workspace = true
+git2_credentials.workspace = true
 hex.workspace = true
 indexmap.workspace = true
 indicatif.workspace = true

@@ -146,30 +146,18 @@ Examples:
     #[command(subcommand)]
     Templates(TemplatesCommands),
 
-    /// Pull and apply any changes from the source repository
-    #[command(long_about = "Pull and apply any changes from the source repository
+    /// Pull and apply changes from the source repository
+    #[command(long_about = "Pull and apply changes from the source repository
 
-This command fetches the latest changes from the remote repository (origin)
-and fast-forwards your local repository. If --apply is true (default), it
-will also apply the changes to your destination directory.
-
-The update will fail if:
-  • The source directory is not a git repository
-  • There is no remote named 'origin'
-  • A fast-forward merge is not possible (diverged branches)
+Fetches the latest changes from the remote repository and applies them
+to your destination directory.
 
 Examples:
   • guisu update
-      → Pull changes and apply them
-
-  • guisu update --no-apply
-      → Pull changes without applying
-
-  • guisu update && guisu status
-      → Pull changes, apply, then check status
+      → Pull and apply changes
 
   • guisu update --rebase
-      → Use rebase instead of fast-forward when branches diverge")]
+      → Use rebase when branches diverge")]
     Update(cmd::update::UpdateCommand),
 
     /// Display guisu status information and validate configuration
